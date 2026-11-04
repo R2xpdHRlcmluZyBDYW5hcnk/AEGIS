@@ -21,10 +21,11 @@ try {
   const tab = await (await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: 'PUT' })).json();
   ws = new WebSocket(tab.webSocketDebuggerUrl);
   await new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = reject; });
-  const pending = new Map(), exceptions = [];
+  const pending = new Map(), exceptions = [], streamFailures=[];
   let id = 0;
   ws.onmessage = ({ data }) => {
     const message = JSON.parse(data);
+    if(message.method==='Network.responseReceived'&&message.params.response.url.includes('/api/stream?')&&message.params.response.status>=400)streamFailures.push(message.params.response.status);
     if (message.method === 'Runtime.exceptionThrown') exceptions.push(message.params.exceptionDetails);
     if (message.id && pending.has(message.id)) {
       const { resolve, reject } = pending.get(message.id); pending.delete(message.id);
@@ -53,7 +54,7 @@ try {
     throw new Error('Condition timed out: ' + expression + '\nBrowser exceptions: ' +
       JSON.stringify(exceptions) + '\nPage: ' + await evaluate('document.body.innerText.slice(-4500)'));
   }
-  await cdp('Runtime.enable');await cdp('Page.enable');
+  await cdp('Runtime.enable');await cdp('Page.enable');await cdp('Network.enable');
   await cdp('Emulation.setDeviceMetricsOverride',{width:1440,height:1100,deviceScaleFactor:1,mobile:false});
   await cdp('Page.navigate',{url:baseUrl+'/login'});await until(`!!document.querySelector('#password')`);
   await evaluate(`document.querySelector('#password').value='preview-only';document.querySelector('form').submit()`);await until(`!!document.querySelector('ndr-chart')`);
@@ -76,8 +77,8 @@ try {
   await cdp('Input.dispatchKeyEvent',{type:'keyDown',key:'Enter',code:'Enter',windowsVirtualKeyCode:13});await cdp('Input.dispatchKeyEvent',{type:'keyUp',key:'Enter',code:'Enter',windowsVirtualKeyCode:13});
   assert.equal(await evaluate(`document.querySelector('ndr-hunt-query input').value`),'rrname:');
   async function type(value){await evaluate(`(()=>{const e=document.querySelector('ndr-hunt-query input');e.value=${JSON.stringify(value)};e.dispatchEvent(new Event('input',{bubbles:true}));})()`);}
-  await type('证书');await until(`document.querySelectorAll('.query-options button').length===2`);
-  assert.deepEqual(await evaluate(`[...document.querySelectorAll('.query-options strong')].map(e=>e.textContent.split(':')[0]).sort()`),['issuer','subject']);
+  await type('证书');await until(`document.querySelectorAll('.query-options button').length===3`);
+  assert.deepEqual(await evaluate(`[...document.querySelectorAll('.query-options strong')].map(e=>e.textContent.split(':')[0]).sort()`),['issuer','subject','validation_status']);
   for(const field of ['anom','tlsver','rrname','level']){await type(field);await until(`document.querySelector('.query-options strong')?.textContent.startsWith('${field}:')`);}
   await type('sev');assert.equal(await evaluate(`!!document.querySelector('.query-options')`),false);
   const choices=await evaluate(`(async()=>{const data=await(await fetch('/api/hunt/schema')).json();return data.fields.filter(f=>f.values);})()`);
@@ -85,9 +86,9 @@ try {
     await type(field.name+':');
     await until(`document.querySelectorAll('.query-options button').length===${field.values.length}`);
     const examples=await evaluate(`[...document.querySelectorAll('.query-options strong')].map(e=>e.textContent)`);
-    assert.deepEqual(examples,field.values.map(item=>field.name+': '+(/[\s()]/.test(item.value)?JSON.stringify(item.value):item.value)),field.name);
+    assert.deepEqual(examples,field.values.map(item=>field.name+': '+(/[^a-zA-Z0-9_.-]/.test(item.value)?JSON.stringify(item.value):item.value)),field.name);
   }
-  for(const [typed,inserted] of [['state:est','state: established'],['type: tls AND tlsver:','type: tls AND tlsver: "TLS 1.3"'],['pkt_src:stream','pkt_src: "stream (detect/log)"']]){
+  for(const [typed,inserted] of [['session_event:sta','session_event: start'],['type: tls AND tlsver:','type: tls AND tlsver: "TLS 1.3"'],['type:sess','type: session']]){
     await type(typed);await until(`!!document.querySelector('.query-options button')`);
     await pointerClick('.query-options button');
     assert.equal(await evaluate(`document.querySelector('ndr-hunt-query input').value`),inserted);
@@ -98,6 +99,29 @@ try {
   assert.equal(states.total,2);assert.ok(!states.error);
   await type('type:tls AND issuer');await until(`document.querySelector('.query-options strong')?.textContent.startsWith('issuer:')`);
   await pointerClick('.query-options button');assert.equal(await evaluate(`document.querySelector('ndr-hunt-query input').value`),'type:tls AND issuer:');
+  await type('status:[400 TO 499]');assert.equal(await evaluate(`!!document.querySelector('.query-options')`),false);
+  const range=await evaluate(`(async()=>{const d=await(await fetch('/api/hunt?'+new URLSearchParams({q:'status:[400 TO 599]',window:'1440',limit:'1'}))).json();return d;})()`);assert.ok(!range.error);
+  const invalid=await evaluate(`(async()=>{const d=await(await fetch('/api/hunt?'+new URLSearchParams({q:'sqlite_master:*',window:'1440',limit:'1'}))).json();return d;})()`);assert.ok(invalid.error);
+  await type('ip_version: 4 and proto: tcp');await evaluate(`document.querySelector('ndr-events form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))`);
+  await until(`document.querySelector('ndr-events .error[role="alert"]')?.textContent.includes('连接词必须大写')`);
+  await type('ip_version:4 AND proto:tcp');await evaluate(`document.querySelector('ndr-events form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))`);
+  await until(`!document.querySelector('ndr-events .error[role="alert"]')&&document.querySelectorAll('ndr-events tbody tr').length>1`);
+  await evaluate(`document.querySelector('ndr-events .filter-line input[type="checkbox"]').click()`);
+  await until(`document.querySelector('ndr-events .table-scroll')?.getAttribute('aria-busy')==='false'`);
+  for(let index=0;index<16;index++){
+    const direction=index%8<4?1:0;
+    await evaluate(`document.querySelectorAll('ndr-events .pager>div>button')[${direction}].click()`);
+    await until(`document.querySelector('ndr-events .table-scroll')?.getAttribute('aria-busy')==='false'&&document.querySelectorAll('ndr-events tbody tr').length>1`);
+    assert.equal(await evaluate(`!!document.querySelector('ndr-events .error[role="alert"]')`),false,'rapid paging keeps its realtime subscription healthy');
+  }
+  assert.deepEqual(streamFailures,[],'closed subscriptions release capacity during rapid paging');
+  const payload='fixture <img src=x onerror="window.ndrInjected=true">';
+  const injection=await evaluate(`(async()=>{const q='appid_client:'+JSON.stringify(${JSON.stringify(payload)}),d=await(await fetch('/api/hunt?'+new URLSearchParams({q,window:'1440',limit:'2'}))).json();return d;})()`);assert.ok(!injection.error);assert.equal(injection.total,1);
+  await type('type:session AND appid_service:HTTPS');await evaluate(`document.querySelector('ndr-events form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))`);
+  await until(`document.querySelector('ndr-events tbody tr')?.textContent.includes('HTTPS')`);
+  await pointerClick('ndr-events tbody tr');await until(`document.querySelector('ndr-details')?.textContent.includes('OpenAppID')`);
+  assert.ok(await evaluate(`document.querySelector('ndr-details').textContent.includes(${JSON.stringify(payload)})`));
+  assert.equal(await evaluate(`!!window.ndrInjected||!!document.querySelector('ndr-details img[src="x"]')`),false,'untrusted application names render as text');
   assert.deepEqual(exceptions,[]);
   console.log('ok - every query field and configured value is offered, quoted values and compound insertion query successfully, state filtering matches the fixture');
 } finally {

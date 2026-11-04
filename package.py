@@ -5,6 +5,8 @@ import argparse
 import hashlib
 import io
 import json
+import os
+import shutil
 import tarfile
 import tempfile
 import sys
@@ -14,7 +16,8 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 
 ROOT = Path(__file__).resolve().parent
-FILES = '''ips-web ips-supervisor ips-log-maintenance ips-rule-manager ips-event-bridge ips-snort-rules snort-home-net
+FILES = '''tests/test_ai_evidence.py tests/check_llm_rules.py tests/test_overview_cohorts.py dns_context.py llm_hunting.py overview_metrics.py hunt_query.py python_dependencies.py openappid_update.py session_logger.py native_session_logger.cc deploy-session-logger.py build_tools/build_session_logger.py build_tools/snort-sources.json build_tools/patch_snort.py build_tools/python-sources.json build_tools/python_dependencies.py tests/run_backend.py tests/run_hunt_regression.py tests/test_hunt_language.py tests/test_openappid_update.py tests/test_session_logger.py tests/test_session_logger_deploy.py tests/check_native_session_logger.py
+ips-web ips-supervisor ips-log-maintenance ips-rule-manager ips-event-bridge ips-snort-rules snort-home-net
 ips_control.py rule_drafts.py llm_assistant.py quic_observer.py snort_engine.py snort_rules.py rule_policy.py parallel_cpu.py parallel_sql.py event_processing.py native_rules.py rule_sources.py rule_identity.py rule_inventory.py runtime_status.py history_reset.py log_storage.py deployment_layout.py
 ips-quic-observer.service deploy-quic-observer.py build_tools/quic-sources.json docs/quic-observer.md tests/test_quic_observer.py tests/check_quic_observer.py tests/check_snort_sessions.py tests/check_nfq_nat.py docs/event-search.md
 ips.service ips-web.service ips-rule-manager.service ips-event-bridge.service ips-web-isolated.conf ips-web.conf
@@ -30,6 +33,13 @@ EXECUTABLE = {'ips-event-bridge','ips-snort-rules','snort-home-net','ips-web', '
 
 
 def build(output,reuse_ui=None):
+    from build_tools.python_dependencies import environment
+    if not os.environ.get('NDR_PYTHON_DEPS'):
+        with environment():return _build(output,reuse_ui)
+    return _build(output,reuse_ui)
+
+
+def _build(output,reuse_ui=None):
     from build_frontend import build as build_ui, source_files
     output = Path(output).resolve()
     if output.is_relative_to(ROOT):
@@ -37,7 +47,7 @@ def build(output,reuse_ui=None):
     checks = subprocess.run([sys.executable, '-B', '-m', 'unittest', '-q',
                              'tests.test_snort_engine', 'tests.test_rule_policy', 'tests.test_parallel_runtime', 'tests.test_native_deploy', 'tests.test_deploy_backend', 'tests.test_event_db_recovery',
                              'tests.test_quic_observer', 'tests.test_llm_assistant', 'tests.test_llm_context', 'tests.test_rule_manager', 'tests.test_rule_manager_transport', 'tests.test_bridge_recovery', 'tests.test_legacy_cleanup', 'tests.test_native_log_cleanup', 'tests.test_log_storage', 'tests.test_log_storage_paths', 'tests.test_native_rule_management', 'tests.test_group_policies', 'tests.test_rule_inventory', 'tests.test_telemetry', 'tests.test_runtime_status', 'tests.test_history_reset', 'tests.test_session_identity', 'tests.test_rule_selection',
-                             'tests.test_nft_rules', 'tests.test_deploy_nft', 'tests.test_native_response_deploy'], cwd=ROOT,
+                             'tests.test_nft_rules', 'tests.test_deploy_nft', 'tests.test_native_response_deploy', 'tests.test_hunt_language', 'tests.test_openappid_update', 'tests.test_session_logger', 'tests.test_session_logger_deploy','tests.test_overview_cohorts','tests.test_ai_evidence'], cwd=ROOT,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if checks.returncode:
         sys.stderr.buffer.write(checks.stdout)
@@ -55,20 +65,21 @@ def build(output,reuse_ui=None):
                 raise ValueError('Reusable UI source manifest differs; run a production frontend build')
         else:
             build_ui(Path(generated))
+        shutil.copy2(os.environ['NDR_PYTHON_DEPS'],Path(generated)/'python-dependencies.zip')
         return archive_release(output, Path(generated), source_files())
 
 
 def archive_release(output, generated, sources):
     frontend = [p.relative_to(ROOT).as_posix() for p in sources]
     chunks = sorted(path.name for path in generated.glob('chunk-*.js'))
-    names = sorted(set(FILES + frontend + chunks + ['index.html','app.js','ui.js','app.css','build_frontend.py', 'frontend-build.json', 'tests/test-data-layer.cjs', 'tests/test-connection-summary.cjs', 'tests/check_data_layer.py',
+    names = sorted(set(FILES + frontend + chunks + ['python-dependencies.zip','index.html','app.js','ui.js','app.css','build_frontend.py', 'frontend-build.json', 'tests/test-data-layer.cjs', 'tests/test-connection-summary.cjs', 'tests/check_data_layer.py',
                        'deploy-angular.py', 'deploy-backend.py', 'tests/angular-smoke.mjs', 'tests/angular-pointer.mjs', 'tests/angular-ux.mjs', 'tests/angular-hunt-suggestions.mjs', 'tests/angular-system-capacity.mjs', 'tests/angular-reset.mjs', 'tests/angular-chart-tooltip.mjs', 'tests/test_hunt_suggestions.py', 'tests/test_mitre_attack.py', 'tests/test-attack-mapping.cjs', 'tests/test-console-scroll.cjs', 'frontend-licenses.txt'] +
                        ['tests/test-output.mjs', 'tests/test-overview-range.cjs', 'tests/test-modal-backdrop.cjs', 'tests/test-range-context.cjs', 'tests/test-chart-zoom.cjs', 'tests/test_network_visibility.py', 'tests/test_network_snapshots.py', 'tests/test_static_modules.py', 'tests/test_deploy_backend.py', 'tests/audit_hunt_queries.py', 'tests/test_hunt_query_matrix.py', 'tests/test_data_layer.py']))
     payloads = {}
-    generated_names = {'index.html', 'app.js', 'ui.js', 'app.css', 'frontend-build.json', 'frontend-licenses.txt', *chunks}
+    generated_names = {'python-dependencies.zip','index.html', 'app.js', 'ui.js', 'app.css', 'frontend-build.json', 'frontend-licenses.txt', *chunks}
     for name in names:
         data = ((generated if name in generated_names else ROOT) / name).read_bytes()
-        payloads[name] = data if name in frontend else data.removeprefix(b'\xef\xbb\xbf').replace(b'\r\n', b'\n')
+        payloads[name] = data if name in frontend or name=='python-dependencies.zip' else data.removeprefix(b'\xef\xbb\xbf').replace(b'\r\n', b'\n')
     manifest=json.loads(payloads['frontend-build.json'])
     for name,digest in {**manifest['sources'],**manifest['files']}.items():
         if name not in payloads or hashlib.sha256(payloads[name]).hexdigest()!=digest:

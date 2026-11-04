@@ -2,6 +2,7 @@
 from datetime import datetime, timezone
 from contextlib import contextmanager
 import hashlib
+from ipaddress import ip_address
 import json
 import math
 from pathlib import Path
@@ -44,7 +45,17 @@ NATIVE_FIELDS = {
     'fuid': 'fuid', 'source': 'native_source', 'analyzers': 'analyzers',
     'timedout': 'file_timeout', 'extracted_cutoff': 'extracted_cutoff',
     'ips_action': 'ips_action', 'ids_reason': 'ids_reason',
+    'dns_ttl': 'dns_ttl',
+    'client.version':'ssh_client','server.version':'ssh_server','kex_alg':'ssh_kex','host_key_alg':'ssh_hostkey',
+    'cipher_alg':'ssh_cipher','mac_alg':'ssh_mac','compression_alg':'ssh_compression',
+    **{name:name for name in ('packet_ts','packet_len','data_len','packet_direction','ip_ttl','ip_tos','ip_id','ip_offset','ip_flags','ip_proto','ip_header_len',
+                            'tcp_flags','tcp_window','tcp_seq','tcp_ack','tcp_options_len')},
+    **{name:name for name in ('session_event','session_origin','session_limited','observed_first','observed_last','wire_bytes_toserver','wire_bytes_toclient',
+        'appid_service','appid_client','appid_payload','appid_misc','appid_referred',
+        'appid_service_id','appid_client_id','appid_payload_id','appid_misc_id','appid_referred_id')},
 }
+PACKET_NUMBER_FIELDS=('packet_ts','packet_len','data_len','ip_ttl','ip_tos','ip_id','ip_offset','ip_flags','ip_proto','ip_header_len',
+                      'tcp_flags','tcp_window','tcp_seq','tcp_ack','tcp_options_len')
 EVENT_FIELDS={**NATIVE_FIELDS,**__import__('quic_observer').OBSERVER_FIELDS}
 
 
@@ -140,8 +151,63 @@ def _load_rule_metadata(path):
     return result
 
 
+def session_observation(envelope):
+    """Validate native lifecycle data without guessing protocol or membership."""
+    data=envelope.get('data')
+    if not isinstance(data,dict):return {}
+    identity=data.get('session_id','');event=data.get('event')
+    if not isinstance(identity,str) or not re.fullmatch(r'[0-9a-f]{32}:[0-9a-f]{16}',identity):return {}
+    if identity.endswith(':0000000000000000') or event not in ('start','first_observed','state','application','update','end'):return {}
+    try:
+        source,target=str(ip_address(data['src'])),str(ip_address(data['dst']))
+        if type(data['sport']) is not int or type(data['dport']) is not int:return {}
+        if not all(0<=data[key]<=65535 for key in ('sport','dport')):return {}
+        proto=data['proto']
+        if proto not in ('TCP','UDP','ICMP','IP'):return {}
+        first,last,ts=(float(data[key]) for key in ('first_observed','last_observed','ts'))
+        if not all(math.isfinite(value) and value>0 for value in (first,last,ts)) or last<first:return {}
+        native=dict(session_id=identity,session_event=event,observed_first=first,observed_last=last)
+        if type(data.get('initial_syn_observed')) is not bool or type(data.get('state_limit_reached')) is not bool:return {}
+        native.update(session_origin='syn_observed' if data['initial_syn_observed'] else 'partial',
+                      session_limited='state_limit_reached' if data['state_limit_reached'] else '')
+        for field in ('service','client','payload','misc','referred'):
+            name=data.get('appid_'+field,'');number=data.get('appid_'+field+'_id',0)
+            if not isinstance(name,str) or len(name.encode('utf-8'))>1012 or type(number) is not int or not -1<=number<=2147483647:return {}
+            native['appid_'+field]=name;native['appid_'+field+'_id']=number
+        for key in ('orig_pkts','resp_pkts','orig_wire_bytes','resp_wire_bytes'):
+            if type(data.get(key)) is not int or not 0<=data[key]<(1<<63):return {}
+        native.update(wire_bytes_toserver=data['orig_wire_bytes'],wire_bytes_toclient=data['resp_wire_bytes'])
+        limits=dict(icmp_type=255,icmp_code=255,packet_len=0xffffffff,data_len=65535,ip_ttl=255,ip_tos=65535,ip_id=0xffffffff,ip_offset=65535,
+                    ip_flags=7,ip_proto=255,ip_header_len=255,tcp_flags=255,tcp_window=65535,tcp_seq=0xffffffff,tcp_ack=0xffffffff,tcp_options_len=255)
+        for key,maximum in limits.items():
+            if key in data:
+                if type(data[key]) is not int or not 0<=data[key]<=maximum:return {}
+                native[key]=data[key]
+        if 'packet_ts' in data:
+            packet_ts=float(data['packet_ts'])
+            if not math.isfinite(packet_ts) or packet_ts<=0:return {}
+            native['packet_ts']=packet_ts
+        if 'packet_direction' in data:
+            if data['packet_direction'] not in ('to_server','to_client','unknown'):return {}
+            native['packet_direction']=data['packet_direction']
+        states=('LISTEN','SYN_SENT','SYN_RECV','ESTABLISHED','MID_STREAM_SENT','MID_STREAM_RECV',
+                'FIN_WAIT1','FIN_WAIT2','CLOSE_WAIT','CLOSING','LAST_ACK','TIME_WAIT','CLOSED','STATE_NONE')
+        state=''
+        if proto=='TCP':
+            values=[data.get(key,-1) for key in ('client_state','server_state')]
+            if any(type(value) is not int or not -1<=value<len(states) for value in values):return {}
+            state=' '.join(prefix+states[value] for prefix,value in zip(('CLT_TCP_','SRV_TCP_'),values) if value>=0)
+        return dict(timestamp=timestamp(ts),event_type='session',src_ip=source,src_port=data['sport'],
+            dest_ip=target,dest_port=data['dport'],proto=proto,
+            app_proto=native['appid_service'],snort_native=native,
+            flow=dict(age=last-first,state=state,pkts_toserver=data['orig_pkts'],pkts_toclient=data['resp_pkts']))
+    except (KeyError,ValueError,TypeError,OverflowError):return {}
+
+
 def native_event(envelope, metadata=None):
     """Map native values into the console's internal event model, retaining raw input."""
+    if envelope.get('engine')=='snort_session':
+        return session_observation(envelope)
     if envelope.get('engine')=='quic_observer':
         from quic_observer import normalized_event
         return normalized_event(envelope)
@@ -209,6 +275,11 @@ def native_event(envelope, metadata=None):
         obj['dns'] = dict(type='response', rrname=data.get('query'), rrtype=data.get('qtype_name') or data.get('qtype'),
             rcode=data.get('rcode_name') or data.get('rcode'), answers=[{'rdata':str(x)} for x in (data.get('answers', []) if isinstance(data.get('answers'), list) else [data['answers']] if data.get('answers') else [])])
         obj['tx_id'] = data.get('trans_id')
+        ttls=data.get('TTLs',[])
+        if isinstance(ttls,str):ttls=re.split(r'[,\s]+',ttls)
+        if isinstance(ttls,list):
+            values=[int(value) for value in ttls[:128] if re.fullmatch(r'[0-9]{1,10}',str(value)) and int(value)<=2147483647]
+            if values:obj['snort_native']['dns_ttl']=min(values)
     elif kind == 'ssl':
         obj['tls'] = dict(sni=data.get('server_name'), version=data.get('version'),
                           subject=data.get('subject'), issuerdn=data.get('issuer'))

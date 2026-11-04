@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import tarfile
 import tempfile
+import zipfile
 import unittest
 import sys
 import types
@@ -103,6 +104,7 @@ class ConsoleUpdateTests(unittest.TestCase):
             for name in module.PROGRAMS:
                 (release/name).write_text('# candidate module\n')
                 (installed/name).write_text('# previous module\n')
+            with zipfile.ZipFile(release/'python-dependencies.zip','w') as bundle:bundle.writestr('luqum/parser.py','# candidate module\n')
             config=root/'config';original=b'{"password_pbkdf2":"fixture","read_workers":1}\n';config.write_bytes(original)
             pid=root/'pid';pid.write_text('12345')
             updater=root/'updater.py';updater.write_text('# previous updater\n');new_helper=root/'parallel.py'
@@ -137,6 +139,7 @@ class ConsoleUpdateTests(unittest.TestCase):
             for name in module.PROGRAMS:
                 (release/name).write_text('# new console module\n')
                 (installed/name).write_text('# old console module\n')
+            with zipfile.ZipFile(release/'python-dependencies.zip','w') as bundle:bundle.writestr('luqum/parser.py','# new module\n')
             config=root/'config';config.write_text('{}')
             updater=root/'external-updater.py';updater.write_text('# separately managed\n')
             client=mock.Mock();client.request.return_value={'ok':True,'ready':True}

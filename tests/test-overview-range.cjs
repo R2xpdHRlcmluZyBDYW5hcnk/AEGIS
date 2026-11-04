@@ -27,7 +27,7 @@ function fixture(storage=new Map()){
  page.investigateTop({key:'signatures'},{sid:2021076});
  page.investigateTop({key:'signatures'},{sig:'engine drop: flow drop'});
  page.investigateTop({key:'sources',field:'src'},{ip:'2001:db8::1'});
- assert.deepEqual(investigations,['sid: 2021076','type: drop AND sig: "engine drop: flow drop"','src: 2001:db8::1']);
+ assert.deepEqual(investigations,['sid: 2021076','type: drop AND sig: "engine drop: flow drop"','src: "2001:db8::1"']);
 }
 {
  const {page,contexts}=fixture();page.rangeChoice='60';page.investigate('type: alert AND level: high');assert.equal(contexts.at(-1).choice,'60');
@@ -72,7 +72,7 @@ for(const choice of ['today','yesterday']){
  page.removeFilter('src');assert.equal(requests.at(-1).params.src,undefined);assert.equal(requests.at(-1).params.sid,'498');
  assert.equal(investigations.length,0,'numeric and chart filters stay in overview');
  page.clearFilters();assert.equal(page.filters.length,0);assert.equal(requests.at(-1).params.detection,undefined);
- page.filterNetwork({title:'应用',field:'app',type:'flow'},{name:'未识别'});assert.equal(requests.at(-1).params.app,'');assert.equal(requests.at(-1).params.type,'flow');
+ page.filterNetwork({title:'应用',field:'app',type:'flow'},{name:'未识别'});assert.equal(requests.at(-1).params.app,'');assert.equal(requests.at(-1).params.type,undefined,'application filters retain the complete connection cohort');
  page.investigateNetwork({field:'app',type:'flow'},{name:'tls'});assert.equal(investigations.at(-1),'type: flow AND app: "tls"','text table keeps investigation navigation');
  page.clearFilters();page.data={bucket:1};const t=Math.floor(Date.now()/1000)-120;
  page.filterTrend({point:{t},kind:'drops'});assert.equal(requests.at(-1).params.from,String(t));assert.equal(requests.at(-1).params.to,String(t+60-.001));

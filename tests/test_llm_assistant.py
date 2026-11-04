@@ -48,7 +48,7 @@ class Provider(BaseHTTPRequestHandler):
             system=self.server.payload['messages'][0]['content']
             if '狩猎助手' in system:
                 data=json.loads(self.server.payload['messages'][1]['content'])
-                text=json.dumps({'checks':[check['id'] for check in data['checks'][:2]]})
+                text=json.dumps(data['reply_example'])
             elif '四段' in system:
                 text='通信概览：当前会话存在通信记录。\n行为与处置：结合检索结果核查。\n研判依据：尚不能确认入侵成功。\n建议核查：查看命中日志。'
             else:
@@ -90,7 +90,8 @@ class AssistantTests(unittest.TestCase):
         result = self.generate()
         validate_rule(result['rule'])
         self.assertIn('http_header:field host;', result['rule'])
-        self.assertIn('192.0.2.1 any -> 198.51.100.2 80', result['rule'])
+        self.assertIn('any any -> any 80', result['rule'])
+        self.assertNotIn('192.0.2.1',result['rule'])
         self.assertNotIn('sid:', result['rule'])
         self.assertTrue(self.server.payload['stream'])
         self.assertFalse(self.server.payload['enable_thinking'])
@@ -135,6 +136,14 @@ class AssistantTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '不完整'):
             self.generate()
 
+    def test_rule_action_is_explicit_and_defaults_to_alert(self):
+        self.assertTrue(self.generate()['rule'].startswith('alert '))
+        result=self.generate(dict(self.body,action='block'))
+        self.assertTrue(result['rule'].startswith('block '));validate_rule(result['rule'])
+        with self.assertRaisesRegex(ValueError,'动作无效'):
+            self.generate(dict(self.body,action='drop; lua:evil'))
+        self.app.control.request.assert_not_called()
+
     def test_invalid_choice_and_option_injection_are_rejected_or_encoded_as_text(self):
         choices = candidates([ROW])
         for value in (-1, 4, '0', True):
@@ -149,6 +158,7 @@ class AssistantTests(unittest.TestCase):
 
     def test_empty_evidence_refuses_rule_without_model_call_and_context_stays_json(self):
         self.app.incident = lambda params:dict(incident={'sig':'No tuple'}, alerts=[], network=[])
+        self.app.summary_context=lambda target:dict(records=[],anchor={})
         self.assertTrue(self.generate()['unavailable'])
         self.assertFalse(self.server.entered.is_set())
         data = dict(records=[dict(ROW, sig='x'*100) for _ in range(30)])

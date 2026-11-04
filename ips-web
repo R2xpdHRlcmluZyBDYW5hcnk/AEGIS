@@ -79,6 +79,7 @@ BAN_SID_BASE = 9100000
 BAN_STORE = "/var/lib/snort/rules/ips-web-bans.json"
 BAN_RULES = "/var/lib/snort/rules/ips-web-bans.rules"
 BAN_DETECTOR = "/var/lib/snort/rules/ips-web-bans.lua"
+APPID_ROOT = "/var/lib/snort/appid"
 
 SESSION_COOKIE = "ipsweb_session"
 SESSION_TTL = 43200
@@ -754,7 +755,9 @@ class EventDB:
     NUMERIC_COLUMNS = {"ts", "sev", "sid", "tier", "sport", "dport", "ip_version", "status",
                        "clen", "fsize", "flow_id", "vlan", "gid", "rev", "tx",
                        "icmp_type", "icmp_code", "bytes_toserver", "bytes_toclient",
-                       "pkts_toserver", "pkts_toclient", "flow_start", "flow_end", "flow_age"}
+                       "pkts_toserver", "pkts_toclient", "flow_start", "flow_end", "flow_age", "observed_first", "observed_last",
+                       "dns_ttl", "wire_bytes_toserver", "wire_bytes_toclient", *__import__('snort_engine').PACKET_NUMBER_FIELDS,
+                       *["appid_"+name+"_id" for name in ("service","client","payload","misc","referred")]}
 
     def __init__(self, path, cap=None, retention_days=None):
         self.path = path
@@ -824,6 +827,9 @@ class EventDB:
                               " WHERE event_key IS NOT NULL")
             self.conn.commit()
         except sqlite3.Error as exc:  # noqa: BLE001
+            if self.conn is not None:
+                try:self.conn.close()
+                except sqlite3.Error:pass
             self.conn = None
             self._write_failure(exc)
 
@@ -1323,6 +1329,7 @@ class EventDB:
         collect("type IN ('alert','drop')",limit=2)
         collect("type IN ('alert','drop') AND action IN ('blocked','drop','reject','reset')")
         collect("type='flow' OR (type='quic' AND flow_start IS NOT NULL)")
+        if kinds.get('session'):collect("type='session'")
         for kind in ('dns','tls','http','anomaly','fileinfo'):
             if kinds.get(kind):
                 collect('type=?',[kind])
@@ -1641,43 +1648,14 @@ class EventDB:
     @staticmethod
     def empty_network(value=0):
         return dict(records=value, flows=value, dns=value, tls=value, addresses=value,
-                    bytes=value, bidirectional=value, one_way=value, newest=value,
+                    bytes=value, bidirectional=value, one_way=value, newest=value, source_count=value, destination_count=value,
                     applications=[], protocols=[], dns_names=[], tls_names=[],
-                    sources=[], event_types=[])
+                    sources=[], event_types=[],log_sources=[],log_destinations=[])
 
     @staticmethod
     def compute_network_summary(conn, start, end, push=None, parallel=None):
-        """Exact aggregates; the caller owns the connection and snapshot transaction."""
-        low, high = start * 1000, end * 1000
-        result = dict(EventDB.empty_network(), range=[start, end], as_of=now())
-        kinds = (*BASE_EVENT_TYPES, *sorted(APP_EVENT_TYPES))
-        placeholders = ','.join('?' for _ in kinds)
-        suffix = ' AND '+' AND '.join(push[0]) if push and push[0] else ''
-        args = (low, high, *push[1]) if push and push[0] else (low, high)
-        flow_where = " FROM events WHERE type='flow' AND ts>=? AND ts<=?"+suffix
-        statements = [
-            ('SELECT type,COUNT(*),MAX(ts) FROM events WHERE type IN ('+placeholders+') AND ts>=? AND ts<=?'+suffix+' GROUP BY type', (*kinds, *args)),
-            ('SELECT COALESCE(SUM(bytes_toserver+bytes_toclient),0),COALESCE(SUM(pkts_toserver>0 AND pkts_toclient>0),0),COALESCE(SUM((pkts_toserver>0) != (pkts_toclient>0)),0)' + flow_where,args),
-            ('SELECT COUNT(*) FROM (SELECT src AS ip'+flow_where+" AND src!='' UNION SELECT dst AS ip"+flow_where+" AND dst!='')",args+args)]
-        for column in ('app','proto'):
-            statements.append(('SELECT '+column+',COUNT(*)'+flow_where+' GROUP BY '+column+' ORDER BY COUNT(*) DESC,'+column+' LIMIT 8',args))
-        for kind,column in (('dns','dnsname'),('tls','sni')):
-            statements.append(('SELECT '+column+",COUNT(*) FROM events INDEXED BY idx_events_"+kind+"_overview WHERE type='"+kind+"' AND ts>=? AND ts<=?"+suffix+" AND "+column+"!='' GROUP BY "+column+' ORDER BY COUNT(*) DESC,'+column+' LIMIT 8',args))
-        statements.append(('SELECT src,COUNT(*),COALESCE(SUM(bytes_toserver+bytes_toclient),0),MAX(ts)'+flow_where+" AND src!='' GROUP BY src ORDER BY COUNT(*) DESC,src LIMIT 8",args))
-        rows = fetch_many(conn,statements,parallel)
-        types = rows[0]
-        result['event_types'] = [dict(name=name, count=total) for name, total, _ in types]
-        totals = {name: total for name, total, _ in types}
-        result.update(records=sum(totals.values()), flows=totals.get('flow', 0), dns=totals.get('dns', 0), tls=totals.get('tls', 0), newest=max((latest or 0 for _, _, latest in types), default=0)/1000)
-        row = rows[1][0]
-        result.update(bytes=row[0], bidirectional=row[1], one_way=row[2])
-        result['addresses'] = rows[2][0][0]
-        for name,items in zip(('applications','protocols'),rows[3:5]):
-            result[name] = [dict(name=value or '未识别',count=total) for value,total in items]
-        for name,items in zip(('dns_names','tls_names'),rows[5:7]):
-            result[name] = [dict(name=value,count=total) for value,total in items]
-        result['sources'] = [dict(ip=ip,count=total,bytes=volume,latest=latest/1000) for ip,total,volume,latest in rows[7]]
-        return result
+        from overview_metrics import summarize
+        return summarize(conn,start,end,push=push,parallel=parallel)
 
     # Detection and enforcement are overlapping facts, not exclusive log types.
     DETECTION_SQL = "(type='alert' OR (type='drop' AND sid>0))"
@@ -1804,7 +1782,7 @@ class EventDB:
 class StoredNetworkStats:
     """Rebuildable disk projection: time buckets and frequencies, never raw evidence."""
     COLUMNS = ('id','ts','type','event_key','b','src','dst','app','proto','dnsname','sni',
-               'volume','bidirectional','one_way','community','sport','dport','association')
+               'volume','bidirectional','one_way','community','sport','dport','association','session_id','orig_pkts','resp_pkts')
 
     def __init__(self, db, batch_size=1024, duty_percent=20):
         self.db = db
@@ -1863,13 +1841,13 @@ class StoredNetworkStats:
         END;
         ''')
         columns={row[1] for row in conn.execute('PRAGMA table_info(facts)')}
-        for name,kind in [('community','TEXT'),('sport','INTEGER'),('dport','INTEGER'),('association','TEXT')]:
+        for name,kind in [('community','TEXT'),('sport','INTEGER'),('dport','INTEGER'),('association','TEXT'),('session_id','TEXT'),('orig_pkts','INTEGER'),('resp_pkts','INTEGER')]:
             if name not in columns:
                 conn.execute('ALTER TABLE facts ADD COLUMN '+name+' '+kind)
         conn.execute('CREATE INDEX IF NOT EXISTS facts_association_ts ON facts(association,ts)')
-        if dict(conn.execute('SELECT k,v FROM meta')).get('format')!='2':
+        if dict(conn.execute('SELECT k,v FROM meta')).get('format')!='3':
             conn.execute('DELETE FROM facts')
-            StoredNetworkStats.update(conn,cursor=0,ready=0,format=2)
+            StoredNetworkStats.update(conn,cursor=0,ready=0,format=3)
             conn.commit()
 
     @staticmethod
@@ -1951,7 +1929,8 @@ class StoredNetworkStats:
           COALESCE(src,''),COALESCE(dst,''),COALESCE(app,''),COALESCE(proto,''),
           COALESCE(dnsname,''),COALESCE(sni,''),COALESCE(bytes_toserver+bytes_toclient,0),
           COALESCE(pkts_toserver>0 AND pkts_toclient>0,0),
-          COALESCE((pkts_toserver>0)!=(pkts_toclient>0),0),COALESCE(community,''),sport,dport
+          COALESCE((pkts_toserver>0)!=(pkts_toclient>0),0),COALESCE(community,''),sport,dport,
+          COALESCE(session_id,''),COALESCE(pkts_toserver,0),COALESCE(pkts_toclient,0)
           FROM events WHERE id>? ORDER BY id LIMIT ?''', (cursor,batch)).fetchall()
         if getattr(self,'cpu',None) is not None and len(rows)>=512:
             from event_processing import projection_rows
@@ -1959,9 +1938,9 @@ class StoredNetworkStats:
             rows=[row for batch in self.cpu.ordered(projection_rows,batches,
                     cancelled=lambda:self.stop.is_set() or generation!=self.db.network_generation) for row in batch]
         else:
-            rows=[(*row, 'community:'+row[14] if row[14] else
-                   ('tuple:'+hashed if (hashed:=tuple_hash(row[5],row[15],row[6],row[16],row[8])) else None)) for row in rows]
-        conn.executemany('INSERT OR IGNORE INTO facts VALUES('+','.join('?' for _ in self.COLUMNS)+')',rows)
+            rows=[(*row[:17], 'community:'+row[14] if row[14] else
+                   ('tuple:'+hashed if (hashed:=tuple_hash(row[5],row[15],row[6],row[16],row[8])) else None),*row[17:]) for row in rows]
+        conn.executemany('INSERT OR IGNORE INTO facts ('+','.join(self.COLUMNS)+') VALUES('+','.join('?' for _ in self.COLUMNS)+')',rows)
         cursor = rows[-1][0] if rows else cursor
         ready = len(rows) < batch and generation == self.db.network_generation and not self.stop.is_set()
         self.update(conn, cursor=cursor, ready=int(ready), as_of=stamp)
@@ -2047,48 +2026,9 @@ class StoredNetworkStats:
 
     @staticmethod
     def aggregate(conn,start,end,parallel=None):
-        low, high = start*1000,end*1000
-        first,last = math.ceil(low/60000),math.floor(high/60000)
-        boundary = '((ts>=? AND ts<? AND ts<=?) OR (ts>=? AND ts<=?))'
-        bounds = (low,first*60000,high,max(low,last*60000),high)
-        kinds = (*BASE_EVENT_TYPES,*sorted(APP_EVENT_TYPES))
-        marks = ','.join('?' for _ in kinds)
-        result = dict(EventDB.empty_network(),range=[start,end],as_of=now())
-        counts = '''WITH c AS (SELECT type,n FROM counts WHERE b>=? AND b<? UNION ALL
-          SELECT type,COUNT(*) FROM facts WHERE '''+boundary+''' GROUP BY type)
-          SELECT type,SUM(n) FROM c WHERE type IN ('''+marks+''') GROUP BY type ORDER BY type'''
-        flow = '''WITH f AS (SELECT src,dst,app,proto,n,volume,bidirectional,one_way FROM flows WHERE b>=? AND b<?
-          UNION ALL SELECT src,dst,app,proto,COUNT(*),SUM(volume),SUM(bidirectional),SUM(one_way)
-          FROM facts WHERE type='flow' AND '''+boundary+''' GROUP BY src,dst,app,proto) '''
-        args = (first,last,*bounds)
-        statements = [(counts,(first,last,*bounds,*kinds)),
-            ('SELECT MAX(ts) FROM facts INDEXED BY facts_ts WHERE ts>=? AND ts<=? AND type IN ('+marks+')',(low,high,*kinds)),
-            (flow+'SELECT COALESCE(SUM(volume),0),COALESCE(SUM(bidirectional),0),COALESCE(SUM(one_way),0) FROM f',args),
-            (flow+"SELECT COUNT(*) FROM (SELECT src AS ip FROM f WHERE src!='' UNION SELECT dst AS ip FROM f WHERE dst!='')",args)]
-        for col in ('app','proto'):
-            statements.append((flow+'SELECT '+col+',SUM(n) FROM f GROUP BY '+col+' ORDER BY SUM(n) DESC,'+col+' LIMIT 8',args))
-        for kind,col in [('dns','dnsname'),('tls','sni')]:
-            sql = '''WITH n AS (SELECT name,n FROM names WHERE b>=? AND b<? AND type=? UNION ALL
-              SELECT '''+col+''',COUNT(*) FROM facts WHERE type=? AND '''+boundary+' AND '+col+"!='' GROUP BY "+col+''')
-              SELECT name,SUM(n) FROM n GROUP BY name ORDER BY SUM(n) DESC,name LIMIT 8'''
-            statements.append((sql,(first,last,kind,kind,*bounds)))
-        statements.append((flow+"SELECT src,SUM(n),SUM(volume) FROM f WHERE src!='' GROUP BY src ORDER BY SUM(n) DESC,src LIMIT 8",args))
-        rows = fetch_many(conn,statements,parallel)
-        totals = dict(rows[0])
-        result.update(event_types=[dict(name=k,count=n) for k,n in rows[0]],records=sum(totals.values()),
-                      flows=totals.get('flow',0),dns=totals.get('dns',0),tls=totals.get('tls',0),
-                      newest=(rows[1][0][0] or 0)/1000)
-        volume,bidirectional,one_way = rows[2][0]
-        result.update(bytes=volume,bidirectional=bidirectional,one_way=one_way,addresses=rows[3][0][0])
-        for name,items in zip(('applications','protocols'),rows[4:6]):
-            result[name] = [dict(name=value or '未识别',count=n) for value,n in items]
-        for name,items in zip(('dns_names','tls_names'),rows[6:8]):
-            result[name] = [dict(name=value,count=n) for value,n in items]
-        sources=rows[8]
-        latest=fetch_many(conn,[("SELECT MAX(ts) FROM facts WHERE type='flow' AND src=? AND ts>=? AND ts<=?",(ip,low,high)) for ip,_,_ in sources],parallel)
-        result['sources'] = [dict(ip=ip,count=n,bytes=volume,latest=(stamp[0][0] or 0)/1000)
-                             for (ip,n,volume),stamp in zip(sources,latest)]
-        return result
+        from overview_metrics import summarize
+        return summarize(conn,start,end,table='facts',parallel=parallel)
+
 
 
 class NetworkSnapshots:
@@ -2201,6 +2141,8 @@ class NetworkSnapshots:
             push = (clauses, args)
         end = now() if key[0] != 'fixed' else key[2]
         start = end - key[1] if key[0] == 'rolling' else key[1]
+        from overview_metrics import resolve_bounds
+        push=resolve_bounds(push,start,end)
         uri = Path(self.db.path).resolve().as_uri() + '?mode=ro'
         conn = sqlite3.connect(uri, uri=True, timeout=1)
         deadline = time.monotonic() + self.QUERY_SECONDS
@@ -2275,7 +2217,7 @@ class NetworkSnapshots:
 
 
 MITRE_FIELDS = ('mitre_tactic_id', 'mitre_technique_id', 'mitre_tactic_name', 'mitre_technique_name')
-BASE_EVENT_TYPES = ('alert', 'drop', 'dns', 'http', 'tls', 'anomaly', 'fileinfo', 'flow')
+BASE_EVENT_TYPES = ('alert', 'drop', 'dns', 'http', 'tls', 'anomaly', 'fileinfo', 'flow', 'session')
 
 
 def attack_metadata(obj):
@@ -2396,6 +2338,13 @@ class EventStore:
         elif etype == "tls":
             tls = obj.get("tls") or {}
             sig = "TLS %s %s" % (tls.get("sni") or tls.get("subject") or "?", tls.get("version") or "")
+        elif etype == 'session':
+            labels={'start':'发起连接','first_observed':'首次观察','state':'连接状态变化',
+                    'application':'应用识别更新','update':'流量更新','end':'跟踪结束'}
+            native=obj.get('snort_native') or {}
+            sig=labels.get(native.get('session_event'),'会话事件')
+            application=native.get('appid_payload') or native.get('appid_service')
+            if application:sig+=' '+application
         elif etype == "anomaly":
             anomaly = obj.get("anomaly") or {}
             sig = "anomaly %s/%s" % (anomaly.get("type") or "", anomaly.get("event") or "")
@@ -2445,7 +2394,7 @@ class EventStore:
             "rrtype": (queries[0].get("rrtype") if queries else dns.get("rrtype")) or "",
             "rcode": dns.get("rcode") or "",
             "answers": ",".join(str(ans.get("rrname") or ans.get("rdata") or "")
-                                for ans in (dns.get("answers") or []))[:300],
+                                for ans in (dns.get("answers") or []))[:4096],
             "method": http.get("http_method") or "",
             "httpver": http_version(etype, obj.get('app_proto'), http.get('protocol') or ('HTTP/2' if str(http.get('version')) == '2' else '')),
             "status": http.get("status") if http.get("status") is not None else "",
@@ -2476,7 +2425,7 @@ class EventStore:
             "reason": reason,
             "iif": obj.get("in_iface") or "",
         }
-        if etype == 'flow' or (etype=='quic' and obj.get('observer_fields')):
+        if etype in ('flow','session') or (etype=='quic' and obj.get('observer_fields')):
             flow = obj.get('flow') or {}
             for key in ('bytes_toserver', 'bytes_toclient', 'pkts_toserver', 'pkts_toclient'):
                 try:
@@ -3328,7 +3277,8 @@ class SysInfo:
                 if proc.returncode:
                     raise RuntimeError("规则更新失败")
                 prepare_thresholds()
-                subprocess.run(["/opt/ips-snort3/3.12.4.0/bin/snort", "-T", "-c", SNORT_CONF], check=True, timeout=300)
+                from session_logger import plugin_arguments
+                subprocess.run(["/opt/ips-snort3/3.12.4.0/bin/snort", *plugin_arguments(), "-T", "-c", SNORT_CONF], check=True, timeout=300)
                 result = self.engine.call(["ruleset-reload-rules"], timeout=300)
                 if "ruleset-reload-rules" not in result:
                     raise RuntimeError(result.get("__error__", "规则重载失败"))
@@ -4013,12 +3963,12 @@ class Sessions:
 # HTTP
 # --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
-# 狩猎查询：Lucene 风格子集
-#   field:value / field:>n / field:>=n / field:!=v / src:192.0.2.0/24
-#   通配符 * ?（sni:*.google.com、a.b.*）、"双引号"/'单引号' 包裹空格、field: "值"
-#   逻辑：AND(&&) / OR(||) / NOT(!)，支持 a AND (b OR c)、a NOT b、-field:value
+# 狩猎查询：Luqum 解析 Lucene 语法，白名单 AST 适配参数化 SQLite。
+#   field:value / status:[400 TO 499] / src:192.0.2.0/24
+#   双引号保留文字，* ? 用于未加引号的通配符；布尔操作 AND / OR / NOT。
 # --------------------------------------------------------------------------
 HUNT_FIELDS = {
+    **{field:field for field in __import__("snort_engine").EVENT_FIELDS.values()},
     **__import__("snort_engine").EVENT_FIELDS,
     "native_uid": "native_uid", "orig_pkts": "pkts_toserver", "resp_pkts": "pkts_toclient",
     "orig_bytes": "bytes_toserver", "resp_bytes": "bytes_toclient", "duration": "flow_age",
@@ -4099,7 +4049,9 @@ HUNT_VALUE_OPTIONS = {
 
 HUNT_VALUE_OPTIONS.pop('state', None)
 HUNT_VALUE_OPTIONS.pop('reason', None)
-HUNT_VALUE_OPTIONS['type'] = [(kind, kind) for kind in ('alert','drop','dns','http','tls','anomaly','fileinfo','flow','quic','ssh','ftp')]
+HUNT_VALUE_OPTIONS['type'] = [(kind, kind) for kind in ('alert','drop','dns','http','tls','anomaly','fileinfo','flow','session','quic','ssh','ftp')]
+HUNT_VALUE_OPTIONS['session_event'] = [('start','发起连接'),('first_observed','首次观察'),('state','连接状态变化'),('application','应用识别更新'),('update','流量更新'),('end','跟踪结束')]
+HUNT_VALUE_OPTIONS['session_origin'] = [('syn_observed','已观察到初始 SYN'),('partial','部分会话')]
 
 
 def http_version(event_type, application, value):
@@ -4171,7 +4123,9 @@ def hunt_used_fields(node, out=None):
 HUNT_CI_FIELDS = {"proto", "action", "dir", "type", "app", "state", "rrtype",
                   "rcode", "method", "pkt_src", "tlsver", "iif", "httpver"}
 HUNT_NUMBER_FIELDS = {"ts", "sport", "dport", "sig_id", "ip_version", "vlan", "gid", "rev", "tx",
-                      "icmp_type", "icmp_code", "size", "status", "clen", "flow_id", *FLOW_METRIC_FIELDS}
+                      "icmp_type", "icmp_code", "size", "status", "clen", "flow_id", *FLOW_METRIC_FIELDS,
+                      "dns_ttl","observed_first","observed_last","wire_bytes_toserver","wire_bytes_toclient",*__import__('snort_engine').PACKET_NUMBER_FIELDS,
+                      *["appid_"+name+"_id" for name in ("service","client","payload","misc","referred")]}
 
 
 HUNT_LEVEL_ALIASES = {
@@ -4182,151 +4136,11 @@ HUNT_LEVEL_ALIASES = {
 }
 
 
-class HuntError(Exception):
-    pass
-
-
-def hunt_tokenize(text):
-    """词法：支持双引号/单引号包裹空格，field: value 与 field:"a b" 等价"""
-    def quoted(start):
-        if text[start] == '"':
-            try:
-                value, size = json.JSONDecoder().raw_decode(text[start:])
-                return value, start + size
-            except ValueError:
-                pass
-        quote, position, value = text[start], start + 1, []
-        while position < len(text):
-            char = text[position]
-            if char == quote:
-                return "".join(value), position + 1
-            if char == "\\" and position + 1 < len(text) and text[position + 1] in (quote, "\\"):
-                position += 1
-                char = text[position]
-            value.append(char)
-            position += 1
-        raise HuntError("引号没有闭合")
-
-    tokens = []
-    i, n = 0, len(text)
-    while i < n:
-        ch = text[i]
-        if ch.isspace():
-            i += 1
-            continue
-        if ch in "()":
-            tokens.append((ch, ch))
-            i += 1
-            continue
-        if ch in "\"'":
-            value, i = quoted(i)
-            tokens.append(("str", value))
-            continue
-        buf = []
-        while i < n:
-            ch = text[i]
-            if ch in "\"'":
-                value, i = quoted(i)
-                buf.append(value)
-                continue
-            if ch.isspace() or ch in "()":
-                break
-            buf.append(ch)
-            i += 1
-        tokens.append(("term", "".join(buf)))
-    # field: "带 空格 的值" / field: value / field: *.google.com
-    merged = []
-    i = 0
-    while i < len(tokens):
-        kind, value = tokens[i]
-        if (kind == "term" and value.endswith(":") and i + 1 < len(tokens)
-                and tokens[i + 1][0] in ("term", "str")):
-            merged.append(("term", value + tokens[i + 1][1]))
-            i += 2
-            continue
-        merged.append(tokens[i])
-        i += 1
-    return merged
-
-
-class HuntParser:
-    def __init__(self, tokens):
-        self.tokens = tokens
-        self.pos = 0
-
-    def peek(self):
-        return self.tokens[self.pos] if self.pos < len(self.tokens) else (None, None)
-
-    def advance(self):
-        token = self.peek()
-        self.pos += 1
-        return token
-
-    def parse(self):
-        if not self.tokens:
-            raise HuntError("空查询")
-        node = self.parse_or()
-        if self.pos < len(self.tokens):
-            raise HuntError("多余的输入: %s" % (self.peek()[1],))
-        return node
-
-    def parse_or(self):
-        node = self.parse_and()
-        while True:
-            kind, value = self.peek()
-            if kind == "term" and (value.upper() == "OR" or value == "||"):
-                self.advance()
-                node = ("or", node, self.parse_and())
-            else:
-                return node
-
-    def parse_and(self):
-        node = self.parse_unary()
-        while True:
-            kind, value = self.peek()
-            if kind is None or kind == ")" or (kind == "term" and (value.upper() == "OR" or value == "||")):
-                return node
-            if kind == "term" and (value.upper() == "AND" or value == "&&"):
-                self.advance()
-            node = ("and", node, self.parse_unary())
-
-    def parse_unary(self):
-        kind, value = self.peek()
-        if kind == "term" and (value.upper() == "NOT" or value == "!"):
-            self.advance()
-            return ("not", self.parse_unary())
-        if kind == "term" and len(value) > 1 and value[0] in "-!":
-            # Lucene 风格的 -term / !term
-            self.advance()
-            return ("not", self.parse_term(value[1:]))
-        if kind == "(":
-            self.advance()
-            node = self.parse_or()
-            if self.advance()[0] != ")":
-                raise HuntError("括号不匹配")
-            return node
-        if kind in ("term", "str"):
-            self.advance()
-            return self.parse_term(value)
-        raise HuntError("无法解析: %r" % (value,))
-
-    @staticmethod
-    def parse_term(text):
-        if ":" in text:
-            field, _, value = text.partition(":")
-            field = field.lower()
-            if field == 'community_id':
-                field = 'community'
-            if field not in HUNT_FIELDS:
-                raise HuntError("未知字段: %s" % field)
-            if not value:
-                raise HuntError("字段 %s 缺少值" % field)
-            return ("cmp", HUNT_FIELDS[field], value)
-        return ("bare", text)
+from hunt_query import HuntError, parse_query, quote as hunt_quote
 
 
 def hunt_parse(text):
-    return HuntParser(hunt_tokenize(text)).parse()
+    return parse_query(text,HUNT_FIELDS,HUNT_NUMBER_FIELDS)
 
 
 def _hunt_number(value):
@@ -5546,9 +5360,16 @@ class App:
             self.login_failures.pop(ip, None)
 
     @staticmethod
-    def _overview_push(params):
+    def _overview_push(params, low=None, high=None):
         """Exact chart dimensions only; never execute a client-supplied SQL expression."""
         clauses, args = [], []
+        def evidence(predicate, values=()):
+            if low is None or high is None:
+                clauses.append(predicate);args.extend(values);return
+            clauses.append("(session_id IN (SELECT session_id FROM events WHERE ts>=? AND ts<=? AND "+predicate+
+                           " AND COALESCE(session_id,'')!='') OR (COALESCE(session_id,'')='' AND "+predicate+"))")
+            from overview_metrics import range_bound
+            args.extend([range_bound(low),range_bound(high),*values,*values])
         detection = params.get('detection')
         if detection:
             predicate = {'alerts': EventDB.DETECTION_SQL,
@@ -5556,7 +5377,7 @@ class App:
                          'drops': EventDB.BLOCKED_SQL}.get(detection)
             if predicate is None:
                 raise ValueError('检测筛选无效')
-            clauses.append('('+predicate+')')
+            evidence('('+predicate+')')
         fields = {'src':'src', 'dst':'dst', 'sig':'sig', 'app':'app',
                   'proto':'proto', 'dns':'dnsname', 'sni':'sni', 'type':'type'}
         for key, column in fields.items():
@@ -5566,8 +5387,18 @@ class App:
                     raise ValueError('概览筛选值无效')
                 if key == 'type' and value not in (*BASE_EVENT_TYPES, *APP_EVENT_TYPES):
                     raise ValueError('记录类型无效')
-                clauses.append(column+'=?' if value else 'COALESCE('+column+",'')=?")
-                args.append(value)
+                predicate=column+'=?' if value else 'COALESCE('+column+",'')=?"
+                if key in ('app','proto'):
+                    predicate='LOWER(COALESCE('+column+",''))=?";value=value.lower()
+                if key=='app' and low is not None and high is not None:
+                    from overview_metrics import application_cohort
+                    clause,values=application_cohort(value,low,high);clauses.append(clause);args.extend(values)
+                elif key in ('src','dst','proto'):
+                    clauses.append(predicate);args.append(value)
+                else:evidence(predicate,[value])
+        if 'connection' in params:
+            if params['connection']!='1':raise ValueError('连接筛选无效')
+            clauses.append("(COALESCE(session_id,'')!='' OR type='flow')")
         if 'sid' in params:
             try:
                 value = int(params['sid'])
@@ -5575,8 +5406,7 @@ class App:
                     raise ValueError()
             except (TypeError, ValueError, OverflowError):
                 raise ValueError('签名标识无效') from None
-            clauses.append('sid=?')
-            args.append(value)
+            evidence('sid=?',[value])
         return clauses, args
 
     @data_query()
@@ -5592,7 +5422,7 @@ class App:
         except (TypeError, ValueError, OverflowError):
             raise ValueError('时间参数无效')
         window = max(1, math.ceil((high - low) / 60))
-        push = self._overview_push(params)
+        push = self._overview_push(params, low, high)
         if window <= 15:
             bucket = 1      # 15 分钟视图：1 分钟一个点
         elif window <= 60:
@@ -5611,8 +5441,9 @@ class App:
         ips = counters.get("ips", {}) if isinstance(counters, dict) else {}
         drops = ips.get("drop_reason", {}) if isinstance(ips, dict) else {}
         agg = self.db.security_summary(window=window, topn=5, dedup=True, start=low, end=high, push=push)
-        _, recent = self.db.search_range(low, high,
-                                         types=["alert", "drop"], limit=10, dedup=True,list_view=True,push=push)
+        _, recent = self.db.search_range(low, high,limit=10,list_view=True,push=push)
+        network_push=self._overview_push(params,('range','start'),('range','end'))
+        network = self.network.get(low, high, rolling=('fixed_start' if params.get('from') else 'rolling') if not params.get('to') else False, push=network_push)
         try:
             ingest_lag = max(0, os.stat(EVE).st_size - self.store.offset)
         except OSError:
@@ -5640,7 +5471,7 @@ class App:
             "series": self.db.security_series(window, bucket, start=low, end=high, push=push),
             "coverage": int(now() - agg["oldest"]) if agg.get("oldest") else 0,
             "security": agg,
-            "network": self.network.get(low, high, rolling=('fixed_start' if params.get('from') else 'rolling') if not params.get('to') else False, push=push),
+            "network": network,
             "sensor": {"ingest_lag_bytes": ingest_lag,
                        "error": self.store.last_error or self.db.last_error,
                        "scope": "Snort 配置的采集范围",
@@ -5648,7 +5479,7 @@ class App:
             "window": window,
             "range": [low, high],
             "bucket": bucket,
-            "top": {key:agg[key] for key in ('signatures','sources','destinations')},
+            "top": dict(signatures=agg['signatures'],sources=network.get('log_sources',[]),destinations=network.get('log_destinations',[])),
             "recent": recent,
             "events_total": len(self.store.events),
         }
@@ -5732,6 +5563,9 @@ class App:
         if sev:
             clauses.append("sev IN (%s)" % ",".join("?" * len(sev)))
             args.extend(sev)
+        if params.get('detection'):
+            if params['detection']!='alerts':raise ValueError('检测筛选无效')
+            clauses.append(EventDB.DETECTION_SQL)
         for key in ("proto", "action"):
             if params.get(key):
                 clauses.append("LOWER(%s) = ?" % key)
@@ -5890,6 +5724,16 @@ class App:
                     records=[anchor], anchor=anchor)
 
     @data_query(cache=False)
+    def summary_dns_context(self, params):
+        session=params.get('session_id')
+        if not isinstance(session,str) or not re.fullmatch(r'[0-9a-f]{32}:[0-9a-f]{16}',session):
+            raise ValueError('DNS 关联需要引擎会话 ID')
+        context=self.db.session_context(session)
+        if not context:return dict(status='not_found',records=[])
+        from dns_context import candidates
+        return candidates(self.db,context)
+
+    @data_query(cache=False)
     def summary_hunt(self, params):
         """Bounded model-authored DSL, always intersected with the trusted session."""
         session, query = params.get('session_id'), params.get('query')
@@ -5904,6 +5748,9 @@ class App:
         allowed = {'type','action','level','app','state','rcode','status','method','sig','sig_id',
                    'reason','sni','host','dns','validation_status','ips_action','bytes_toserver',
                    'bytes_toclient','pkts_toserver','pkts_toclient'}
+        scope=params.get('scope','session')
+        if scope not in ('session','ioc'):raise ValueError('检索范围无效')
+        if scope=='ioc':allowed.update(('src','dst','proto','sha256','gid','rrtype'))
         def validate(term, depth=0):
             if depth>12:
                 raise ValueError('狩猎条件过于复杂')
@@ -5914,19 +5761,31 @@ class App:
             elif term[0]!='cmp' or term[1] not in allowed or len(term[2])>100:
                 raise ValueError('狩猎搜索词包含不支持的字段或条件')
         validate(node)
-        where, args, complete = hunt_sql_pushdown(node)
+        where, args, complete = hunt_sql_pushdown(node,True)
         if not complete:
             raise ValueError('狩猎条件不能执行有界结构化查询')
-        condition = 'session_id=? AND ('+' AND '.join(where)+')'
+        condition = 'session_id=? AND ('+' AND '.join(where)+')';bound=[session,*args]
+        display='session_id: '+json.dumps(session)+' AND ('+query+')';period=None
+        if scope=='ioc':
+            context=self.db.session_context(session)
+            if not context:raise ValueError('会话已不在保留范围内')
+            from llm_hunting import scope_query
+            guard_query=scope_query(context)
+            guards,values,full=hunt_sql_pushdown(hunt_parse(guard_query),True)
+            if not full:raise ValueError('IOC 范围不能执行结构化查询')
+            guard='('+' AND '.join(guards)+')'
+            low=max(context['first_ts']-900,context['last_ts']-1800);high=context['last_ts']+900
+            condition='ts>=? AND ts<=? AND '+guard+' AND ('+' AND '.join(where)+')'
+            bound=[low*1000,high*1000,*values,*args];period=[low,high];display=guard_query+' AND ('+query+') AND time:['+str(low)+' TO '+str(high)+']'
         with self.db.lock:
             self.db._hunt_functions()
             try:
-                total = self.db.conn.execute('SELECT COUNT(*) FROM events WHERE '+condition,[session,*args]).fetchone()[0]
-                records = self.db.context_records(condition,[session,*args],limit=4)
+                total = self.db.conn.execute('SELECT COUNT(*) FROM events WHERE '+condition,bound).fetchone()[0]
+                records = self.db.context_records(condition,bound,limit=4)
             except sqlite3.Error:
                 raise RuntimeError('狩猎检索中断或未完成') from None
-        return dict(query='session_id: '+json.dumps(session)+' AND ('+query+')',
-                    predicate=query, total=total, records=records)
+        return dict(query=display,predicate=query, total=total, records=records,scope=scope,range=period,
+                    session_id=session if scope=='session' else '',observed_scope=scope=='ioc')
 
     def cache_stats(self):
         try:
@@ -6065,7 +5924,7 @@ class App:
                 {"name": "sni", "desc": "TLS SNI", "example": "sni:google"},
                 {"name": "host", "desc": "HTTP Host", "example": "host:example.com"},
                 {"name": "dns", "desc": "DNS 名称", "example": "dns:dbankcloud"},
-                {"name": "url", "desc": "HTTP 路径", "example": "url:/api/"},
+                {"name": "url", "desc": "HTTP 路径", "example": 'url:"/api/"'},
                 {"name": "ja3", "desc": "JA3 指纹", "example": "ja3:7fbc9a37"},
                 {"name": "ua", "desc": "User-Agent", "example": "ua:curl"},
                 {"name": "file", "desc": "文件名", "example": "file:.exe"},
@@ -6104,7 +5963,8 @@ class App:
                 {"name": "alpn", "desc": "ALPN", "example": "alpn:h2"},
                 {"name": "anom", "desc": "协议异常", "example": "anom:applayer"},
             ],
-            "operators": ["AND", "OR", "NOT", "&&", "||", "!", "-term", "(", ")", "*", "?"],
+            "language": "Lucene",
+            "operators": ["AND", "OR", "NOT", "-term", "(", ")", "[", "]", "{", "}", "TO", "*", "?"],
             "examples": [
                 "type:dns AND app:dns",
                 "src:192.0.2.0/24 AND dport:443",
@@ -6116,9 +5976,20 @@ class App:
             ],
         }
         schema['fields'].extend({'name': name, 'desc': label, 'example': name+': '+('>=1700000000' if name in ('flow_start','flow_end') else '>1000')} for name,label in FLOW_METRIC_FIELDS.items())
-        unsupported = {'ja3','ja3s','ja4','alpn','md5','sha1','vlan','pkt_src','icmp_type','icmp_code','flow','community','community_id','iface'}
+        unsupported = {'ja3','ja3s','ja4','alpn','md5','sha1','vlan','pkt_src','flow','community','community_id','iface'}
         schema['fields'] = [field for field in schema['fields'] if field['name'] not in unsupported]
         native_labels = {'session_id':'采集会话 ID（原文精确匹配）','uid':'Snort 原生 UID（原文精确匹配）','history':'连接历史','tenant_id':'租户编号','cipher':'密码套件','curve':'椭圆曲线','validation_status':'证书验证状态','client_protocol':'客户端应用协议','command':'FTP 命令','arg':'FTP 命令参数','user':'FTP 用户名','reply_code':'FTP 响应码','reply_msg':'FTP 响应','fuid':'文件标识','source':'来源协议','analyzers':'文件分析器','timedout':'文件分析超时','extracted_cutoff':'文件截断','ips_action':'规则动作','ids_reason':'IDS 模式原因'}
+        native_labels.update({name:label for name,label in [
+            ('session_event','会话生命周期事件'),('session_origin','会话观察起点'),('session_limited','会话状态记录限制'),('observed_first','首次观察时间'),('observed_last','最后观察时间'),
+            ('wire_bytes_toserver','客户端方向报文字节数'),('wire_bytes_toclient','服务端方向报文字节数')]})
+        native_labels['dns_ttl']='最小 DNS 应答 TTL（秒）'
+        native_labels.update({'client.version':'SSH 客户端版本','server.version':'SSH 服务端版本','kex_alg':'SSH 密钥交换','host_key_alg':'SSH 主机密钥算法','cipher_alg':'SSH 加密算法','mac_alg':'SSH MAC 算法','compression_alg':'SSH 压缩算法'})
+        native_labels.update(packet_ts='采样包时间',packet_len='采样包长度',data_len='采样包数据长度',packet_direction='采样包方向',
+            ip_ttl='IP TTL / 跳数限制',ip_tos='IP TOS / 流量类别',ip_id='IP 标识',ip_offset='IP 分片偏移（字节）',ip_flags='IP 分片标志',
+            ip_proto='IP 协议编号',ip_header_len='IP 报头长度',
+            tcp_flags='TCP 标志位',tcp_window='TCP 窗口',tcp_seq='TCP 序列号',tcp_ack='TCP 确认号',tcp_options_len='TCP 选项长度')
+        native_labels.update({'appid_'+name:'OpenAppID '+label for name,label in [('service','服务'),('client','客户端'),('payload','应用'),('misc','其他应用'),('referred','关联应用')]})
+        native_labels.update({'appid_'+name+'_id':'OpenAppID '+label+'编号' for name,label in [('service','服务'),('client','客户端'),('payload','应用'),('misc','其他应用'),('referred','关联应用')]})
         native_labels.update(observer='采集组件',quic_cids='可见 QUIC 连接 ID',quic_paths='可见 QUIC 通信路径',coverage='QUIC 证据范围')
         schema['fields'].extend({'name':name,'desc':label,'example':name+':'+('1234567890' if name=='uid' else '*')} for name,label in native_labels.items())
         for field in schema['fields']:
@@ -6852,6 +6723,7 @@ button:disabled{opacity:.4;cursor:not-allowed}
             if path == "/api/events":
                 data = self.app.events(params)
                 if params.get("format") == "csv":
+                    if data.get('error'):return self._error(503,'事件查询失败，未生成导出文件')
                     return self._send(200, events_csv(data.get("events", [])),
                                       "text/csv; charset=utf-8", {
                                           "Content-Disposition": 'attachment; filename="snort-alerts.csv"',
@@ -6991,11 +6863,13 @@ button:disabled{opacity:.4;cursor:not-allowed}
     def _serve_stream(self, params):
         """Window-correct snapshots include delayed writes and expire old rows."""
         topic = (params.get("topic") or "overview").strip()
+        if disconnected(self.connection):return
         self._sse_start()
         deadline = time.monotonic() + 300
         last = None
         while time.monotonic() < deadline:
             if getattr(self.server,'stop',None) is not None and self.server.stop.is_set():return
+            if disconnected(self.connection):return
             if not self._session():
                 self._sse_send({"error": "login required", "status": 401})
                 return
@@ -7019,10 +6893,14 @@ button:disabled{opacity:.4;cursor:not-allowed}
 
     def _sse_sleep(self,seconds, deadline):
         stop=getattr(self.server,'stop',None)
-        if stop is not None:
-            if stop.wait(seconds):return False
-        else:time.sleep(seconds)
-        return time.monotonic() < deadline
+        wake=min(deadline,time.monotonic()+seconds)
+        while True:
+            if (stop is not None and stop.is_set()) or disconnected(self.connection):return False
+            remaining=wake-time.monotonic()
+            if remaining<=0:return time.monotonic()<deadline
+            # No extra snapshot queries: only observe FIN/RST while waiting.
+            if stop is not None:stop.wait(min(.1,remaining))
+            else:time.sleep(min(.1,remaining))
 
     def do_POST(self):  # noqa: N802
         try:
@@ -7176,7 +7054,8 @@ def main(argv=None):
         print("[suppress] 生效 %d 条，待规则启用 %d 条" % (result["active"], result["pending"]))
         if args.test_rules:
             from snort_engine import BINARY
-            result = subprocess.run([BINARY, "-T", "-c", SNORT_CONF], check=False)
+            from session_logger import plugin_arguments
+            result = subprocess.run([BINARY, *plugin_arguments(), "-T", "-c", SNORT_CONF], check=False)
             return result.returncode
         return 0
 

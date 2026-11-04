@@ -1,0 +1,83 @@
+"""Log frequencies and connection cohorts share one bounded SQL implementation."""
+import time
+from parallel_sql import fetch_many
+
+APP_ORDER="(app NOT IN ('','unknown','failed')) DESC,(COALESCE(app,'')!='') DESC,(type='session') DESC,ts DESC,id DESC"
+
+
+def range_bound(value):
+    return value if isinstance(value,tuple) else value*1000
+
+
+def resolve_bounds(push,start,end):
+    if not push:return push
+    return push[0],[start*1000 if value==('range','start') else end*1000 if value==('range','end') else value for value in push[1]]
+
+
+def application_cohort(value,low,high):
+    clause="""(session_id IN (SELECT session_id FROM
+      (SELECT session_id,FIRST_VALUE(COALESCE(app,'')) OVER(PARTITION BY session_id ORDER BY """+APP_ORDER+""") name
+       FROM events WHERE ts>=? AND ts<=? AND COALESCE(session_id,'')!='') WHERE LOWER(name)=?)
+      OR (COALESCE(session_id,'')='' AND LOWER(COALESCE(app,''))=?))"""
+    return clause,[range_bound(low),range_bound(high),value.lower(),value.lower()]
+
+
+def summarize(conn, start, end, *, table='events', push=None, parallel=None):
+    if table not in ('events','facts'):raise ValueError('Unsupported overview source')
+    volume='volume' if table=='facts' else 'COALESCE(bytes_toserver,0)+COALESCE(bytes_toclient,0)'
+    origin='orig_pkts' if table=='facts' else 'pkts_toserver'
+    response='resp_pkts' if table=='facts' else 'pkts_toclient'
+    suffix=' AND '+' AND '.join(push[0]) if push and push[0] else ''
+    args=[start*1000,end*1000,*(push[1] if push and push[0] else [])]
+    base='''WITH selected AS MATERIALIZED (SELECT id,ts,type,COALESCE(src,'') src,COALESCE(dst,'') dst,
+      COALESCE(app,'') app,COALESCE(proto,'') proto,COALESCE(dnsname,'') dnsname,COALESCE(sni,'') sni,
+      COALESCE(session_id,'') session_id, CASE WHEN type='flow' THEN '''+volume+''' END volume,
+      COALESCE('''+origin+''',0) orig_pkts,COALESCE('''+response+''',0) resp_pkts
+      FROM '''+table+' WHERE ts>=? AND ts<=?'+suffix+') '
+    # Exact engine identities join protocol, alert and lifecycle observations.
+    # Unidentified historical records contribute connections only as flow rows.
+    cohort=base+''', candidates AS (SELECT *,
+      ROW_NUMBER() OVER (PARTITION BY CASE WHEN session_id!='' THEN 'session:'||session_id ELSE 'record:'||id END
+        ORDER BY (type='flow') DESC,(type='session') DESC,ts DESC,id DESC) position,
+      FIRST_VALUE(app) OVER (PARTITION BY CASE WHEN session_id!='' THEN 'session:'||session_id ELSE 'record:'||id END
+        ORDER BY '''+APP_ORDER+''') application,
+      MAX(volume) OVER (PARTITION BY CASE WHEN session_id!='' THEN 'session:'||session_id ELSE 'record:'||id END) payload,
+      MAX(orig_pkts) OVER (PARTITION BY CASE WHEN session_id!='' THEN 'session:'||session_id ELSE 'record:'||id END) sent,
+      MAX(resp_pkts) OVER (PARTITION BY CASE WHEN session_id!='' THEN 'session:'||session_id ELSE 'record:'||id END) received,
+      MAX(ts) OVER (PARTITION BY CASE WHEN session_id!='' THEN 'session:'||session_id ELSE 'record:'||id END) latest
+      FROM selected WHERE session_id!='' OR type='flow'), connections AS (SELECT * FROM candidates WHERE position=1)
+      SELECT 'metrics','',COUNT(*),COALESCE(SUM(payload),0),COALESCE(SUM(sent>0 AND received>0),0),
+        COALESCE(SUM((sent>0)!=(received>0)),0),MAX(latest),
+        (SELECT COUNT(*) FROM (SELECT src ip FROM connections WHERE src!='' UNION SELECT dst ip FROM connections WHERE dst!=''))
+      FROM connections
+      UNION ALL SELECT 'application',name,n,NULL,NULL,NULL,NULL,NULL FROM
+        (SELECT LOWER(application) name,COUNT(*) n FROM connections GROUP BY LOWER(application) ORDER BY n DESC,name LIMIT 8)
+      UNION ALL SELECT 'protocol',name,n,NULL,NULL,NULL,NULL,NULL FROM
+        (SELECT UPPER(proto) name,COUNT(*) n FROM connections GROUP BY UPPER(proto) ORDER BY n DESC,name LIMIT 8)
+      UNION ALL SELECT 'connection_source',src,n,payload,NULL,NULL,latest,NULL FROM
+        (SELECT src,COUNT(*) n,SUM(payload) payload,MAX(latest) latest FROM connections WHERE src!='' GROUP BY src ORDER BY n DESC,src LIMIT 8)'''
+    logs=base+''' SELECT 'type',type,COUNT(*),MAX(ts) FROM selected GROUP BY type
+      UNION ALL SELECT 'source',src,n,NULL FROM (SELECT src,COUNT(*) n FROM selected WHERE src!='' GROUP BY src ORDER BY n DESC,src LIMIT 8)
+      UNION ALL SELECT 'destination',dst,n,NULL FROM (SELECT dst,COUNT(*) n FROM selected WHERE dst!='' GROUP BY dst ORDER BY n DESC,dst LIMIT 8)
+      UNION ALL SELECT 'address_counts','',COUNT(DISTINCT NULLIF(src,'')),COUNT(DISTINCT NULLIF(dst,'')) FROM selected
+      UNION ALL SELECT 'dns',dnsname,n,NULL FROM (SELECT dnsname,COUNT(*) n FROM selected WHERE type='dns' AND dnsname!='' GROUP BY dnsname ORDER BY n DESC,dnsname LIMIT 8)
+      UNION ALL SELECT 'tls',sni,n,NULL FROM (SELECT sni,COUNT(*) n FROM selected WHERE type='tls' AND sni!='' GROUP BY sni ORDER BY n DESC,sni LIMIT 8)'''
+    connection_rows,log_rows=fetch_many(conn,[(cohort,args),(logs,args)],parallel)
+    result=dict(range=[start,end],as_of=time.time(),records=0,flows=0,dns=0,tls=0,newest=0,
+                bytes=0,bidirectional=0,one_way=0,addresses=0,source_count=0,destination_count=0,
+                applications=[],protocols=[],dns_names=[],tls_names=[],sources=[],event_types=[],log_sources=[],log_destinations=[])
+    for kind,name,count,volume,bidirectional,one_way,latest,addresses in connection_rows:
+        if kind=='metrics':result.update(flows=count,bytes=volume,bidirectional=bidirectional,one_way=one_way,addresses=addresses)
+        elif kind=='connection_source':result['sources'].append(dict(ip=name,count=count,bytes=volume,latest=(latest or 0)/1000))
+        else:result['applications' if kind=='application' else 'protocols'].append(dict(name=name or '未识别',count=count))
+    for kind,name,count,extra in log_rows:
+        if kind=='type':
+            result['event_types'].append(dict(name=name,count=count));result['records']+=count
+            result['newest']=max(result['newest'],(extra or 0)/1000)
+            if name in ('dns','tls'):result[name]=count
+        elif kind=='address_counts':result.update(source_count=count,destination_count=extra)
+        elif kind in ('source','destination'):
+            result['log_sources' if kind=='source' else 'log_destinations'].append(dict(ip=name,count=count))
+        else:result['dns_names' if kind=='dns' else 'tls_names'].append(dict(name=name,count=count))
+    result['event_types'].sort(key=lambda row:row['name'])
+    return result

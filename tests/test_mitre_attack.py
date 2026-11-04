@@ -101,7 +101,7 @@ class MitreAttackCase(unittest.TestCase):
     def test_finite_type_options_match_ingestion_types_and_examples_parse(self):
         fields = {field['name']: field for field in m.App.hunt_schema()['fields']}
         self.assertTrue(set(m.MITRE_FIELDS).issubset(fields))
-        self.assertEqual({item['value'] for item in fields['type']['values']}, {'alert','drop','dns','http','tls','anomaly','fileinfo','flow','quic','ssh','ftp'})
+        self.assertEqual({item['value'] for item in fields['type']['values']}, {'alert','drop','dns','http','tls','anomaly','fileinfo','flow','session','quic','ssh','ftp'})
         self.assertEqual({item['value'] for item in fields['level']['values']}, {'high', 'medium', 'low','unknown'})
         for field in fields.values():
             for item in field.get('values', []):

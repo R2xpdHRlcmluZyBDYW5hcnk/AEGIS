@@ -46,3 +46,7 @@ parse5 升级后引入其所需的 entities 9.0.0。锁文件通过核定工具�
 应用依赖使用 `frontend/package.json` 的精确版本和 `frontend/package-lock.json`。更新间接依赖时在临时目录运行兼容范围内的锁文件更新；生产构建始终使用 `npm ci`，不在构建时临时选择未锁定的依赖。
 
 升级后执行工具链回归、生产构建、产物一致性检查及相关桌面浏览器回归。依赖、下载归档、生成的 MITRE 数据、缓存和测试资料均在临时目录清理。路由器仅运行构建后的静态资源，不安装 Node.js 或 npm。
+
+## Python 搜索依赖（2026-11-04）
+
+根据 [Luqum 官方发行信息](https://pypi.org/project/luqum/)与 [PLY 官方发行信息](https://pypi.org/project/ply/)，核定 Luqum 1.0.0 和其依赖 PLY 3.11；两者没有 LTS 发行线。查询方法、时间和解析器选择见 [事件搜索](event-search.md)。`build_tools/python-sources.json` 固定官方 wheel URL、SHA-256 和许可；构建器预生成匹配的 PLY 表并打包为只读 ZIP。后端发布、前端回归、预览与 `tests/run_backend.py` 自动准备临时依赖，不修改全局 Python 安装。生产运行不访问包仓库。

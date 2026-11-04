@@ -6,11 +6,17 @@
 
 `build_tools/patch_snort.py` 包含匹配 Snort 3.12.4.0 的上游片段和本项目 session_id 修改，按 GPL-2.0-only 提供，文件内标明维护日期。上游为 [Snort 3.12.4.0](https://github.com/snort3/snort3/tree/3.12.4.0)，完整许可和特别声明见 [Snort-COPYING.txt](LICENSES/Snort-COPYING.txt)，GPLv2 正文见 [GPL-2.0.txt](LICENSES/GPL-2.0.txt)。
 
+`native_session_logger.cc` 使用同版 Snort 的 Flow、TCP tracker、AppID 和插件 API，按 GPL-2.0-only 提供。可选扩展包附带该文件、构建清单及上述许可；需要匹配经过 session 补丁的头文件与运行二进制，不能仅按版本号假定 ABI 相同。
+
 Snort、LibDAQ、OpenAppID 及外部库不提交到源码仓库。可选构建工具的来源和校验值见 `build_tools/snort-sources.json`。另行分发生成的引擎包时，需保留上游版权、许可和适用的对应源码，面板源码包不能替代这些义务。
 
 ## 前端依赖
 
 Angular、RxJS、Zone.js、tslib、Apache ECharts、ZRender 与构建工具通过 npm 锁文件获取，依赖目录不提交。版本、来源、完整性值和各包声明的许可见 `frontend/package-lock.json`。生产构建提取许可到 `frontend-licenses.txt`，分发静态资源时一并保留。
+
+## Python 查询解析
+
+Luqum 1.0.0 提供 Apache-2.0 / LGPL 双许可，本项目选择 Apache-2.0；PLY 3.11 使用 BSD-3-Clause。来源与 wheel SHA-256 固定在 `build_tools/python-sources.json`；构建时在临时目录下载、校验并生成 `python-dependencies.zip`，包含各发行包的许可及元数据。第三方代码和生成包不提交源码仓库，部署时随程序分发，运行时不下载或安装包。
 
 ## MITRE ATT&CK
 

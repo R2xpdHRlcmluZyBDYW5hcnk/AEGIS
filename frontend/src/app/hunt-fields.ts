@@ -21,23 +21,29 @@ export function huntSuggestions(value:string,fields:HuntField[],caret=value.leng
   if(escaped){escaped=false;continue;}
   if(char==='\\'){escaped=true;continue;}
   if(quoted){if(char===quoted)quoted='';continue;}
-  if(char==='"'||char==="'"){quoted=char;continue;}
+  if(char==='"'){quoted=char;continue;}
+  // Ranges are one expression. Do not suggest unrelated fields inside them.
+  if((char==='['||char==='{')&&i<position){
+   const closing=char==='['?']':'}',finish=value.indexOf(closing,i+1);
+   if(finish<0||position<=finish)return [];
+   i=finish;continue;
+  }
   if(/[\s()]/.test(char)){
    if(i<position)start=i+1;else{end=i;break;}
   }
  }
- const spacedField=value.slice(0,start).match(/([!-]?[a-zA-Z_][a-zA-Z0-9_]*:)\s*$/);
+ const spacedField=value.slice(0,start).match(/(-?[a-zA-Z_][a-zA-Z0-9_]*:)\s*$/);
  if(spacedField)start=spacedField.index!;
  const prefix=value.slice(start,position),colon=prefix.indexOf(':');
- const bare=prefix.replace(/^[!-]/,'');
+ const bare=prefix.replace(/^-/,'');
  if(colon>=0){
-  const fieldName=prefix.slice(0,colon).replace(/^[!-]/,'').toLowerCase(),field=fields.find(f=>f.name===fieldName);
+  const fieldName=prefix.slice(0,colon).replace(/^-/,'').toLowerCase(),field=fields.find(f=>f.name===fieldName);
   if(field?.values){
-   const needle=prefix.slice(colon+1).trimStart().replace(/^["']/,'').toLowerCase(),negation=prefix.match(/^[!-]/)?.[0]||'';
-   return field.values.filter(item=>item.value.toLowerCase().startsWith(needle)||(/[^\x00-\x7f]/.test(needle)&&item.label.toLowerCase().includes(needle))).map(item=>({name:field.name,example:negation+field.name+': '+(/[\s()]/.test(item.value)?JSON.stringify(item.value):item.value),desc:item.label,from:start,to:end}));
+   const needle=prefix.slice(colon+1).trimStart().replace(/^"/,'').toLowerCase(),negation=prefix.match(/^-/)?.[0]||'';
+   return field.values.filter(item=>item.value.toLowerCase().startsWith(needle)||(/[^\x00-\x7f]/.test(needle)&&item.label.toLowerCase().includes(needle))).map(item=>({name:field.name,example:negation+field.name+': '+(/[^a-zA-Z0-9_.-]/.test(item.value)?JSON.stringify(item.value):item.value),desc:item.label,from:start,to:end}));
   }
   return [];
  }
- const needle=bare.toLowerCase(),negation=prefix.match(/^[!-]/)?.[0]||'';
+ const needle=bare.toLowerCase(),negation=prefix.match(/^-/)?.[0]||'';
  return fields.filter(f=>!needle||f.name.toLowerCase().startsWith(needle)||f.example.toLowerCase().startsWith(needle)||f.desc.toLowerCase().includes(needle)).map(field=>({...field,example:negation+field.name+':',from:start,to:end}));
 }

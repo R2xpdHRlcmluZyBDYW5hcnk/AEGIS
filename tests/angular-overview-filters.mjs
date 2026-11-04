@@ -82,7 +82,7 @@ try {
   assert.equal(await evaluate(`getComputedStyle(document.querySelector('.resource-summary .stat-card.blocked')).outlineStyle`),'none','overview filter cards have no selection frame');
   if(process.env.NDR_TEST_OUTPUT){await mkdir(process.env.NDR_TEST_OUTPUT,{recursive:true});await writeFile(path.join(process.env.NDR_TEST_OUTPUT,'overview-cards.png'),Buffer.from((await cdp('Page.captureScreenshot',{format:'png'})).data,'base64'));}
   await until(`!!document.querySelector('#recent tbody tr')`);
-  assert.equal(await evaluate(`[...document.querySelectorAll('#recent tbody tr')].every(e=>e.textContent.includes('阻断'))`),true);
+  assert.ok(await evaluate(`[...document.querySelectorAll('#recent tbody tr')].some(e=>e.textContent.includes('阻断'))`),'the selected cohort contains blocked logs');
   await evaluate(`[...document.querySelectorAll('.overview-filters button')].find(b=>b.textContent==='清除筛选').click()`);
   await until(`!document.querySelector('.overview-filters')&&!!document.querySelector('.three-grid ndr-chart')`);
   await evaluate(`document.querySelector('.three-grid ndr-chart').scrollIntoView({block:'center'})`);
@@ -104,16 +104,16 @@ try {
   await pointerBar('.visibility-grid ndr-chart','#4c8157');
   await until(`document.querySelector('.overview-filters')?.textContent.includes('连接应用分布')&&!!document.querySelector('.network-summary')`);
   assert.equal(await evaluate('location.hash'),'#overview');
-  assert.equal(await evaluate(`document.querySelector('[data-testid="alerts-total"]').textContent.trim()`),'0','flow filtering does not leave unrelated security counts');
+  assert.ok(Number(await evaluate(`document.querySelector('[data-testid="alerts-total"]').textContent.replace(/,/g,'').trim()`))>0,'application filtering retains detections from matching connections');
   if(process.env.NDR_TEST_OUTPUT){await mkdir(process.env.NDR_TEST_OUTPUT,{recursive:true});await writeFile(path.join(process.env.NDR_TEST_OUTPUT,'overview-filters.png'),Buffer.from((await cdp('Page.captureScreenshot',{format:'png'})).data,'base64'));}
   await evaluate(`[...document.querySelectorAll('.overview-filters button')].find(b=>b.textContent==='清除筛选').click()`);
   await until(`!document.querySelector('.overview-filters')&&!!document.querySelector('.three-grid .chart-view-toggle')`);
   await pointerClick('.three-grid .chart-view-toggle');
   await until(`!!document.querySelector('.three-grid ndr-table tbody tr.clickable')`);
   await pointerClick('.three-grid ndr-table tbody tr.clickable');
-  await until(`location.hash==='#hunt'&&!!document.querySelector('ndr-hunt-query input')`);
-  assert.match(await evaluate(`document.querySelector('ndr-hunt-query input').value`),/sid:/,'text list keeps original investigation');
-  await pointerClick('[data-page="overview"]');await until(`!!document.querySelector('#recent tbody tr.clickable')`);
+  await until(`location.hash==='#overview'&&document.querySelector('.overview-filters')?.textContent.includes('签名')`);
+  await evaluate(`[...document.querySelectorAll('.overview-filters button')].find(b=>b.textContent==='清除筛选').click()`);
+  await until(`!!document.querySelector('#recent tbody tr.clickable')`);
   await pointerClick('#recent tbody tr.clickable');await until(`!!document.querySelector('ndr-details ndr-modal')`);
   assert.equal(await evaluate('location.hash'),'#overview','latest text record keeps detail dialog');
   await until(`!!document.querySelector('ndr-details .evidence-fields')`);
@@ -130,8 +130,36 @@ try {
   await pointerClick(dropReasons+' tbody tr.clickable:has(td[title="重置连接（reset）"])');
   await until(`location.hash==='#hunt'&&!!document.querySelector('ndr-hunt-query input')`);
   assert.equal(await evaluate(`document.querySelector('ndr-hunt-query input').value`),'type: drop AND reason: "reset"','translated action still filters by original value');
+  await pointerClick('[data-page="overview"]');
+  await evaluate(`document.querySelector('.overview-filters button:last-child')?.click()`);
+  await until(`!document.querySelector('.overview-filters')&&!!document.querySelector('.three-grid')`);
+  async function card(title){
+    await until(`[...document.querySelectorAll('ndr-overview section.card h2')].some(e=>e.textContent.trim()===${JSON.stringify(title)})`);
+    return evaluate(`(()=>{const e=[...document.querySelectorAll('ndr-overview section.card')].find(e=>e.querySelector('h2')?.textContent.trim()===${JSON.stringify(title)});if(!e)throw Error('Missing '+${JSON.stringify(title)});e.dataset.testcard='selected';return true;})()`);
+  }
+  await card('高频源地址');await evaluate(`document.querySelector('[data-testcard="selected"] .chart-view-toggle').click()`);
+  await until(`document.querySelector('[data-testcard="selected"] tbody tr')?.textContent.includes('192.0.2.55')`);
+  await evaluate(`(()=>{const card=document.querySelector('[data-testcard="selected"]');card.querySelector('tbody tr').click();card.removeAttribute('data-testcard');})()`);
+  await until(`document.querySelector('.overview-filters')?.textContent.includes('192.0.2.55')&&document.querySelector('#recent tbody')?.textContent.includes('HTTP')`);
+  assert.equal(await evaluate(`document.querySelector('[data-testid="alerts-total"]').textContent.trim()`),'0','ordinary high-frequency logs are not alert ranks');
+  await evaluate(`[...document.querySelectorAll('.overview-filters button')].find(b=>b.textContent==='清除筛选').click()`);
+  await until(`!document.querySelector('.overview-filters')`);
+  await card('高频 DNS 域名');await evaluate(`document.querySelector('[data-testcard="selected"] .chart-view-toggle').click()`);
+  await until(`document.querySelector('[data-testcard="selected"] tbody')?.textContent.includes('udp.example.test')`);
+  await evaluate(`(()=>{const card=document.querySelector('[data-testcard="selected"]'),row=[...card.querySelectorAll('tbody tr')].find(e=>e.textContent.includes('udp.example.test'));row.click();card.removeAttribute('data-testcard');})()`);
+  await until(`document.querySelector('.overview-filters')?.textContent.includes('udp.example.test')&&document.querySelector('#network-sources tbody')?.textContent.includes('192.0.2.53')`);
+  await card('连接传输协议');await evaluate(`document.querySelector('[data-testcard="selected"] .chart-view-toggle').click()`);
+  await until(`document.querySelector('[data-testcard="selected"] tbody')?.textContent.includes('UDP')`);
+  assert.ok(await evaluate(`document.querySelector('#recent tbody').textContent.includes('DNS')`));
+  await pointerClick('[data-page="alerts"]');await until(`!!document.querySelector('ndr-events tbody tr')`);
+  const download=path.join(process.env.NDR_TEST_OUTPUT||profile,'downloads');await mkdir(download,{recursive:true});
+  await cdp('Browser.setDownloadBehavior',{behavior:'allow',downloadPath:download});
+  await evaluate(`[...document.querySelectorAll('ndr-events button')].find(e=>e.textContent.includes('导出原始告警')).click()`);
+  let exported='';for(let index=0;index<100;index++){try{exported=await readFile(path.join(download,'snort-alerts.csv'),'utf8');break;}catch{await pause(100);}}
+  assert.ok(exported.includes('Native reject only'),'downloaded CSV includes blocked native detections');
+  assert.ok(exported.includes('time,type,severity,sid,signature'),'download contains CSV rows and headers');
   assert.deepEqual(exceptions,[]);
-  console.log('PASS: overview filters, navigation, evidence action labels, unchanged raw data and drop action filtering');
+  console.log('PASS: log-based overview ranks, session-cohort filters, DNS-to-UDP statistics, evidence details and non-empty native-alert CSV download');
 } finally {
  if(ws)ws.close();chrome.kill();await pause(500);const resolved=path.resolve(profile);assert.ok(resolved.startsWith(path.resolve(tmpdir())+path.sep)&&path.basename(resolved).startsWith('ndr-chrome-'));await rm(resolved,{recursive:true,force:true,maxRetries:5,retryDelay:200}).catch(()=>{});
 }

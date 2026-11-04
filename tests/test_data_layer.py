@@ -383,7 +383,7 @@ class DataLayerCase(unittest.TestCase):
         self.db.network_generation += 1
         self.assertIsNone(self.stats.summary(self.stamp-1,self.stamp+1,lambda:False))
         self.sync()
-        self.derived.execute('DROP TABLE flows');self.derived.commit()
+        self.derived.execute('DROP TABLE facts');self.derived.commit()
         self.assertIsNone(self.stats.summary(self.stamp-1,self.stamp+1,lambda:False))
         self.assertTrue(self.stats.error)
 
@@ -458,7 +458,7 @@ class DataLayerCase(unittest.TestCase):
             records.append(m.EventStore._parse(json.dumps(raw))[0])
         hashed = m.tuple_hash('192.0.2.1',12345,'198.51.100.2',443,'TCP')
         for term in (hashed,hashed.upper(),hashed[:5]+'*','*','missing'):
-            for query in ('tuple_hash:'+term,'NOT tuple_hash:'+term,'tuple_hash:'+term+' OR community_id:1:priority'):
+            for query in ('tuple_hash:'+term,'NOT tuple_hash:'+term,'tuple_hash:'+term+' OR community_id:"1:priority"'):
                 expected = sum(m.hunt_match(m.hunt_parse(query),record) for record in records)
                 result = self.app.hunt({'q':query,'from':str(self.stamp-1),'to':str(self.stamp+3),'view':'list'})
                 self.assertEqual(result['total'],expected,query)
@@ -564,6 +564,30 @@ class DataLayerCase(unittest.TestCase):
 
 
 class HTTPConcurrencyCase(unittest.TestCase):
+    def test_closed_stream_releases_its_slot_before_the_next_refresh(self):
+        ended=threading.Event()
+        class Handler(m.Handler):
+            def log_message(self,*_):pass
+            def _session(self):return {'user':'fixture'}
+            def _stream_payload(self,*_):return {'ready':True}
+            def do_GET(self):
+                try:self._stream({})
+                finally:ended.set()
+        class Server(m.BoundedHTTPServer):MAX_STREAMS=1
+        with Server(('127.0.0.1',0),Handler) as server:
+            thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+            try:
+                for _ in range(6):
+                    ended.clear();connection=http.client.HTTPConnection(*server.server_address,timeout=3)
+                    try:
+                        connection.request('GET','/stream');response=connection.getresponse()
+                        self.assertEqual(response.status,200)
+                        self.assertTrue(response.fp.readline().startswith(b'data:'))
+                        response.close()
+                    finally:connection.close()
+                    self.assertTrue(ended.wait(1.5),'Closed SSE still holds the subscription slot during refresh sleep')
+            finally:server.shutdown();thread.join(3)
+
     def test_slow_request_body_does_not_hold_the_mutation_lock(self):
         reading=threading.Event()
         class Handler(m.Handler):

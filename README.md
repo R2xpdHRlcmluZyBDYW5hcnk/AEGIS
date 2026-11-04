@@ -47,11 +47,13 @@ QUIC 握手及可见路径追踪可选接入受限的 Wireshark 观察组件，�
 完整后端回归应在 Linux 或 WSL 中执行，部分测试需要 Unix 套接字与文件锁：
 
 ```sh
-python3 -B -m unittest discover -s tests -p 'test_*.py'
-python3 -B -m unittest -q test_ips_web
+python3 -B tests/run_backend.py discover -s tests -p 'test_*.py'
+python3 -B tests/run_backend.py -q test_ips_web
 ```
 
 生产构建包含前端产物一致性与组件回归。桌面浏览器回归使用 `tests/run_chart_regression.py --release <发布包>`，Chrome 路径可用 `CHROME_PATH` 指定。测试在开发机上使用合成数据或临时副本。维护约定见 [AGENTS.md](AGENTS.md)。提交公开源码前执行 `python -B tests/check_public_source.py`，检查暂存区中的凭据、个人路径、私网主机地址和运行产物。
+
+搜索语法、OpenAppID 文本渲染、会话详情与本地推理取消可运行 `python -B tests/run_hunt_regression.py --release <发布包>`；该回归仅启动回环预览与无界面的桌面 Chrome，使用合成事件与模型响应。
 
 ## 许可
 

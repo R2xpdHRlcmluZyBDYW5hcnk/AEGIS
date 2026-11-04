@@ -148,7 +148,11 @@ class Child:
         if self.nice is not None:
             kwargs["preexec_fn"] = lambda: os.nice(self.nice)
         started = time.time()
-        self.proc = subprocess.Popen(self.argv, **kwargs)
+        argv = list(self.argv)
+        if self.name == 'snort':
+            from session_logger import plugin_arguments
+            argv[1:1] = plugin_arguments()
+        self.proc = subprocess.Popen(argv, **kwargs)
         if self.name == "snort":
             with open(SNORT_PIDFILE, "w") as handle:
                 handle.write(str(self.proc.pid) + "\n")

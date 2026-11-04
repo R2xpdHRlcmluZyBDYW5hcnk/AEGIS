@@ -199,6 +199,15 @@ if os.environ.get('NDR_PREVIEW_SNORT') == '1':
         **{'id.orig_h':'192.0.2.30','id.orig_p':51030,'id.resp_h':'198.51.100.30','id.resp_p':443},
         module_identifier='ssl',server_name='native.example.test',version='TLS 1.3',
         cipher='TLS_AES_256_GCM_SHA384',curve='secp256r1')))
+if os.environ.get('NDR_PREVIEW_SESSION') == '1':
+    events.append(dict(engine='snort_session',data=dict(
+        session_id='b'*32+':0000000000000001',event='state',ts=m.now()-120,
+        first_observed=m.now()-130,last_observed=m.now()-120,
+        src='192.0.2.99',sport=45000,dst='198.51.100.99',dport=443,proto='TCP',
+        client_state=3,server_state=3,initial_syn_observed=True,state_limit_reached=False,
+        orig_pkts=3,resp_pkts=2,orig_wire_bytes=200,resp_wire_bytes=150,
+        appid_service='HTTPS',appid_service_id=1122,
+        appid_client='fixture <img src=x onerror="window.ndrInjected=true">',appid_client_id=100)))
 if os.environ.get('NDR_PREVIEW_REJECT_ONLY')=='1':
     events.append(dict(engine='snort3',kind='notice',epoch='preview',data=dict(
         ts=m.now(),uid=18446744073709551615,session_id='a'*32+':000000000000ffff',
@@ -216,6 +225,21 @@ if os.environ.get('NDR_PREVIEW_LONG_FLOW') == '1':
         events.append(dict(timestamp=m.iso(m.now() - 86400 - index), event_type='tls',
             flow_id=1001, community_id='1:preview', src_ip='192.0.2.10', src_port=51000, dest_ip='198.51.100.4',
             dest_port=443, proto='TCP', app_proto='tls', tls=dict(sni='long-flow.example.org')))
+if os.environ.get('NDR_PREVIEW_PAGING') == '1':
+    for index in range(600):
+        events.append(dict(timestamp=m.iso(m.now()-3600-index),event_type='http',flow_id=10000+index,
+            src_ip='192.0.2.100',src_port=45000+index,dest_ip='198.51.100.100',dest_port=80,proto='TCP',
+            app_proto='http',http=dict(hostname='paging.example.test',url='/fixture/'+str(index),http_method='GET',status=200)))
+if os.environ.get('NDR_PREVIEW_OVERVIEW') == '1':
+    for kind in ('dns','flow'):
+        events.append(dict(timestamp=m.iso(m.now()-100),event_type=kind,flow_id=3003,src_ip='192.0.2.53',src_port=45000,
+            dest_ip='198.51.100.53',dest_port=53,proto='UDP',app_proto='dns',
+            dns=dict(rrname='udp.example.test',type='response'),
+            flow=dict(bytes_toserver=120,bytes_toclient=240,pkts_toserver=2,pkts_toclient=2)))
+    for index in range(45):
+        events.append(dict(timestamp=m.iso(m.now()-300-index),event_type='http',flow_id=3004,
+            src_ip='192.0.2.55',src_port=46000,dest_ip='198.51.100.55',dest_port=80,proto='TCP',app_proto='http',
+            http=dict(hostname='normal.example.test',url='/fixture/'+str(index),http_method='GET',status=200)))
 if os.environ.get('NDR_PREVIEW_NAVIGATION') == '1':
     for event in events:
         if event.get('event_type') == 'drop':event['drop']={'reason':'test "quoted" reason'}

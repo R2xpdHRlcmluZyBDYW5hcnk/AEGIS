@@ -93,7 +93,7 @@ class BuildWorkflowCase(unittest.TestCase):
             work = Path(directory)
             generated = work / 'static'
             generated.mkdir()
-            for name in ('index.html', 'app.js', 'ui.js', 'app.css', 'frontend-build.json', 'frontend-licenses.txt'):
+            for name in ('index.html', 'app.js', 'ui.js', 'app.css', 'frontend-build.json', 'frontend-licenses.txt', 'python-dependencies.zip'):
                 (generated / name).write_text(name, encoding='utf-8')
             (generated / 'chunk-ABC123.js').write_text('export const chart = true;', encoding='utf-8')
             assets=('index.html','app.js','ui.js','app.css','chunk-ABC123.js')

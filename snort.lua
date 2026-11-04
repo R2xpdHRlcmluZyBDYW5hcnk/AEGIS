@@ -16,6 +16,9 @@ reject = { }
 -- Decoder failures can occur before a flow exists and bypass extractor notices.
 alert_json = { file = true, fields = 'seconds timestamp pkt_num gid sid rev msg proto src_addr src_port dst_addr dst_port action priority class' }
 appid = { app_detector_dir = '/var/lib/snort/appid' }
+if get_module_version('ndr_session', 'inspector') >= 1 then
+    ndr_session = { snapshot_interval = 30, state_limit = 32 }
+end
 file_id = { }
 file_policy = { enable_type = true, enable_signature = true }
 file_connector = { { connector = 'ndr', name = 'ndr', direction = 'transmit', text_format = true } }

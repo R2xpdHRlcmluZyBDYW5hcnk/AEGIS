@@ -169,7 +169,7 @@ class Bridge:
         before=dict(epoch=self.epoch,files=self.files,rejected=self.rejected,sparse_bytes=self.sparse_bytes)
         state=dict(epoch=epoch,files=copy.deepcopy(self.files) if epoch==self.epoch else {},
                    rejected=self.rejected,sparse_bytes=self.sparse_bytes)
-        paths=sorted(self.logs.glob('*file_connector_ndr_transmit'))+sorted(self.logs.glob('*alert_json.txt'))+sorted(self.logs.glob('*quic_observer.json'))
+        paths=sorted(self.logs.glob('*file_connector_ndr_transmit'))+sorted(self.logs.glob('*alert_json.txt'))+sorted(self.logs.glob('*quic_observer.json'))+sorted(self.logs.glob('*ndr_session.json'))
         if len(paths)>128:raise RuntimeError('Native log file count exceeds limit')
         if paths:
             self.cursor%=len(paths);paths=paths[self.cursor:]+paths[:self.cursor]

@@ -106,6 +106,9 @@ def install_proxies(module, client, runtime=None):
 class RuleBackup:
     """Rollback files only; never execute a test engine against an unvalidated candidate."""
     def __init__(self, module, directory):
+        import openappid_update
+        self.appid_root = Path(getattr(module, 'APPID_ROOT', openappid_update.ROOT))
+        self.appid_snapshot = openappid_update.snapshot(self.appid_root)
         self.root = Path(directory).resolve()
         self.directory = Path(tempfile.mkdtemp(prefix='transaction-', dir=self.root))
         self.paths = {}
@@ -125,7 +128,7 @@ class RuleBackup:
             self.paths[path] = destination if path.exists() else None
             if path.exists():
                 shutil.copy2(path, destination)
-        manifest = {'rules_dir': str(self.rules_dir), 'sources_snapshot': True, 'paths': {
+        manifest = {'rules_dir': str(self.rules_dir), 'sources_snapshot': True, 'openappid': self.appid_snapshot, 'paths': {
             str(path): saved.name if saved else None for path, saved in self.paths.items()}}
         with open(self.directory / 'manifest.json', 'w', encoding='utf-8') as handle:
             json.dump(manifest, handle)
@@ -134,6 +137,7 @@ class RuleBackup:
 
     @classmethod
     def load(cls, directory, module):
+        import openappid_update
         instance = object.__new__(cls)
         instance.directory = Path(directory)
         instance.root = instance.directory.parent.resolve()
@@ -143,6 +147,8 @@ class RuleBackup:
         allowed.add(group_policy_path(module.THRESHOLD_CONF))
         instance.rules_dir = Path(module.RULES_FILE).parent
         instance.source_dir = Path(module.SOURCES_DIR)
+        instance.appid_root = Path(getattr(module, 'APPID_ROOT', openappid_update.ROOT))
+        instance.appid_snapshot = manifest.get('openappid')
         instance.sources_snapshot = manifest.get('sources_snapshot', False)
         instance.paths = {}
         if manifest['rules_dir'] != str(instance.rules_dir):
@@ -157,6 +163,8 @@ class RuleBackup:
         return instance
 
     def restore(self):
+        import openappid_update
+        openappid_update.restore(self.appid_snapshot, self.appid_root)
         for path in self.rules_dir.iterdir():
             if path.is_file() and path not in self.paths:
                 path.unlink()
@@ -303,16 +311,23 @@ class Jobs:
                 self.run([m.RULE_UPDATER, *(['--offline'] if job['kind'] == 'apply' else []),
                           *(['--sources-dir',str(self.owner.drafts.sources),'--download-only'] if download_pending else []),
                           '--no-reload'], job)
-            if download_pending:
+            if job['kind'] == 'update':
+                import openappid_update
+                if backup.appid_snapshot is not None:
+                    # Journal before any pointer switch, including process crashes.
+                    backup.mark_detector_reload()
+                    detectors_changed = openappid_update.update(job['lines'], backup.appid_root)
+            if download_pending and not detectors_changed and (detector.read_bytes() if detector.exists() else None)==before_detector:
                 backup.commit(clear_pending=False);committed=True
                 with self.owner.lock:self.owner.drafts.refresh_catalog()
-                job['rc']=0;job['lines'].append('所选规则源已从网络下载并处理，点击“应用更改”启用')
+                job['rc']=0;job['lines'].append('所选规则源已下载，点击“应用更改”启用')
                 return
             job['lines'].append('开始 Snort 配置校验')
             m.prepare_thresholds()
             # Validate final action rewrites and local/hunting/ban rules together, before reload.
-            self.run(['/opt/ips-snort3/3.12.4.0/bin/snort', '-T', '-c', m.SNORT_CONF], job)
-            detectors_changed=(detector.read_bytes() if detector.exists() else None)!=before_detector
+            from session_logger import plugin_arguments
+            self.run(['/opt/ips-snort3/3.12.4.0/bin/snort', *plugin_arguments(), '-T', '-c', m.SNORT_CONF], job)
+            detectors_changed = detectors_changed or (detector.read_bytes() if detector.exists() else None)!=before_detector
             reload_attempted = True
             job['lines'].append('开始 Snort 热重载')
             if detectors_changed:
@@ -320,6 +335,11 @@ class Jobs:
                 result=self.engine_call(['appid-reload-detectors'],timeout=300)
                 if 'appid-reload-detectors' not in result:
                     raise RuntimeError(result.get('__error__','AppID 检测器重载失败'))
+            if download_pending:
+                backup.commit(clear_pending=False);committed=True
+                with self.owner.lock:self.owner.drafts.refresh_catalog()
+                job['rc']=0;job['lines'].append('所选规则源已下载，点击“应用更改”启用；OpenAppID 更新已完成')
+                return
             result = self.engine_call(['ruleset-reload-rules'], timeout=300)
             if 'ruleset-reload-rules' not in result:
                 raise RuntimeError(result.get('__error__', '规则重载失败'))

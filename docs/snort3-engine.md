@@ -88,3 +88,42 @@ MCP 未能打开检查器目录且未定位到事件产生器，因此补充通�
 当前生成器在 prerouting / mangle 入队，且提前跳过 fib daddr type local。`tests/check_nfq_nat.py` 在开发电脑的独立 Linux 网络与挂载命名空间中创建 RFC 5737 测试端点和 masquerade：在 -150 的计数位置可见请求，反向 NAT 尚未还原的回包被本机目的排除；相同排除条件在 -90 可见双向报文。计数器代替队列以隔离挂钩与排除逻辑，不测试 NFQ verdict 或 Snort 内核内联能力。测试不连接实际设备，并在退出时释放命名空间。
 
 该复现确认旧规则组合对普通 masquerade 路径存在覆盖缺口，不能证明某条历史记录一定经过该路径。修复将专用 prerouting 链调整为 -90，在目的 NAT 后、源 NAT 前执行，保留队列分发和排除条件。现有基于标记的 TUN 路由规则继续保留；此修改不提供路由器本机 OUTPUT 流量采集。隔离 Linux 实测验证专用表的原子更新和回滚后，经独立 NFQUEUE 部署器应用。部署后新产出的原生日志已在开发电脑确认存在双向 TCP 摘要，以及同一会话的协议事件和连接摘要；这不构成所有连接均无丢包的证明。历史日志不重写或清理，跨越切换时刻的连接可能仍不完整。
+
+
+## AppID 输出与生命周期扩展核查
+
+2026-11-04，MCP Search Service。查询前复用本文的 Flow、extractor 和身份记录，补充核对固定标签的 AppIdApi、AppIdSessionApi、appid_events.h、intrinsic_event_ids.h、tcp_stream_tracker.h、flow_control.cc 及 snort_module.cc。通过官方 GitHub tree API 找到同版本 snort3_extra 的 src/inspectors/appid_listener 示例；使用这个路径读取官方监听和 JSON 输出实现。
+
+来源：[AppID API](https://github.com/snort3/snort3/blob/3.12.4.0/src/network_inspectors/appid/appid_api.h)、[AppID 事件](https://github.com/snort3/snort3/blob/3.12.4.0/src/pub_sub/appid_events.h)、[监听示例](https://github.com/snort3/snort3_extra/blob/3.12.4.0/src/inspectors/appid_listener/appid_listener_event_handler.cc)、[TCP 状态](https://github.com/snort3/snort3/blob/3.12.4.0/src/stream/tcp/tcp_stream_tracker.h)、[控制命令](https://github.com/snort3/snort3/blob/3.12.4.0/src/main/snort_module.cc)。
+
+结果：AppID 提供服务、客户端、应用负载等 ID 与名称查询，以及 ANY_CHANGE 事件。官方 AppID listener 为额外插件，不能仅凭参考手册有参数就认定目标二进制已包含它。已部署环境有 OpenAppID 检测目录、映射表及 Lua 检测器；目前需要补齐应用识别结果的导出。TCP tracker 内有双向状态，但 FlowState 的 SETUP / INSPECT / ALLOW / BLOCK 不能当成 TCP 握手状态。原生 conn extractor 仍只订阅 FLOW_END；完整生命周期需要扩展输出，不应伪造历史事件。
+
+实机只读命令清单确认 appid.reload_detectors() 与 snort.reload_config(filename) 均可用。检测库更新优先使用前者，新增配置或插件应先在开发环境验证完整配置热重载和 ABI 兼容性；控制命令存在不等于任意主程序代码都能热替换。
+
+OpenAppID 自动更新来源核查：[官方下载目录](https://www.snort.org/downloads#openappid)链接到检测器归档及 [MD5 列表](https://www.snort.org/downloads/openappid/md5s)。官方提供的 MD5 仅作为归档一致性检查，下载依赖 HTTPS；不能描述为上游数字签名。当前 PulledPork3 README 只列出规则与阻断列表更新，未作为 OpenAppID 更新能力的证明。检测库需要单独的校验、原子切换、热重载和回滚事务，并保留 custom 检测器。
+
+## 原生会话扩展
+
+`native_session_logger.cc` 订阅 Snort 的 Flow setup / reload、FINALIZE_PACKET、FLOW_END 和 AppID ANY_CHANGE。TCP 直接读取双向 TCP tracker 状态，输出已观察到的初始 SYN、状态变化、应用识别变化、持续流量更新和跟踪结束；UDP、ICMP 和其他 IP 流输出可观察的流量与应用更新。已有连接从首次观察开始，不补造握手。结束事件表示 Snort 结束跟踪，不能独立证明连接正常关闭。
+
+扩展只采样最近原始包的报头，跳过重组生成的包，记录采样时间、方向、包长、数据长度、IP 协议编号 / 报头长度 / TTL / TOS / ID / 分片偏移和标志、TCP 标志 / 窗口 / 序号 / 确认号 / 选项长度、ICMP 类型及代码，不导出载荷字节。采样字段可与生命周期事件一起输出，不等于完整逐包记录。原生 extractor 适配还保留 DNS 答案 TTL 和 SSH 握手元数据；不存在的字段不补造。
+
+每条 `type:session` 记录使用引擎生成的同一 `session_id`，与 HTTP、TLS、conn 等 extractor 记录直接关联。OpenAppID 导出服务、客户端、应用及其他 / 关联应用的名称和编号；没有识别到的结果保持空值。详情、搜索和模型证据均可使用这些字段。
+
+默认流量快照间隔为 30 秒，有后续数据包时才输出；每会话最多记录 32 次状态变化和 32 次应用变化，配置范围有界。达到状态上限时标记限制。报文字节来自 `FlowStats` 的包长累计，载荷字节仍由 conn extractor 提供，二者分别展示；session 更新不作为额外连接、不累加进连接流量汇总。无包的空闲期不会制造快照。采集仍受 Snort 可见流量、丢包、流过期和加密边界限制。
+
+日志句柄保存在 Inspector 的线程存储中，遵循 Snort 的 copy_thread_storage 重载约定；不能按 Inspector 对象地址保存在线程局部映射，因为配置重载可能更换对象并跳过 tinit。旧插件迁移时可在数据线程延迟打开追加日志，模块创建确保 FlowData 身份已初始化。原生回归覆盖冷启动、首次热启用、带存活 TCP 会话的配置重载和共享库替换，并检查握手日志保留、会话身份连续及重载后的更新输出。
+
+扩展只适配固定 Snort 源码与 `ndr-session-1` 布局。Debian 构建环境由 `build_tools/build-snort3-arm64.sh` 准备，使用 `build_tools/build_session_logger.py --engine <匹配的二进制> --output <源码目录外>` 导出扩展及清单。构建器获取校验过的官方源码并应用匹配头文件补丁；发行清单绑定源码、扩展和引擎 SHA-256。不得拿同版未打补丁的 SDK 代替。
+
+部署采用 `deploy.ps1 -Target root@sensor.example -UpdateBackend -SessionLoggerDirectory <扩展目录>`。先备份和 Snort 配置校验，再通过 `snort.reload_config(filename, plugin_path)` 热加载，确认配置代数推进与进程身份不变。失败恢复配置、安装收据、启动程序与轮转设置。启动器从只读收据验证扩展；过渡期间已运行的启动器若重建引擎，配置可安全省略尚未加载的可选模块，管理器按进程身份自动恢复热加载。无需替换主程序或清理历史日志。
+
+开发机的 `tests/check_native_session_logger.py` 用合成 HTTP / TLS 回放验证启动加载、动态加载、AppID 热重载、状态与快照，以及同原生 extractor 的身份一致性。数据测试不在检测设备上运行。
+
+## OpenAppID 自动更新
+
+手动网络更新与既有定时更新共用规则管理器，均检查官方 OpenAppID 归档。候选暂存在检测器所在的持久盘，限制下载大小、解压大小、条目数和单文件大小，拒绝路径穿越、链接、设备文件及重复路径。下载来自固定 HTTPS 官方入口并限制重定向来源，按官方 MD5 校验一致性，同时记录 SHA-256。下载错误不回显可能含签名参数的重定向 URL。
+
+校验后将 odp 原子切换到独立版本目录，保留 custom 检测器。规则回滚日志同时保存原 odp 指向和更新收据，崩溃恢复也覆盖检测器切换。候选配置通过校验后调用 `appid.reload_detectors()`，失败恢复原目录并重新加载原检测器；不重启检测进程。手动选择规则源产生的待应用更改仍保持原有显式应用流程，检测库更新不替用户应用待选规则。
+
+2026-11-04 UTC 补充通过官方入口下载当前归档，核对压缩包根目录 odp、官方 MD5 与构建清单 SHA-256 一致；这次核查不代表后续归档版本固定不变。网络更新在每次任务中重新查询官方摘要。

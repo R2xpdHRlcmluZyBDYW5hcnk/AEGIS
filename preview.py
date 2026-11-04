@@ -12,6 +12,11 @@ ROOT = Path(__file__).resolve().parent
 
 
 def main():
+    from build_tools.python_dependencies import environment
+    with environment(): return serve()
+
+
+def serve():
     with tempfile.TemporaryDirectory(prefix='aegis-preview-') as directory:
         build(Path(directory))
         env = dict(os.environ, NDR_PREVIEW_STATIC_DIR=directory, PYTHONDONTWRITEBYTECODE='1')

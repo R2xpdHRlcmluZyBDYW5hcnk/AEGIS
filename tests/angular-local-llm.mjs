@@ -56,22 +56,54 @@ try{
  assert.equal(await evaluate(`[...document.querySelectorAll('.ai-hunts pre')].some(e=>e.textContent.includes('检查'))`),false,'natural-language model replies are never rendered as executable searches');
  assert.equal(await evaluate(`document.querySelector('.ai-hunts').textContent.includes('校验失败')||document.querySelector('.ai-hunts').textContent.includes('检索未完成')`),false,'fallback checks execute successfully');
  await close();await api('/__test/ai-plan',{mode:'default'});
- // Cancel before the first token: close button, Escape, navigation and unload.
- await api('/__test/ai-stall',{stall:true});let calls=(await status()).calls,cancellations=(await status()).cancellations;
- await openIncident();await waitCalls(++calls);await close();await waitCancelled(++cancellations);
- await openIncident();await waitCalls(++calls);await cdp('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});await cdp('Input.dispatchKeyEvent',{type:'keyUp',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});await waitCancelled(++cancellations);
- await api('/__test/ai-stall',{stall:true,stage:'summary'});await openIncident();calls+=2;await waitCalls(calls);await close();await waitCancelled(++cancellations);
- await openIncident();calls+=2;await waitCalls(calls);const hiddenTab=await cdp('Target.createTarget',{url:'about:blank'});await cdp('Target.activateTarget',{targetId:hiddenTab.targetId});await until(`document.hidden`);await pause(500);assert.equal((await status()).cancellations,cancellations,'switching browser tabs keeps inference running');await api('/__test/ai-stall',{stall:false});await until(`!!document.querySelector('.ai-summary')`);assert.equal((await status()).calls,calls,'hidden tab completes the same inference without restarting');await cdp('Target.activateTarget',{targetId:tab.id});await until(`!document.hidden`);await cdp('Target.closeTarget',{targetId:hiddenTab.targetId});await close();await api('/__test/ai-stall',{stall:true});
- await openIncident();await waitCalls(++calls);await evaluate(`location.hash='#hunt'`);await until(`!document.querySelector('ndr-details dialog')`);await waitCancelled(++cancellations);
- await until(`document.querySelector('ndr-events ndr-table tbody tr')?.textContent.includes('Suspicious')`);await evaluate(`document.querySelector('ndr-events ndr-table tbody tr').click()`);await until(`!!document.querySelector('.evidence-heading')`);
- assert.equal((await status()).calls,calls,'event evidence summary is generated only on click');
- await click('生成会话总结');await waitCalls(++calls);await close();await waitCancelled(++cancellations);
- await api('/__test/ai-stall',{stall:false});await evaluate(`document.querySelector('ndr-events ndr-table tbody tr').click()`);await until(`!!document.querySelector('.evidence-heading')`);await until(`document.querySelectorAll('#session-evidence tbody tr').length>=2`);await click('刷新',`document.querySelector('.session-evidence')`);assert.equal(await evaluate(`document.querySelector('.session-evidence h3').textContent.trim()`),'会话');assert.ok(await evaluate(`(()=>{const card=document.querySelector('.session-evidence'),next=[...document.querySelectorAll('.evidence-group')].find(e=>e!==card&&e.getBoundingClientRect().top>=card.getBoundingClientRect().bottom);return next&&next.getBoundingClientRect().top-card.getBoundingClientRect().bottom>=16;})()`),'session card has spacing before the next evidence card');await until(`!document.querySelector('.session-evidence button').disabled`);assert.ok(await evaluate(`(()=>{const session=document.querySelector('.session-evidence'),header=session.querySelector('.section-heading'),other=[...document.querySelectorAll('.evidence-group>h3')].find(e=>e.closest('.evidence-group')!==session),button=header.querySelector('button');if(!other)return false;const first=header.getBoundingClientRect(),second=other.getBoundingClientRect(),control=button.getBoundingClientRect(),style=getComputedStyle(header),reference=getComputedStyle(other);return Math.abs(first.height-second.height)<1&&style.borderBottomWidth===reference.borderBottomWidth&&style.paddingLeft===reference.paddingLeft&&control.top>=first.top&&control.bottom<=first.bottom;})()`),'session and evidence cards share title height, border and padding');const sessionRequestsBefore=await evaluate(`performance.getEntriesByType('resource').filter(e=>e.name.includes('/api/session?')).length`);await evaluate(`document.querySelector('#session-evidence tbody tr').click()`);await until(`!!document.querySelector('.raw-evidence')&&!document.querySelector('.detail-loading')`);assert.equal(await evaluate(`!!document.querySelector('.session-evidence')`),false,'nested log details omit the session table');assert.equal(await evaluate(`performance.getEntriesByType('resource').filter(e=>e.name.includes('/api/session?')).length`),sessionRequestsBefore,'nested log details do not reload the session');await click('← 返回上一层');await until(`document.querySelectorAll('#session-evidence tbody tr').length>=2`);if(process.env.NDR_SESSION_SCREENSHOT){await evaluate(`document.querySelector('.session-evidence').scrollIntoView({block:'start'});document.querySelector('ndr-details .modal-scroll').scrollTop-=100`);const shot=await cdp('Page.captureScreenshot',{format:'png'});await writeFile(process.env.NDR_SESSION_SCREENSHOT,Buffer.from(shot.data,'base64'));}await until(`document.querySelectorAll('#session-evidence tbody tr').length>=2`);await click('生成会话总结');await until(`document.querySelector('.ai-summary')?.textContent.includes('尚不能确认')`);calls+=2;await click('调查关联事件 ↗');await until(`!document.querySelector('ndr-details dialog')&&document.querySelector('ndr-range select')?.value==='all'`);assert.ok(await evaluate(`document.querySelector('.filter-line input[type=checkbox]').checked`),'session investigation follows late records');
- await api('/__test/ai-stall',{stall:true});await evaluate(`location.hash='#alerts'`);await openIncident();await waitCalls(++calls);await cdp('Page.navigate',{url:'about:blank'});await pause(350);await cdp('Page.navigate',{url:'http://127.0.0.1:19090/'});await until(`!!document.querySelector('[data-page="alerts"]')`);await waitCancelled(++cancellations);
- assert.equal((await api('/api/hunt/rules')).rules.length,1,'all cancelled requests leave manual rules unchanged');
+ // All detail entry points auto-summarize; rules still require an explicit click.
+ async function openEvent(){
+  await evaluate(`location.hash='#hunt'`);await until(`!!document.querySelector('ndr-hunt-query input')`);
+  await evaluate(`(()=>{const e=document.querySelector('ndr-hunt-query input');e.value='';e.dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('ndr-events form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));})()`);
+  await until(`document.querySelector('ndr-events ndr-table tbody tr')?.textContent.includes('Suspicious')&&document.querySelector('ndr-events .table-scroll')?.getAttribute('aria-busy')==='false'`);
+  await evaluate(`document.querySelector('ndr-events ndr-table tbody tr').click()`);await until(`!!document.querySelector('.evidence-heading')`);
+ }
+ async function cancelCase(stage,action='close',event=false){
+  await api('/__test/ai-stall',{stall:true,stage});const before=await status();
+  if(event)await openEvent();else{await evaluate(`location.hash='#alerts'`);await openIncident();}
+  await waitCalls(before.calls+(stage==='summary'?2:1));
+  if(action==='escape'){
+   await cdp('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
+   await cdp('Input.dispatchKeyEvent',{type:'keyUp',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
+  }else if(action==='navigate')await evaluate(`location.hash='#hunt'`);
+  else if(action==='unload'){
+   await cdp('Page.navigate',{url:'about:blank'});await pause(350);await cdp('Page.navigate',{url:'http://127.0.0.1:19090/'});await until(`!!document.querySelector('[data-page="alerts"]')`);
+  }else await close();
+  await waitCancelled(before.cancellations+1);
+ }
+ await cancelCase('hunt');await cancelCase('summary','escape');await cancelCase('hunt','navigate');await cancelCase('hunt','close',true);
+ await api('/__test/ai-stall',{stall:false});let before=await status();await openEvent();
+ await until(`document.querySelector('.ai-summary')?.textContent.includes('尚不能确认')`);assert.ok((await status()).calls>=before.calls+2,'hunting detail auto-generates a summary');
+ assert.ok(await evaluate(`[...document.querySelectorAll('.local-assistant button')].some(b=>b.textContent.trim()==='生成规则建议'&&!b.disabled)`),'ordinary logs also expose rule generation');
+ await until(`document.querySelectorAll('#session-evidence tbody tr').length>=2`);
+ assert.equal(await evaluate(`document.querySelector('.session-evidence h3').textContent.trim()`),'会话');
+ assert.ok(await evaluate(`(()=>{const card=document.querySelector('.local-assistant'),header=card.querySelector(':scope>.section-heading'),reference=document.querySelector('.session-evidence'),other=reference.querySelector('.section-heading'),style=getComputedStyle(header),standard=getComputedStyle(other);return Math.abs(header.getBoundingClientRect().width-card.clientWidth)<1&&style.backgroundColor===standard.backgroundColor&&style.paddingTop===standard.paddingTop&&getComputedStyle(card).borderColor===getComputedStyle(reference).borderColor&&Math.abs(header.getBoundingClientRect().height-other.getBoundingClientRect().height)<1;})()`),'assistant header uses the evidence card style');
+ assert.ok(await evaluate(`(()=>{const card=document.querySelector('.session-evidence'),next=[...document.querySelectorAll('.evidence-group')].find(e=>e!==card&&e.getBoundingClientRect().top>=card.getBoundingClientRect().bottom);return next&&next.getBoundingClientRect().top-card.getBoundingClientRect().bottom>=16;})()`),'evidence cards keep their spacing');
+ await click('刷新',`document.querySelector('.session-evidence')`);await until(`!document.querySelector('.session-evidence button').disabled`);
+ await evaluate(`document.querySelector('#session-evidence tbody tr').click()`);await until(`!!document.querySelector('.evidence-heading')&&!document.querySelector('#session-evidence')`);
+ await until(`!!document.querySelector('.ai-summary')`);await click('← 返回上一层');await until(`document.querySelectorAll('#session-evidence tbody tr').length>=2&&!!document.querySelector('.ai-summary')`);
+ await click('生成规则建议');await until(`!!document.querySelector('.ai-rule pre')`);
+ assert.ok(await evaluate(`document.querySelector('.ai-rule pre').textContent.includes('any any -> any')`),'rule generation uses content rather than fixed endpoint pairs');
+ await evaluate(`(()=>{const select=document.querySelector('select[aria-label="规则动作"]');select.value='block';select.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+ await until(`!document.querySelector('.ai-rule pre')`);await click('生成规则建议');await until(`document.querySelector('.ai-rule pre')?.textContent.startsWith('block ')`);
+ assert.equal((await api('/api/hunt/rules')).rules.length,1,'ordinary rule suggestions are not written automatically');
+ if(process.env.NDR_SESSION_SCREENSHOT){const shot=await cdp('Page.captureScreenshot',{format:'png'});await writeFile(process.env.NDR_SESSION_SCREENSHOT,Buffer.from(shot.data,'base64'));}
+ await close();await api('/__test/ai-stall',{stall:true,stage:'summary'});before=await status();
+ await evaluate(`location.hash='#alerts'`);await openIncident();await waitCalls(before.calls+2);
+ const hidden=await cdp('Target.createTarget',{url:'about:blank'});await cdp('Target.activateTarget',{targetId:hidden.targetId});await until(`document.hidden`);await pause(500);
+ assert.equal((await status()).cancellations,before.cancellations,'blur and hidden tabs keep inference running');
+ await api('/__test/ai-stall',{stall:false});await until(`!!document.querySelector('.ai-summary')`);assert.equal((await status()).calls,before.calls+2);
+ await cdp('Target.activateTarget',{targetId:tab.id});await cdp('Target.closeTarget',{targetId:hidden.targetId});await close();
+ await cancelCase('summary','unload');
+ assert.equal((await api('/api/hunt/rules')).rules.length,1,'cancelled requests never write manual rules');
  assert.deepEqual(exceptions,[]);
  await api('/__test/ai-stall',{stall:false});
- console.log('PASS: automatic session summary, real hunting queries and result navigation; rules require clicks; both model stages cancel on leaving and continue when tabs lose focus');
+ console.log('PASS: unified automatic detail summaries and feature-based rule suggestions; explicit writes; cancellation on close/navigation/unload and continuation on blur; consistent card headers');
 }finally{
  if(ws)ws.close();chrome.kill();await pause(500);
  const resolved=path.resolve(profile);assert.ok(path.dirname(resolved)===path.resolve(tmpdir())&&path.basename(resolved).startsWith('ndr-chrome-'));

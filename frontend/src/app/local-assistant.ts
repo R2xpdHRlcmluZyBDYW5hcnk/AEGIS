@@ -1,6 +1,6 @@
 // AbortController owns the entire stream, including the backend's upstream inference.
-export async function generateLocal(kind:string,target:any,signal:AbortSignal):Promise<any> {
- const response=await fetch('/api/ai/generate',{method:'POST',credentials:'same-origin',signal,headers:{'Content-Type':'application/json','X-Requested-With':'ips-web'},body:JSON.stringify({kind,target})});
+export async function generateLocal(kind:string,target:any,signal:AbortSignal,action='alert'):Promise<any> {
+ const response=await fetch('/api/ai/generate',{method:'POST',credentials:'same-origin',signal,headers:{'Content-Type':'application/json','X-Requested-With':'ips-web'},body:JSON.stringify({kind,target,...(kind==='rule'?{action}:{})})});
  if(response.status===401){location.assign('/login');throw new Error('登录已过期');}
  if(!response.ok||!response.body)throw new Error('本地模型请求失败');
  const reader=response.body.getReader(),decoder=new TextDecoder();let buffer='';

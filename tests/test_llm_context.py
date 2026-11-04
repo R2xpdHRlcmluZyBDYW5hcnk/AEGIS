@@ -22,6 +22,7 @@ class SessionContextTests(unittest.TestCase):
         self.fixture = fixture.DataLayerCase();self.fixture.setUp()
         self.addCleanup(self.fixture.tearDown)
         self.app,self.db,self.stamp = self.fixture.app,self.fixture.db,self.fixture.stamp
+        m.hunt_parse('type:*')  # Load the parser before tests forbid raw-event decompression.
 
     def add(self,kind='tls',offset=0,session=FIRST,**extra):
         if session:extra['snort_native']=dict(session_id=session)
@@ -190,7 +191,8 @@ class SummaryPipelineTests(unittest.TestCase):
         payload=hunt_plan_payload(context,options)
         self.assertLessEqual(sum(len(p['content'].encode()) for p in payload['messages']),1500)
         example=json.loads(payload['messages'][1]['content'])['reply_example']
-        self.assertTrue(set(example['checks'])<={option['id'] for option in options})
+        if example['query'] is not None:self.assertIsNotNone(m.hunt_parse(example['query']))
+        self.assertIn(example['scope'],('session','ioc'))
         planned,source=select_hunts('{"checks":["names"]}',options)
         self.assertEqual(source,'model');self.assertEqual(planned[-1]['id'],'names')
 

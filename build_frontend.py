@@ -37,6 +37,13 @@ def run(command, cwd, env):
 
 
 def build(output):
+    from build_tools.python_dependencies import environment as python_environment
+    if not os.environ.get('NDR_PYTHON_DEPS'):
+        with python_environment():return _build(output)
+    return _build(output)
+
+
+def _build(output):
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='aegis-build-') as directory:
@@ -82,7 +89,7 @@ def build(output):
         for name in ('test-attack-mapping.cjs', 'test-console-scroll.cjs', 'test-overview-range.cjs', 'test-modal-backdrop.cjs', 'test-range-context.cjs', 'test-chart-zoom.cjs', 'test-navigation.cjs', 'test-data-layer.cjs', 'test-connection-summary.cjs'):
             shutil.copy2(ROOT / 'tests' / name, project / 'tests' / name)
             run([node, project / 'tests' / name], project, env)
-        for name in ('ips-web','llm_assistant.py','quic_observer.py','snort_engine.py','snort_rules.py','rule_policy.py','parallel_cpu.py','parallel_sql.py','event_processing.py','native_rules.py','rule_sources.py','rule_identity.py','rule_inventory.py','runtime_status.py','history_reset.py','log_storage.py'):
+        for name in ('ips-web','dns_context.py','llm_hunting.py','overview_metrics.py','hunt_query.py','python_dependencies.py','session_logger.py','openappid_update.py','llm_assistant.py','quic_observer.py','snort_engine.py','snort_rules.py','rule_policy.py','parallel_cpu.py','parallel_sql.py','event_processing.py','native_rules.py','rule_sources.py','rule_identity.py','rule_inventory.py','runtime_status.py','history_reset.py','log_storage.py'):
             shutil.copy2(ROOT / name, project / name)
         for name in ('test_static_modules.py', 'test_hunt_suggestions.py', 'test_mitre_attack.py', 'test_network_visibility.py', 'test_network_snapshots.py', 'test_hunt_query_matrix.py', 'test_data_layer.py'):
             if name == 'test_hunt_query_matrix.py' and os.environ.get('NDR_SKIP_QUERY_MATRIX') == '1':

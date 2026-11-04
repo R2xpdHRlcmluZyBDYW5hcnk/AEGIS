@@ -9,10 +9,10 @@ import { RuleEditorComponent } from '../rule-editor.component';
 import { HuntQueryComponent } from '../hunt-query.component';
 import { completeHuntFields } from '../hunt-fields';
 @Component({changeDetection:ChangeDetectionStrategy.Eager,selector:'ndr-events',standalone:true,imports:[CommonModule,FormsModule,TableComponent,RangeComponent,RuleEditorComponent,HuntQueryComponent],template:`
- <section class="card query-card"><div class="section-heading"><h2>{{mode==='hunt'?'事件查询':mode==='alerts'?'筛选安全事件':'筛选阻断记录'}}</h2><div class="toolbar"><button class="quiet" *ngIf="mode==='hunt'" (click)="editor=true">＋ 手动规则</button><button class="quiet" *ngIf="mode==='alerts'" (click)="exportCsv()">导出原始告警 CSV ↗</button></div></div>
+ <section class="card query-card"><div class="section-heading"><h2>{{mode==='hunt'?'事件查询':mode==='alerts'?'筛选安全事件':'筛选阻断记录'}}</h2><div class="toolbar"><button class="quiet" *ngIf="mode==='hunt'" (click)="editor=true">＋ 手动规则</button><button class="quiet" *ngIf="mode==='alerts'" [disabled]="exporting" title="按当前筛选导出最多 10000 条未合并告警" (click)="exportCsv()">{{exporting?'正在导出…':'导出原始告警 CSV ↗'}}</button></div></div>
  <form (ngSubmit)="search()"><div class="query-line"><ndr-hunt-query *ngIf="mode==='hunt'" class="grow" [value]="query" [fields]="fields" (valueChange)="query=$event"/><label *ngIf="mode!=='hunt'" class="search grow"><span>⌕</span><input type="search" autocomplete="off" data-1p-ignore="true" name="query" aria-label="搜索查询" [(ngModel)]="query" placeholder="签名、地址、端口或协议…"></label><select name="severity" aria-label="严重级别" [(ngModel)]="sev" *ngIf="mode==='alerts'"><option value="">全部级别</option><option value="1">高危</option><option value="2">中危</option><option value="3">低危</option></select><select name="protocol" aria-label="协议" [(ngModel)]="proto" *ngIf="mode!=='hunt'"><option value="">全部协议</option><option>TCP</option><option>UDP</option><option>ICMP</option></select><button type="submit" [disabled]="busy">{{busy?'查询中…':'查询 →'}}</button></div></form>
  <div class="filter-line"><ndr-range [sessionScope]="mode==='hunt'&&query.includes('session_id:')" [(choice)]="initialChoice" [(from)]="customFrom" [(to)]="customTo" (resetRequested)="resetFilters()" (changed)="setRange($event)"/><label class="checkbox-label"><input type="checkbox" [(ngModel)]="realtime" (ngModelChange)="load()">实时订阅</label><label class="checkbox-label" *ngIf="mode==='hunt'"><input type="checkbox" [(ngModel)]="caseSensitive" (ngModelChange)="search()">区分大小写</label></div>
- <details *ngIf="mode==='hunt'" class="syntax-help"><summary>查询语法与字段</summary><p>条件用 AND / OR / NOT 组合，支持引号、CIDR 和数值比较。点击字段示例加入查询。</p><div class="chips"><button class="quiet" *ngFor="let f of fields" (click)="query=(query?query+' AND ':'')+f.example" [title]="f.desc">{{f.example}}</button></div></details></section>
+ <details *ngIf="mode==='hunt'" class="syntax-help"><summary>查询语法与字段</summary><p>使用 Lucene 查询语法，逻辑连接词 AND / OR / NOT 必须大写。支持字段分组、通配符和数值范围，例如 status:[400 TO 599]。IPv6 和含空格的值使用双引号。点击字段示例加入查询。</p><div class="chips"><button class="quiet" *ngFor="let f of fields" (click)="query=(query?query+' AND ':'')+f.example" [title]="f.desc">{{f.example}}</button></div></details></section>
  <p class="error" role="alert" *ngIf="error">{{error}}</p><p class="warning" *ngIf="truncated">扫描达到上限，结果可能不完整，请缩小时间范围。</p>
  <div class="three-grid" *ngIf="mode==='drops' && aggregate"><section class="card" *ngFor="let top of dropTops"><header><h2>{{top.title}}</h2></header><ndr-table [id]="'drop-'+top.key" [columns]="top.columns" [rows]="aggregate[top.key] || []" [pagination]="false" [interactive]="true" [showDetails]="false" (rowOpen)="investigateDrop(top,$event)"/></section></div>
  <section class="card"><header><h2>{{mode==='alerts'?'事件调查队列':mode==='drops'?'阻断记录':'查询结果'}}</h2><span class="muted">{{total | number}} {{mode==='alerts'?'个事件':'条记录'}} {{realtime?'实时订阅':'手动查询'}}<span *ngIf="asOf"> 更新于 {{formatDate(asOf)}}</span></span></header><ndr-table [id]="mode" [columns]="columns" [rows]="rows" [total]="total" [offset]="offset" [busy]="busy" [interactive]="true" (pageChange)="offset=$event;load()" (rowOpen)="open($event)"/></section>
@@ -62,6 +62,19 @@ export class EventsComponent implements OnInit,OnDestroy {
   this.state.investigate(clauses.join(' AND '),undefined,range);
  }
  open(row:any):void{if(this.mode==='alerts')void this.details.incident(row,this.range);else void this.details.event(row);}
- exportCsv():void{const p=new URLSearchParams({...this.params(),type:'alert',format:'csv',offset:'0',limit:'10000'});location.assign('/api/events?'+p);}
- ngOnDestroy():void{this.initialized=false;if(this.resolvingRange)this.state.views.delete('events:'+this.mode);else this.state.views.set('events:'+this.mode,{query:this.query,sev:this.sev,proto:this.proto,range:this.range,initialChoice:this.initialChoice,customFrom:this.customFrom,customTo:this.customTo,offset:this.offset,realtime:this.realtime,caseSensitive:this.caseSensitive,seenInvestigation:this.seenInvestigation});this.rangeRevision++;this.generation++;this.aggregateRevision++;this.aggregateRequest?.abort();this.live.stop();}
+ exporting=false;private exportRequest?:AbortController;
+ async exportCsv():Promise<void>{
+  if(this.exporting)return;this.exporting=true;const request=this.exportRequest=new AbortController();
+  const p=new URLSearchParams({...this.params(),detection:'alerts',format:'csv',offset:'0',limit:'10000'});p.delete('type');
+  try{
+   const response=await fetch('/api/events?'+p,{credentials:'same-origin',signal:request.signal,headers:{'X-Requested-With':'ips-web'}});
+   if(response.status===401){location.assign('/login');return;}
+   if(!response.ok){const error=await response.json();throw Error(error.error||'告警导出失败');}
+   if(!response.headers.get('Content-Type')?.includes('text/csv'))throw Error('导出响应格式无效');
+   const blob=await response.blob();if(request.signal.aborted)return;
+   const url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download='snort-alerts.csv';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+  }catch(error:any){if(error.name!=='AbortError')this.api.zone.run(()=>this.state.toast(error.message||'告警导出失败'));}
+  finally{this.api.zone.run(()=>{this.exporting=false;if(this.exportRequest===request)this.exportRequest=undefined;});}
+ }
+ ngOnDestroy():void{this.exportRequest?.abort();this.initialized=false;if(this.resolvingRange)this.state.views.delete('events:'+this.mode);else this.state.views.set('events:'+this.mode,{query:this.query,sev:this.sev,proto:this.proto,range:this.range,initialChoice:this.initialChoice,customFrom:this.customFrom,customTo:this.customTo,offset:this.offset,realtime:this.realtime,caseSensitive:this.caseSensitive,seenInvestigation:this.seenInvestigation});this.rangeRevision++;this.generation++;this.aggregateRevision++;this.aggregateRequest?.abort();this.live.stop();}
 }

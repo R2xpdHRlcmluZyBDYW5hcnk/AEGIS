@@ -16,6 +16,12 @@ def decode_bridge(argument):
             data = json.loads(line)
             if not isinstance(data,dict):
                 raise ValueError('Native event must be an object')
+            if not decoder and data.get('engine')=='snort_session':
+                from snort_engine import session_observation
+                if not session_observation(data):raise ValueError('Invalid native session observation')
+                buffer.extend(json.dumps(data,ensure_ascii=False,separators=(',',':')).encode()+b'\n')
+                written+=1
+                continue
             if not decoder and data.get('engine')=='quic_observer':
                 from quic_observer import normalized_event
                 if not normalized_event(data):raise ValueError('Invalid QUIC observation')
@@ -88,8 +94,8 @@ def parse_events(argument):
 def projection_rows(records):
     # Reuse the authoritative tuple representation rather than maintaining a second hash.
     module = backend()
-    return [(*row, 'community:'+row[14] if row[14] else
-             ('tuple:'+hashed if (hashed:=module.tuple_hash(row[5],row[15],row[6],row[16],row[8])) else None))
+    return [(*row[:17], 'community:'+row[14] if row[14] else
+             ('tuple:'+hashed if (hashed:=module.tuple_hash(row[5],row[15],row[6],row[16],row[8])) else None),*row[17:])
             for row in records]
 
 

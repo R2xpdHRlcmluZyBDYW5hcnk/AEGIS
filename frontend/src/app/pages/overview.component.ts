@@ -7,6 +7,7 @@ import { ChartComponent } from '../chart.component';
 import { ChartViewport } from '../chart-viewport';
 import { TableComponent, Column } from '../table.component';
 import { Details } from '../details.component';
+import { eventType } from '../event-fields';
 @Component({changeDetection:ChangeDetectionStrategy.Eager,selector:'ndr-overview',standalone:true,imports:[ModalComponent,CommonModule,RangeComponent,ChartComponent,TableComponent],template:`
  <div class="page-toolbar overview-toolbar"><ndr-range [(choice)]="rangeChoice" [(from)]="customFrom" [(to)]="customTo" (changed)="setRange($event)"/></div>
  <div class="overview-filters" *ngIf="filters.length" aria-label="概览筛选"><span>当前筛选</span><button class="quiet" *ngFor="let filter of filters" (click)="removeFilter(filter.key)" [attr.aria-label]="'移除筛选 '+filter.label">{{filter.label}} ×</button><button class="quiet" (click)="clearFilters()">清除筛选</button></div>
@@ -15,25 +16,25 @@ import { Details } from '../details.component';
   <button class="stat-card alert" (click)="filterKind('alerts','检测告警')" [attr.aria-pressed]="hasKind('alerts')"><span>检测告警</span><strong data-testid="alerts-total">{{d.security?.alerts | number}}</strong></button>
   <button class="stat-card critical" (click)="filterKind('high','高危告警')" [attr.aria-pressed]="hasKind('high')"><span>高危告警</span><strong data-testid="high-total">{{d.security?.high | number}}</strong></button>
   <button class="stat-card blocked" (click)="filterKind('drops','阻断事件')" [attr.aria-pressed]="hasKind('drops')"><span>阻断事件</span><strong data-testid="drops-total">{{d.security?.drops | number}}</strong></button>
-  <div class="stat-card"><span>源 / 目的地址</span><strong>{{d.security?.sources_count | number}} <em>/ {{d.security?.destinations_count | number}}</em></strong></div></div>
+  <div class="stat-card"><span>源 / 目的地址</span><strong>{{d.network?.source_count | number}} <em>/ {{d.network?.destination_count | number}}</em></strong></div></div>
   <div class="overview-grid"><section class="card trend"><header><div><h2>告警与阻断趋势</h2></div><div class="toolbar"><div class="legend"><span class="blue-dot"></span>告警 <span class="coral-dot"></span>阻断</div><button class="quiet" (click)="showTrendTable=!showTrendTable" aria-label="切换趋势图表格">{{showTrendTable?'图表':'表格'}}</button><button class="quiet" (click)="expandedChart=true" aria-label="放大告警与阻断趋势">放大</button></div></header><ndr-chart *ngIf="!showTrendTable" [points]="d.series || []" [viewport]="chartViewport" (pointOpen)="filterTrend($event)"/><ndr-table *ngIf="showTrendTable" id="trend-values" [columns]="trendColumns" [rows]="d.series || []" [fit]="true"/></section>
   <section class="card engine-card"><header><h2>检测引擎</h2><span class="badge" [class.good]="d.service?.state==='active'">{{d.service?.state==='active'?'运行中':d.service?.state}}</span></header><div class="throughput">{{d.rates?.mbps | number:'1.2-2'}} <small>Mbps</small></div><p class="muted">{{d.rates?.pps | number:'1.0-0'}} packets / sec</p><dl class="key-values"><dt>生效文本规则</dt><dd>{{d.rules?.loaded | number}}</dd><dt>内存占用</dt><dd>{{memory(d.service?.memory)}}</dd><dt>运行时长</dt><dd>{{d.service?.uptime | number}} 秒</dd><dt>NFQUEUE 积压</dt><dd>{{d.queue?.packets | number}}</dd><dt>内核丢包</dt><dd>{{d.queue?.kernel_drops | number}}</dd></dl></section></div>
-  <div class="three-grid"><section class="card" *ngFor="let top of tops"><header><h2>{{top.title}}</h2><button class="quiet chart-view-toggle" (click)="top.table=!top.table" [attr.aria-label]="top.title+(top.table?'查看图表':'查看表格')">{{top.table?'图表':'表格'}}</button></header><ndr-chart *ngIf="!top.table" [ranks]="d.top?.[top.key] || []" [labelKey]="top.key==='signatures'?'sig':'ip'" [title]="top.title" (rowOpen)="filterTop(top,$event)"/><ndr-table *ngIf="top.table" [id]="top.key" [columns]="top.columns" [rows]="d.top?.[top.key] || []" [pagination]="false" [fit]="true" [interactive]="true" (rowOpen)="investigateTop(top,$event)"/></section></div>
+  <div class="three-grid"><section class="card" *ngFor="let top of tops"><header><h2>{{top.title}}</h2><button class="quiet chart-view-toggle" (click)="top.table=!top.table" [attr.aria-label]="top.title+(top.table?'查看图表':'查看表格')">{{top.table?'图表':'表格'}}</button></header><ndr-chart *ngIf="!top.table" [ranks]="d.top?.[top.key] || []" [labelKey]="top.key==='signatures'?'sig':'ip'" [title]="top.title" (rowOpen)="filterTop(top,$event)"/><ndr-table *ngIf="top.table" [id]="top.key" [columns]="top.columns" [rows]="d.top?.[top.key] || []" [pagination]="false" [fit]="true" [interactive]="true" (rowOpen)="filterTop(top,$event)"/></section></div>
   <ng-container *ngIf="d.network as n">
    <div class="section-heading visibility-heading"><h2>网络可见性</h2><div class="network-update muted" role="status" aria-live="polite"><span *ngIf="n.computed_at">更新于 {{formatDate(n.computed_at)}}</span><span *ngIf="n.available!==false">已记录连接载荷 {{memory(n.bytes)}}</span><span *ngIf="n.status==='refreshing'||n.status==='stale'">{{networkStatus(n)}}</span></div></div>
    <p class="error" role="alert" *ngIf="n.error">{{n.error}}</p>
    <ng-container *ngIf="n.available!==false;else networkPreparing">
    <div class="stats-grid network-summary">
-    <button class="stat-card" (click)="filterKind('flow','连接记录')" [attr.aria-pressed]="hasKind('flow')"><span>连接记录</span><strong>{{n.flows | number}}</strong></button>
+    <button class="stat-card" (click)="filterKind('connection','连接记录')" [attr.aria-pressed]="hasKind('connection')"><span>连接记录</span><strong>{{n.flows | number}}</strong></button>
     <div class="stat-card"><span>连接端点地址</span><strong>{{n.addresses | number}}</strong></div>
     <button class="stat-card" (click)="filterKind('dns','DNS 记录')" [attr.aria-pressed]="hasKind('dns')"><span>DNS 记录</span><strong>{{n.dns | number}}</strong></button>
     <button class="stat-card" (click)="filterKind('tls','TLS 记录')" [attr.aria-pressed]="hasKind('tls')"><span>TLS 记录</span><strong>{{n.tls | number}}</strong></button>
    </div>
-   <div class="visibility-grid"><section class="card" *ngFor="let top of networkTops"><header><h2>{{top.title}}</h2><button class="quiet chart-view-toggle" (click)="top.table=!top.table">{{top.table?'图表':'表格'}}</button></header><ndr-chart *ngIf="!top.table" [ranks]="n[top.key] || []" labelKey="name" [title]="top.title" (rowOpen)="filterNetwork(top,$event)"/><ndr-table *ngIf="top.table" [id]="'network-'+top.key" [columns]="networkColumns" [rows]="n[top.key] || []" [pagination]="false" [fit]="true" [interactive]="true" (rowOpen)="investigateNetwork(top,$event)"/></section></div>
-   <div class="visibility-grid"><section class="card"><header><h2>高频连接源</h2></header><ndr-table id="network-sources" [columns]="sourceColumns" [rows]="n.sources || []" [pagination]="false" [fit]="true" [interactive]="true" (rowOpen)="investigate('type: flow AND src: '+$event.ip)"/></section><section class="card"><header><h2>采集记录分布</h2><span class="muted">{{n.records | number}} 条记录</span></header><ndr-table id="network-types" [columns]="typeColumns" [rows]="n.event_types || []" [pagination]="false" [fit]="true" [interactive]="true" (rowOpen)="investigate('type: '+$event.name)"/><div class="capture-directions"><span>双向连接记录 <strong>{{n.bidirectional | number}}</strong></span><span>单向连接记录 <strong>{{n.one_way | number}}</strong></span></div></section></div>
+   <div class="visibility-grid"><section class="card" *ngFor="let top of networkTops"><header><h2>{{top.title}}</h2><button class="quiet chart-view-toggle" (click)="top.table=!top.table">{{top.table?'图表':'表格'}}</button></header><ndr-chart *ngIf="!top.table" [ranks]="n[top.key] || []" labelKey="name" [title]="top.title" (rowOpen)="filterNetwork(top,$event)"/><ndr-table *ngIf="top.table" [id]="'network-'+top.key" [columns]="networkColumns" [rows]="n[top.key] || []" [pagination]="false" [fit]="true" [interactive]="true" (rowOpen)="filterNetwork(top,$event)"/></section></div>
+   <div class="visibility-grid"><section class="card"><header><h2>高频连接源</h2></header><ndr-table id="network-sources" [columns]="sourceColumns" [rows]="n.sources || []" [pagination]="false" [fit]="true" [interactive]="true" (rowOpen)="filterConnectionSource($event)"/></section><section class="card"><header><h2>采集记录分布</h2><span class="muted">{{n.records | number}} 条记录</span></header><ndr-table id="network-types" [columns]="typeColumns" [rows]="n.event_types || []" [pagination]="false" [fit]="true" [interactive]="true" (rowOpen)="filterRecordType($event)"/><div class="capture-directions"><span>双向连接记录 <strong>{{n.bidirectional | number}}</strong></span><span>单向连接记录 <strong>{{n.one_way | number}}</strong></span></div></section></div>
    </ng-container><ng-template #networkPreparing><div class="empty card network-preparing" role="status">{{networkStatus(n)}}</div></ng-template>
    </ng-container>
-  <section class="card"><header><h2>最新安全记录</h2></header><ndr-table id="recent" [columns]="recentColumns" [rows]="d.recent || []" [interactive]="true" (rowOpen)="details.event($event)"/></section>
+  <section class="card"><header><h2>最新日志</h2></header><ndr-table id="recent" [columns]="recentColumns" [rows]="d.recent || []" [interactive]="true" (rowOpen)="details.event($event)"/></section>
   <details class="card telemetry engine-counters"><summary>累计引擎计数</summary><dl class="counter-grid"><div><dt>放行包</dt><dd>{{d.ips?.accepted | number}}</dd></div><div><dt>阻断包</dt><dd>{{d.ips?.blocked | number}}</dd></div><div><dt>规则丢包</dt><dd>{{d.ips?.rule_drops | number}}</dd></div><div><dt>引擎丢包</dt><dd>{{d.ips?.engine_drops | number}}</dd></div></dl></details>
  <ndr-modal *ngIf="expandedChart" title="告警与阻断趋势" [wide]="true" (closed)="expandedChart=false"><div class="chart-expanded"><ndr-chart [points]="d.series || []" [viewport]="chartViewport" (pointOpen)="filterTrend($event)"/></div></ndr-modal>
  </ng-container><ng-template #loading><div class="empty card">正在连接检测引擎…</div></ng-template>
@@ -42,7 +43,7 @@ export class OverviewComponent implements OnInit,OnDestroy {
  filters:{key:string;label:string;params:Record<string,string>}[]=[];private period?:{from:number;to:number};
  data:any;expandedChart=false;showTrendTable=false;error='';private live:LiveQuery;memory=bytes;formatDate=date;chartViewport=new ChartViewport();
  rangeChoice='1440';customFrom=localDate(new Date(Date.now()-86400000));customTo=localDate(new Date());private readonly rangeKey='ndr.angular.overview.range';
- recentColumns:Column[]=[{key:'ts',label:'时间',kind:'time',width:180},{key:'sev',label:'级别',kind:'severity',width:90},{key:'sig',label:'检测签名',width:340},{key:'src',label:'源地址',kind:'mono',width:160},{key:'dst',label:'目的地址',kind:'mono',width:160},{key:'proto',label:'协议',width:90},{key:'action',label:'动作',kind:'action',width:100}];
+ recentColumns:Column[]=[{key:'ts',label:'时间',kind:'time',width:180},{key:'type',label:'类型',kind:'eventType',width:110},{key:'sig',label:'网络事件摘要',kind:'eventSummary',width:340},{key:'src',label:'源地址',kind:'mono',width:160},{key:'dst',label:'目的地址',kind:'mono',width:160},{key:'proto',label:'协议',width:90},{key:'action',label:'动作',kind:'action',width:100}];
  tops=[{key:'signatures',title:'高频检测签名',field:'sid',table:false,columns:[{key:'sig',label:'签名',width:250},{key:'count',label:'次数',width:80}]},{key:'sources',title:'高频源地址',field:'src',table:false,columns:[{key:'ip',label:'地址',width:190},{key:'count',label:'次数',width:80}]},{key:'destinations',title:'高频目的地址',field:'dst',table:false,columns:[{key:'ip',label:'地址',width:190},{key:'count',label:'次数',width:80}]}];
  constructor(api:Api,public state:ConsoleState,public details:Details){this.live=new LiveQuery(api,d=>{this.data=d;this.error='';this.state.viewReady('overview');},e=>{this.error=e;this.state.viewReady('overview');});}
  networkStatus(network:any):string{
@@ -60,7 +61,7 @@ export class OverviewComponent implements OnInit,OnDestroy {
   if(top.key==='signatures'){
    if(row.sid){this.investigate('sid: '+row.sid);return;}
    if(row.sig)this.investigate((row.sig.startsWith('engine drop')?'type: drop AND ':'')+'sig: '+JSON.stringify(row.sig));
-  }else if(row.ip)this.investigate(top.field+': '+row.ip);
+  }else if(row.ip)this.investigate(top.field+': '+JSON.stringify(row.ip));
  }
  ngOnInit():void{
   try{
@@ -75,9 +76,9 @@ export class OverviewComponent implements OnInit,OnDestroy {
   this.setRange(timeRange(this.rangeChoice,this.customFrom,this.customTo));
  }
  filterKind(value:string,label:string):void{
-  this.applyFilter('kind',label,['alerts','high','drops'].includes(value)?{detection:value}:{type:value});
+  this.applyFilter('kind',label,['alerts','high','drops'].includes(value)?{detection:value}:value==='connection'?{connection:'1'}:{type:value});
  }
- hasKind(value:string):boolean{return this.filters.some(f=>f.key==='kind'&&(f.params['detection']===value||f.params['type']===value));}
+ hasKind(value:string):boolean{return this.filters.some(f=>f.key==='kind'&&(f.params['detection']===value||f.params['type']===value||(value==='connection'&&f.params['connection']==='1')));}
  private applyFilter(key:string,label:string,params:Record<string,string>):void{
   this.filters=[...this.filters.filter(f=>f.key!==key),{key,label,params}];this.refresh();
  }
@@ -90,10 +91,10 @@ export class OverviewComponent implements OnInit,OnDestroy {
   }else if(row.ip)this.applyFilter(top.field,(top.field==='src'?'源地址 ':'目的地址 ')+row.ip,{[top.field]:row.ip});
  }
  filterNetwork(top:any,row:any):void{
-  this.filters=this.filters.filter(f=>f.key!=='kind'&&f.key!==top.field);
-  this.filters.push({key:'kind',label:top.type.toUpperCase()+' 记录',params:{type:top.type}});
   this.applyFilter(top.field,top.title+' '+row.name,{[top.field]:row.name==='未识别'?'':row.name});
  }
+ filterConnectionSource(row:any):void{this.applyFilter('src','连接源 '+row.ip,{src:row.ip,connection:'1'});}
+ filterRecordType(row:any):void{this.filterKind(row.name,eventType(row.name)+' 相关会话');}
  filterTrend(event:{point:{t:number};kind:'alerts'|'drops'}):void{
   const step=Number(this.data?.bucket)*60;if(!step||!Number.isFinite(event.point.t))return;
   this.period={from:event.point.t,to:event.point.t+step-.001};this.expandedChart=false;

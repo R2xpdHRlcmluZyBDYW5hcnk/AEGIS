@@ -305,8 +305,8 @@ class HuntSyntaxCase(unittest.TestCase):
             for spacing in ('', ' ', '   ', '\t'):
                 with self.subTest(field=name, spacing=spacing):
                     self.assertEqual(ips_web.hunt_parse(name + ':' + spacing + value), expected)
-        self.assertEqual(ips_web.hunt_parse('src:2001:db8::1 AND url:"https://example.test/a:b"'),
-                         ips_web.hunt_parse('src: 2001:db8::1 AND url: "https://example.test/a:b"'))
+        self.assertEqual(ips_web.hunt_parse('src:"2001:db8::1" AND url:"https://example.test/a:b"'),
+                         ips_web.hunt_parse('src: "2001:db8::1" AND url: "https://example.test/a:b"'))
 
     def test_query_fields_use_record_names_for_database_and_numeric_filters(self):
         self.assertEqual(set(ips_web.HUNT_FIELDS.values()) - ips_web.DB_COLUMN_FIELDS,
@@ -651,7 +651,7 @@ class NDRRegressionCase(unittest.TestCase):
         self.assertEqual(len(records), 123)
         self.assertEqual(len({r['ts'] for r in records}), 123)
         self.assertTrue(all(r['flow_id'] == 999 for r in records))
-        hunted = self.app.hunt({'q': 'session_id:'+self.session(999), 'all': '1', 'limit': '500', 'from': str(stamp - 1), 'to': str(stamp + 1)})
+        hunted = self.app.hunt({'q': 'session_id:'+json.dumps(self.session(999)), 'all': '1', 'limit': '500', 'from': str(stamp - 1), 'to': str(stamp + 1)})
         self.assertEqual(hunted['total'], 123)
         self.assertEqual(hunted['source'], 'db')
 

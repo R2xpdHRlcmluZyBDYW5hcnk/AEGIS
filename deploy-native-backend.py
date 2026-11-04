@@ -9,7 +9,7 @@ import time
 from ips_control import Client
 from deployment_layout import layout
 
-PROGRAMS=('ips-web','ips-rule-manager','ips_control.py','rule_drafts.py','llm_assistant.py','quic_observer.py','snort_engine.py',
+PROGRAMS=('ips-web','ips-rule-manager','ips_control.py','rule_drafts.py','llm_assistant.py','quic_observer.py','dns_context.py','llm_hunting.py','overview_metrics.py','hunt_query.py','python_dependencies.py','python-dependencies.zip','openappid_update.py','session_logger.py','snort_engine.py',
           'snort_rules.py','rule_policy.py','parallel_cpu.py','parallel_sql.py','event_processing.py','native_rules.py','rule_sources.py','rule_identity.py','rule_inventory.py','runtime_status.py','history_reset.py','log_storage.py','ips-event-bridge','ips-snort-rules','snort-home-net','deployment_layout.py')
 CONFIG=Path(layout()['config'])
 BIN=Path(layout()['program_dir'])
@@ -36,7 +36,11 @@ def wait_manager():
 def apply(release,wait_ready,overrides,snapshot=None):
     release=Path(release)
     for name in PROGRAMS:
-        compile((release/name).read_bytes(),name,'exec')
+        if name.endswith('.zip'):
+            import zipfile
+            with zipfile.ZipFile(release/name) as bundle:
+                if bundle.testzip() or 'luqum/parser.py' not in bundle.namelist():raise ValueError('Invalid Python dependency bundle')
+        else:compile((release/name).read_bytes(),name,'exec')
     original=CONFIG.read_bytes();config=json.loads(original)
     updated=dict(config,**overrides)
     changed=[name for name in PROGRAMS if not (BIN/name).exists() or (BIN/name).read_bytes()!=(release/name).read_bytes()]
@@ -73,7 +77,7 @@ def apply(release,wait_ready,overrides,snapshot=None):
             if CONFIG.read_bytes()!=original:
                 raise RuntimeError('Configuration changed during update')
             for name in PROGRAMS:
-                install(release/name,BIN/name,0o644 if name.endswith('.py') else 0o755)
+                install(release/name,BIN/name,0o644 if name.endswith(('.py','.zip')) else 0o755)
             for index,(path,data) in enumerate(resources.items()):
                 path.parent.mkdir(parents=True,exist_ok=True)
                 candidate=backup/('resource-after-'+str(index));candidate.write_bytes(data)
@@ -105,7 +109,7 @@ def apply(release,wait_ready,overrides,snapshot=None):
         except BaseException:
             subprocess.run(['systemctl','stop',*SERVICES],check=False)
             for name in PROGRAMS:
-                if (backup/name).exists(): install(backup/name,BIN/name,0o644 if name.endswith('.py') else 0o755)
+                if (backup/name).exists(): install(backup/name,BIN/name,0o644 if name.endswith(('.py','.zip')) else 0o755)
                 elif (BIN/name).exists(): (BIN/name).unlink()
             install(backup/'ips-web.conf',CONFIG,0o600)
             for index,(path,data) in enumerate(resource_before.items()):

@@ -19,6 +19,11 @@ from build_tools.runtime import environment, toolchain
 
 
 def main():
+    from build_tools.python_dependencies import environment as dependencies
+    with dependencies():return run_checks()
+
+
+def run_checks():
     parser = argparse.ArgumentParser(description=__doc__)
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument('--release', type=Path)
@@ -61,6 +66,7 @@ def main():
         env.update(NDR_PREVIEW_STATIC_DIR=str(static), NDR_PREVIEW_PORT='19094',
                    NDR_PREVIEW_URL='http://127.0.0.1:19094', NDR_PREVIEW_STOP_FILE=str(stop),
                    NDR_PREVIEW_REJECT_ONLY='1', NDR_TEST_OUTPUT=str(work/'screenshots'))
+        if not args.baseline_host:env['NDR_PREVIEW_OVERVIEW']='1'
         if args.baseline_host:
             env['NDR_TOOLTIP_BASELINE'] = '1'
         else:

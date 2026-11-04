@@ -17,7 +17,7 @@ CONFIG=Path('/etc/ips-snort-web.conf')
 WEB_STATE=Path('/var/lib/ips-snort-web')
 NATIVE,STREAM=log_paths()
 CHECKPOINT=Path('/var/lib/ips-event-bridge/offsets.json')
-NATIVE_NAMES=re.compile(r'(?:[0-9]+_)?(?:file_connector_ndr_transmit|alert_json\.txt|quic_observer\.json|events?\.json)(?:\.[0-9]+(?:\.gz)?)?')
+NATIVE_NAMES=re.compile(r'(?:[0-9]+_)?(?:file_connector_ndr_transmit|alert_json\.txt|quic_observer\.json|ndr_session\.json|events?\.json)(?:\.[0-9]+(?:\.gz)?)?')
 STREAM_NAMES=re.compile(r'events\.json(?:\.[0-9]+(?:\.gz)?)?')
 ARCHIVE_NAME=re.compile(r'\.response-[0-9]{8}T[0-9]{6}-[0-9]+(?:-failed)?')
 

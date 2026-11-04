@@ -14,6 +14,7 @@ param(
     [switch]$ClearEventStream,
     [string]$QuicInterface = '',
     [string]$EnginePackage = '',
+    [string]$SessionLoggerDirectory = '',
     [string]$ReleasePackage = '',
     [string]$ReuseUiPackage = '',
     [switch]$BuildOnly,
@@ -39,6 +40,7 @@ if ($RemoveLegacySuricata -and (-not $UpdateBackend -or $BuildOnly -or $UpdateEn
 if ($ClearNativeLogs -and (-not $UpdateBackend -or $BuildOnly -or $UpdateEngine -or $InstallSnort3)) { throw '-ClearNativeLogs requires -UpdateBackend after native activation, without an engine upgrade' }
 if ($ClearEventStream -and -not $ClearNativeLogs) { throw '-ClearEventStream requires -ClearNativeLogs and explicit authorization to clear the full raw stream' }
 if ($QuicInterface -and (-not $UpdateBackend -or $BuildOnly -or $QuicInterface -notmatch '^[a-zA-Z0-9_.:-]{1,15}$')) { throw '-QuicInterface requires -UpdateBackend and a valid capture interface name' }
+if ($SessionLoggerDirectory -and (-not $UpdateBackend -or $BuildOnly -or -not (Test-Path -LiteralPath $SessionLoggerDirectory -PathType Container))) { throw '-SessionLoggerDirectory requires -UpdateBackend and a compiled extension directory' }
 if ($ReleasePackage -and ($BuildOnly -or -not (Test-Path -LiteralPath $ReleasePackage))) { throw '-ReleasePackage requires an existing release and cannot be combined with -BuildOnly' }
 if ($ReuseUiPackage -and ($ReleasePackage -or -not (Test-Path -LiteralPath $ReuseUiPackage))) { throw '-ReuseUiPackage requires an existing UI release and cannot be combined with -ReleasePackage' }
 $resourceFlags = [ordered]@{WebReadWorkers='--read-workers';CacheMemoryPercent='--cache-memory-percent';CacheMaxMiB='--cache-max-mib';StatsBatchSize='--stats-batch-size';StatsDutyPercent='--stats-duty-percent'}
@@ -167,6 +169,16 @@ try {
     $stageReady = $true
     & scp @options $archive "$archive.sha256" "${Target}:$stage/"
     if ($LASTEXITCODE -ne 0) { throw 'Upload failed' }
+    if ($SessionLoggerDirectory) {
+        $sessionDirectory = [System.IO.Path]::GetFullPath($SessionLoggerDirectory)
+        $sessionManifest = Get-Content -LiteralPath (Join-Path $sessionDirectory 'session-logger.json') -Raw | ConvertFrom-Json
+        $sessionLibrary = Join-Path $sessionDirectory 'ndr_session.so'
+        if ((Get-FileHash -LiteralPath $sessionLibrary -Algorithm SHA256).Hash.ToLowerInvariant() -ne $sessionManifest.sha256) { throw 'Session extension checksum differs' }
+        & ssh @options $Target "mkdir -p '$stage/session-logger'"
+        if ($LASTEXITCODE -ne 0) { throw 'Session extension staging failed' }
+        & scp @options $sessionLibrary (Join-Path $sessionDirectory 'session-logger.json') "${Target}:$stage/session-logger/"
+        if ($LASTEXITCODE -ne 0) { throw 'Session extension upload failed' }
+    }
     $backendStep = if ($UpdateBackend) { 'python3 snort-ndr/deploy-backend.py --release snort-ndr ' + ($resourceArguments -join ' ') + ' && ' } else { '' }
     if ($InstallSnort3 -or $UpdateEngine) {
         $engineFileName = Split-Path -Leaf $EnginePackage
@@ -182,6 +194,7 @@ try {
     if ($RemoveLegacySuricata) { $staticStep += ' && python3 snort-ndr/cleanup-legacy-suricata.py --apply' }
     if ($ClearNativeLogs) { $staticStep += ' && python3 snort-ndr/cleanup-native-logs.py --apply'; if ($ClearEventStream) { $staticStep += ' --event-stream' } }
     if ($QuicInterface) { $staticStep += " && python3 snort-ndr/deploy-quic-observer.py --release snort-ndr --interface '$QuicInterface'" }
+    if ($SessionLoggerDirectory) { $staticStep += ' && python3 snort-ndr/deploy-session-logger.py --release snort-ndr --plugin session-logger' }
     & ssh @options $Target "cd '$stage' && sha256sum -c '$fileName.sha256' && tar -xzf '$fileName' && ${backendStep}$staticStep"
     if ($LASTEXITCODE -ne 0) { throw 'Deployment or health check failed' }
 } finally {

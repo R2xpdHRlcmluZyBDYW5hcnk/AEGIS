@@ -143,7 +143,7 @@ class ManagerCase(unittest.TestCase):
         self.assertIn('sid:456', Path(self.manager.drafts.module.HUNT_RULES).read_text())
 
     def test_generated_manual_rule_applies_independently_and_preserves_other_pending_edits(self):
-        rule = 'alert tcp 192.0.2.1 any -> 198.51.100.2 443 (msg:"Observed endpoint"; rev:1;)'
+        rule = 'alert tcp any any -> any 443 (msg:"Observed TLS indicator"; flow:to_server,established; ssl_state:client_hello; content:"example.test",nocase; rev:1;)'
         self.mutate('/api/rules/disable', {'values':['sid:123']})
         self.mutate('/api/hunt/rules', {'rule':'alert ip any any -> any any (sid:9200001;)'})
         pending_disable = Path(self.manager.drafts.module.DISABLE_CONF).read_bytes()
@@ -167,7 +167,7 @@ class ManagerCase(unittest.TestCase):
         self.assertFalse(self.mutate('/api/hunt/rules/add-apply', {'rule':rule})['ok'])
 
     def test_generated_manual_validation_failure_restores_active_and_pending_files(self):
-        rule = 'alert udp 192.0.2.1 any -> 198.51.100.2 53 (msg:"Observed endpoint"; rev:1;)'
+        rule = 'alert udp any any -> any 53 (msg:"Observed DNS indicator"; flow:to_server; content:"|07 65 78 61 6D 70 6C 65 04 74 65 73 74 00|",nocase; rev:1;)'
         before = Path(self.module.HUNT_RULES).read_bytes()
         pending = Path(self.manager.drafts.module.HUNT_RULES).read_bytes()
         with mock.patch.object(self.jobs,'run',side_effect=RuntimeError('invalid candidate')), \
@@ -179,7 +179,7 @@ class ManagerCase(unittest.TestCase):
         self.assertEqual(Path(self.manager.drafts.module.HUNT_RULES).read_bytes(),pending)
 
     def test_committed_manual_rule_recovers_pending_rebase_after_interruption(self):
-        rule = 'alert tcp 192.0.2.1 any -> 198.51.100.2 80 (msg:"Observed endpoint"; rev:1;)'
+        rule = 'alert tcp any any -> any 80 (msg:"Observed HTTP indicator"; flow:to_server,established; http_header:field host; content:"example.test",nocase; rev:1;)'
         with mock.patch.object(self.jobs,'run'), \
                 mock.patch.object(self.jobs.local.engine,'call',return_value={'ruleset-reload-rules':{}}), \
                 mock.patch.object(self.manager.drafts,'add_applied_manual',side_effect=OSError('interrupted')):

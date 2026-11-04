@@ -85,6 +85,8 @@ class RuntimeSnapshot:
 
     def sample(self):
         manager=self.manager
+        from session_logger import ensure_loaded
+        ensure_loaded(manager)
         service=manager.jobs.local.service()
         table=manager.module.nft_query_table('inet','ips')
         with self.lock:self.service,self.queue_table=service,table
