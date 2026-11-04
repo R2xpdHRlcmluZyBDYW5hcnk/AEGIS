@@ -1,0 +1,46 @@
+#!/usr/bin/env python3
+"""Privileged rule operations and scheduling behind a local group-owned socket."""
+import grp
+import importlib.machinery
+import importlib.util
+import os
+from pathlib import Path
+import signal
+import sys
+import threading
+
+sys.dont_write_bytecode = True
+from ips_control import Manager, Server, SOCKET
+
+
+def main():
+    loader = importlib.machinery.SourceFileLoader('ips_rule_engine', str(Path(__file__).with_name('ips-web')))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    loader.exec_module(module)
+    for name in ('DISABLE_CONF', 'DROP_CONF', 'MODIFY_CONF'):
+        module.normalize_selector_conf(getattr(module, name), modify=name == 'MODIFY_CONF')
+    manager = Manager(module,os.environ.get('STATE_DIRECTORY') or '/var/lib/ips-rule-manager')
+    path = Path(SOCKET)
+    path.unlink(missing_ok=True)
+    stop = threading.Event()
+    with Server(str(path), manager) as server:
+        os.chown(path, 0, grp.getgrnam('ips-console').gr_gid)
+        os.chmod(path, 0o660)
+        manager.runtime.start(stop,path.with_name('status.json'))
+        threading.Thread(target=manager.run_schedule, args=(stop,), daemon=True).start()
+        def shutdown(*_args):
+            stop.set()
+            threading.Thread(target=server.shutdown, daemon=True).start()
+        signal.signal(signal.SIGTERM, shutdown)
+        signal.signal(signal.SIGINT, shutdown)
+        try:
+            server.serve_forever()
+        finally:
+            stop.set()
+            path.unlink(missing_ok=True)
+
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,24 @@
+[Unit]
+Description=Snort web console and event database
+After=network-online.target ips.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/ips-web --config /etc/ips-web.conf
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillMode=control-group
+Slice=system.slice
+UMask=0077
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+ReadWritePaths=/var/lib/snort /var/log/snort /etc/snort
+
+[Install]
+WantedBy=multi-user.target

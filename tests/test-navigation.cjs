@@ -1,0 +1,50 @@
+const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
+const ts=require('../frontend/node_modules/typescript');
+class EventEmitter{count=0;emit(value){this.count++;this.value=value;}}
+const decorator=()=>()=>{},angular={Component:decorator,Injectable:decorator,Input:decorator,Output:decorator,ViewChild:decorator,HostListener:decorator,EventEmitter,ChangeDetectionStrategy:{Eager:0},effect:()=>{},afterEveryRender:()=>{}};
+class LiveQuery{start(){}stop(){}}
+const groupSelector=(name,source)=>'group-source:'+encodeURIComponent(source)+':'+encodeURIComponent(name);
+const core={groupSelector,groupTarget:value=>value,LiveQuery,canonical:value=>value.trim(),localDate:value=>value.toISOString().slice(0,16)};
+function load(file,imports={}){const exported={};vm.runInNewContext(ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS,experimentalDecorators:true}}).outputText,{exports:exported,require:name=>name==='@angular/core'?angular:imports[name]||{},queueMicrotask});return exported;}
+const {EventsComponent}=load('frontend/src/app/pages/events.component.ts',{'../core':core});
+const calls=[],state={investigate:(...args)=>calls.push(args)};
+const events=new EventsComponent({},state,{});events.mode='drops';events.query='sid:123 OR sid:456';events.proto='TCP';
+events.initialChoice='custom';events.customFrom='2026-11-01T04:00';events.customTo='2026-11-01T05:00';
+events.investigateDrop({key:'reasons'},{reason:'test "quoted" reason'});
+assert.equal(calls[0][0],'type: drop AND reason: '+JSON.stringify('test "quoted" reason')+' AND (sid:123 OR sid:456) AND proto: "TCP"');
+assert.deepEqual(JSON.parse(JSON.stringify(calls[0][2])),{choice:'custom',from:events.customFrom,to:events.customTo});
+events.query='';events.proto='';events.initialChoice='60';events.investigateDrop({key:'sources'},{ip:'2001:db8::1'});
+assert.equal(calls[1][0],'type: drop AND src: "2001:db8::1"');assert.equal(calls[1][2].choice,'60');
+events.investigateDrop({key:'destinations'},{ip:'192.0.2.1'});assert.equal(calls[2][0],'type: drop AND dst: "192.0.2.1"');
+events.investigateDrop({key:'sources'},{ip:''});assert.equal(calls.length,3);
+const {RulesComponent}=load('frontend/src/app/pages/rules.component.ts',{'../core':core});
+const opened=[],rules=new RulesComponent({},state,{rule:row=>opened.push(row)});
+rules.tab='manual';rules.openRow({sid:9900200,line:'custom'});assert.equal(opened[0].line,'custom');
+rules.tab='action';rules.openRow({value:'msg:Custom*',name:'Custom',action:'reject'});assert.equal(rules.selection.selector,'msg:Custom*');
+rules.tab='suppress';rules.openRow({sid:9900200,status:'待规则启用'});assert.equal(rules.selection.selector,'sid:9900200');
+rules.tab='groups';rules.openRow({name:'custom',source:'local'});assert.equal(rules.selection.selector,groupSelector('custom','local'));assert.equal(rules.selection.source,'local');
+rules.tab='bans';rules.openRow({type:'domain',value:'example.org',ips:['2001:db8::1']});
+assert.equal(rules.selection.selector,'ban:example.org');assert.ok(rules.selection.query.includes('dns: "example.org"')&&rules.selection.query.includes('src: "2001:db8::1"'));
+rules.openRow({type:'ip',value:'192.0.2.99'});assert.equal(rules.selection.query,'(src: "192.0.2.99" OR dst: "192.0.2.99")');
+console.log('ok - drop shortcuts preserve filters/range and escape values; rule scopes reuse custom, group, suppression and ban details');
+const {TableComponent}=load('frontend/src/app/table.component.ts');
+const table=new TableComponent();table.selected=new Set(Array.from({length:250},(_,i)=>String(i)));
+table.rows=Array.from({length:50},(_,i)=>({id:250+i}));table.selectPage({target:{checked:true}});
+assert.equal(table.selected.size,300);table.toggle({id:300},{target:{checked:true}});assert.equal(table.selected.size,301);
+(async()=>{
+ const {PickerComponent}=load('frontend/src/app/picker.component.ts',{'./core':core});
+ const requests=[],picker=new PickerComponent({get:async()=>({}),post:async(path,body)=>{requests.push({path,body});return {ok:true};}}, {toast:()=>{}});
+ picker.mode='suppress';picker.selected=new Map([[groupSelector('same','vendor/a'),{}],['sid:129:15',{}]]);await picker.save();
+ assert.equal(requests.length,1);assert.equal(requests[0].path,'/api/rules/suppress-groups');
+ assert.deepEqual(JSON.parse(JSON.stringify(requests[0].body)),{groups:[groupSelector('same','vendor/a')],sids:['129:15']});
+ assert.equal(picker.saved.count,1);assert.equal(picker.closed.count,1);
+ const deleted=[],deleting=new RulesComponent({post:async(path,body)=>{deleted.push({path,body});return {ok:true};}},{confirm:async()=>true,toast:()=>{}},{});
+ deleting.tab='suppress';deleting.summary={rule_manager:true};deleting.refresh=()=>{};
+ deleting.rows=[{_key:groupSelector('same','vendor/a'),group_policy:true},{_key:'129:15'}];deleting.selected=new Set(deleting.rows.map(r=>r._key));
+ await deleting.remove();assert.equal(deleted[0].path,'/api/rules/batch-delete');
+ assert.deepEqual(JSON.parse(JSON.stringify(deleted[0].body)),{paths:['/api/rules/suppress-group/'+encodeURIComponent(groupSelector('same','vendor/a')),'/api/rules/suppress/129%3A15']});
+ assert.equal(deleting.selected.size,0);
+ picker.mode='disable';picker.matchType='sid';picker.match='123456';picker.selected=new Map(Array.from({length:250},(_,i)=>['sid:'+i,{}]));picker.addMatch();
+ assert.equal(picker.selected.size,251);
+ console.log('ok - table and picker selections exceed 200; group and SID suppression use the common batch deletion path');
+})().catch(error=>{console.error(error);process.exitCode=1;});

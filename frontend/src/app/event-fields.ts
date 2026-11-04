@@ -1,0 +1,62 @@
+import { action, bytes, date, severity } from './core';
+
+export interface EvidenceField { key:string; label:string; value:string; }
+export interface EvidenceGroup { title:string; fields:EvidenceField[]; }
+const groups: {title:string; fields:[string,string][]}[] = [
+ {title:'连接流量',fields:[['flow_start','连接开始'],['flow_end','连接结束'],['flow_age','持续时间（秒）'],['bytes_toserver','客户端 → 服务端负载字节数'],['bytes_toclient','服务端 → 客户端负载字节数'],['pkts_toserver','客户端 → 服务端包数'],['pkts_toclient','服务端 → 客户端包数']]},
+ {title:'事件概况',fields:[['ts','事件时间'],['type','事件类型'],['action','处置结果'],['sev','严重级别'],['level','风险等级'],['app','应用'],['proto','传输协议']]},
+ {title:'通信信息',fields:[['src','源地址'],['sport','源端口'],['dst','目的地址'],['dport','目的端口'],['dir','通信方向'],['iif','采集接口'],['ip_version','IP 版本'],['vlan','VLAN 标识'],['pkt_src','数据包来源']]},
+ {title:'检测信息',fields:[['sig','检测签名'],['sig_id','规则编号（SID）'],['cat','威胁分类'],['reason','阻断原因'],['ips_action','规则动作'],['ids_reason','IDS 模式原因'],['gid','生成器编号（GID）'],['rev','规则版本'],['anom','协议异常']]},
+ {title:'HTTP',fields:[['host','主机名'],['url','请求路径'],['method','请求方法'],['status','响应状态码'],['httpver','HTTP 版本'],['ua','用户代理'],['ct','内容类型'],['clen','内容长度'],['referrer','来源页面']]},
+ {title:'DNS',fields:[['dns','查询域名'],['rrtype','记录类型'],['rcode','响应代码'],['answers','解析结果']]},
+ {title:'TLS',fields:[['sni','服务器名称（SNI）'],['tlsver','TLS 版本'],['alpn','应用层协议协商（ALPN）'],['subject','证书主体'],['issuer','证书签发者'],['cipher','密码套件'],['curve','椭圆曲线'],['validation_status','证书验证状态']]},
+ {title:'文件与连接',fields:[['file','文件名'],['size','文件大小'],['magic','文件类型'],['sha256','SHA-256 校验值'],['state','连接状态'],['flow_id','流标识（Flow ID）'],['session_id','会话 ID'],['native_uid','Snort 原生 UID'],['community','连接关联标识'],['history','连接历史'],['tenant_id','租户编号'],['fuid','文件标识'],['native_source','来源协议'],['analyzers','文件分析器'],['command','FTP 命令'],['arg','命令参数'],['user','用户名'],['reply_code','FTP 响应码'],['reply_msg','FTP 响应'],['client_protocol','客户端应用协议'],['tx','事务标识'],['icmp_type','ICMP 类型'],['icmp_code','ICMP 代码']]}
+];
+const eventTypes:Record<string,string>={alert:'检测告警',drop:'阻断事件',flow:'网络连接',anomaly:'协议异常',fileinfo:'文件记录',stats:'引擎统计',dns:'DNS 查询',http:'HTTP 请求',tls:'TLS 会话',ssh:'SSH 会话',quic:'QUIC 会话'};
+const directions:Record<string,string>={to_server:'客户端 → 服务端',toserver:'客户端 → 服务端',to_client:'服务端 → 客户端',toclient:'服务端 → 客户端'};
+const levels:Record<string,string>={high:'高危',medium:'中危',low:'低危'};
+const engineActions:Record<string,string>={reset:'重置连接',reject:'主动拒绝',drop:'丢弃数据包',block:'阻断',blacklist:'黑名单阻断'};
+export function engineAction(value:any):string {
+ const raw=String(value??'');
+ return Object.hasOwn(engineActions,raw.toLowerCase())?engineActions[raw.toLowerCase()]+'（'+raw+'）':raw;
+}
+export function eventType(value:any):string{return eventTypes[String(value)] || String(value||'网络事件').toUpperCase();}
+export function connectionSummary(record:Record<string,any>):{text:string;state:string;details:string} {
+ const failed=String(record.app||'').toLowerCase()==='failed';
+ const label=('连接 '+((failed?record.proto:record.app)||record.proto||'')).trim();
+ let text=String(record.sig||record.summary||label).trim();
+ if(record.type!=='flow')return {text,state:'',details:''};
+ const spacing=(value:string)=>value.replace(/\s*\u00b7\s*/g,' ').trim();
+ let state=String(record.state||record.flow_state||'').trim();
+ let details='';
+ const leading=text.match(/^连接\s+(new|established|closed|bypassed)(?:\s*\u00b7\s*(.*))?$/i);
+ const embedded=text.startsWith('连接 ')?text.match(/^(.*?)\s*\u00b7\s*(new|established|closed|bypassed)(?:\s*\u00b7\s*(.*))?$/i):null;
+ const bracket=text.match(/^(连接.*?)\s+\[\s*([^\]]+?)\s*\](?:\s+(.*))?$/);
+ if(leading){text=label;state=state||leading[1];details=leading[2]||'';}
+ else if(embedded){text=failed?label:embedded[1];state=state||embedded[2];details=embedded[3]||'';}
+ else if(bracket){text=failed?label:bracket[1];state=state||bracket[2];details=bracket[3]||'';}
+ else if(failed){details=text.startsWith(label+' ')?text.slice(label.length).trim():!state&&record.reason?'结束原因：'+record.reason:'';text=label;}
+ if(failed&&!details.startsWith('应用协议识别失败'))details='应用协议识别失败'+(details?' '+details:'');
+ return {text:spacing(text),state,details:spacing(details)};
+}
+export function evidenceValue(key:string,value:any):string {
+ if(key==='ts'||key==='flow_start'||key==='flow_end')return date(value);
+ if(key==='type')return eventType(value);
+ if(key==='action')return action(value);
+ if(key==='reason'||key==='ips_action')return engineAction(value);
+ if(key==='sev')return severity(value);
+ if(key==='level')return levels[value]||String(value);
+ if(key==='dir')return directions[value]||String(value);
+ if(key==='app'&&String(value).toLowerCase()==='failed')return 'FAILED（应用协议识别失败）';
+ if(key==='app'||key==='proto')return String(value).toUpperCase();
+ if(key==='size'||key==='clen'||key==='bytes_toserver'||key==='bytes_toclient')return bytes(value);
+ if(typeof value==='object')return JSON.stringify(value,null,2);
+ return String(value);
+}
+export function evidenceGroups(record:Record<string,any>):EvidenceGroup[] {
+ const summary=record.type==='flow'?connectionSummary(record):null;
+ const display=summary?{...record,state:summary.state}:record;
+ return groups.map(group=>({title:group.title,fields:group.fields
+  .filter(([key])=>display[key]!==null && display[key]!==undefined && display[key]!=='' && !(Array.isArray(display[key])&&display[key].length===0))
+  .map(([key,label])=>({key,label:summary&&key==='sig'?'连接摘要':summary&&key==='reason'?'连接结束原因':key==='reason'&&Object.hasOwn(engineActions,String(display[key]).toLowerCase())?'引擎处置动作':label,value:key==='sig'&&summary?summary.text+(summary.details?' '+summary.details:''):key==='reason'&&summary?String(display[key]):evidenceValue(key,display[key])}))})).filter(group=>group.fields.length>0);
+}

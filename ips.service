@@ -1,0 +1,34 @@
+[Unit]
+Description=Snort IPS detector and NFQUEUE supervisor
+Documentation=man:snort(8)
+After=network-online.target nftables.service
+Wants=network-online.target
+# Prevent a second detector from claiming the same NFQUEUE listeners.
+Conflicts=snort.service
+
+[Service]
+Type=simple
+# Snort 会发 sd_notify，允许多进程上报，避免刷 "reception only permitted for main PID"
+NotifyAccess=all
+ExecStart=/usr/local/bin/ips-supervisor
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=45
+KillMode=control-group
+
+# snort 的 pidfile 与 unix socket 都在这里
+RuntimeDirectory=snort
+RuntimeDirectoryMode=0755
+
+# Resource placement can be configured through systemd drop-ins.
+Slice=system.slice
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+ReadWritePaths=/var/lib/snort/rules /var/log/snort /run/snort /etc/snort
+
+[Install]
+WantedBy=multi-user.target

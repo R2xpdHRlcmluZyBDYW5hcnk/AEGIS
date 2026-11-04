@@ -1,0 +1,23 @@
+[Unit]
+Description=Snort native event ingestion
+After=ips.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/ips-event-bridge
+Restart=on-failure
+RestartSec=3
+User=root
+StateDirectory=ips-event-bridge
+LogsDirectory=ips
+CPUQuota=400%
+MemoryMax=256M
+ProtectSystem=strict
+ReadOnlyPaths=/var/log/snort /run/snort
+ReadWritePaths=/var/log/ips
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

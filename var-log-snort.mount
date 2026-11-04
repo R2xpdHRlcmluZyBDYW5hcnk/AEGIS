@@ -1,0 +1,12 @@
+[Unit]
+Description=Persistent Snort native logs
+RequiresMountsFor=/var/lib/ips-snort-logs
+
+[Mount]
+What=/var/lib/ips-snort-logs/snort
+Where=/var/log/snort
+Type=none
+Options=bind
+
+[Install]
+WantedBy=local-fs.target

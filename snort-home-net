@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""Refresh the LAN IPv6 prefix through validated native configuration reload."""
+import ipaddress
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import tempfile
+
+from snort_engine import BINARY, CONFIG, PREFIX, SnortControl, configuration_lock
+
+
+def refresh(interface):
+    if not interface:
+        raise ValueError('Set IPS_HOME_NET_INTERFACE to the monitored interface')
+    home=Path('/etc/snort/home-net.lua')
+    state=Path('/var/lib/snort/home-net-state.json')
+    previous=json.loads(state.read_text()) if state.exists() else []
+    source=home.read_text()
+    match=re.search(r"HOME_NET\s*=\s*(['\"])(.*?)\1",source)
+    if not match:
+        raise ValueError('HOME_NET assignment missing')
+    networks=[item.strip() for item in match[2].strip('[]').split(',') if item.strip() not in previous]
+    addresses=json.loads(subprocess.check_output(['ip','-j','-6','address','show','dev',interface],text=True))
+    prefixes=sorted({str(ipaddress.ip_network(item['local']+'/'+str(item['prefixlen']),strict=False))
+                     for address in addresses for item in address.get('addr_info',[]) if item.get('scope')=='global'})
+    value='['+','.join(dict.fromkeys(networks+prefixes))+']'
+    candidate=source[:match.start(2)]+value+source[match.end(2):]
+    if candidate==source:
+        return False
+    root=Path('/var/lib/snort/validation');root.mkdir(parents=True,exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='home-net-',dir=root) as directory:
+        staged=Path(directory)
+        if staged.resolve().parent!=root.resolve():
+            raise ValueError('Unexpected validation directory')
+        (staged/'home-net.lua').write_text(candidate)
+        config=Path(CONFIG).read_text().replace("include '/etc/snort/home-net.lua'",'include '+json.dumps(str(staged/'home-net.lua')))
+        (staged/'snort.lua').write_text(config)
+        subprocess.run([BINARY,'--daq-dir',PREFIX+'/lib/daq','--script-path',PREFIX+'/etc/snort','-T','-c',str(staged/'snort.lua')],check=True,timeout=300)
+        if home.read_text()!=source:
+            raise RuntimeError('HOME_NET changed during validation')
+        (staged/'home-net.lua').replace(home)
+        try:
+            result=SnortControl().call(['ruleset-reload-rules'],timeout=300)
+            if 'ruleset-reload-rules' not in result:
+                raise RuntimeError(result.get('__error__','Native reload failed'))
+        except BaseException:
+            home.write_text(source)
+            SnortControl().call(['ruleset-reload-rules'],timeout=300)
+            raise
+        state.write_text(json.dumps(prefixes)+'\n')
+    return True
+
+
+if __name__=='__main__':
+    with configuration_lock():
+        refresh(os.environ.get('IPS_HOME_NET_INTERFACE', ''))

@@ -1,0 +1,345 @@
+#!/usr/bin/env python3
+"""ips-supervisor — Snort 检测与 NFQUEUE 守护
+
+职责
+  1. 独占维护 `table inet ips`（NFQUEUE 分发规则）：启动时应用，停止时删除；
+  2. 拉起并守护 Snort（NFQ 模式，前台运行）；
+  3. 每 5 秒用 libnftables 读一次队列表：如果被 `systemctl restart nftables`
+     之类的操作冲掉了，自动重建（并写日志）；
+  4. 收到 SIGTERM 时停止检测进程并删表。
+
+Web 控制台和事件库由独立的 ips-web.service 管理。
+
+用法
+  ips-supervisor            # 前台运行（由 ips.service 拉起）
+  ips-supervisor --status   # 只读检查：队列表 + 进程 + 端口
+"""
+
+import json
+import secrets
+import os
+import signal
+import subprocess
+import sys
+import threading
+import time
+
+NFT_FAMILY = "inet"
+NFT_TABLE = "ips"
+NFT_FILE = None                      # 规则内嵌，见 nft_rules()
+QUEUES = "0-3"
+
+SNORT_PREFIX = os.environ.get('SNORT_ENGINE_PREFIX', '/opt/ips-snort3/3.12.4.0')
+SNORT = SNORT_PREFIX + "/bin/snort"
+SNORT_CONF = "/etc/snort/snort.lua"
+SNORT_PIDFILE = "/run/snort/snort.pid"
+SNORT_RUNDIR = "/run/snort"
+
+NFT_BIN = "/usr/sbin/nft"
+NFQ_PROC = "/proc/net/netfilter/nfnetlink_queue"
+ENGINE_SOCKET = "/run/snort/control.sock"
+CHECK_INTERVAL = 1.0
+RESTART_DELAY = 3.0
+
+
+def log(message):
+    sys.stdout.write("[ips] %s\n" % message)
+    sys.stdout.flush()
+
+
+def nft_rules():
+    """NFQUEUE 分发规则；拦截点在 prerouting mangle(-150)：
+    - 在 conntrack/defrag 之后，报文已重组
+    - 在 dstnat 之前，目的地址改写前的原始 5 元组可见
+    - 隧道回注流量也经过相同的地址过滤与队列分发
+    - 仅按入口接口排除 lo；其他接口继续经过目的地址过滤与队列分发
+    """
+    return (
+        "add table %(fam)s %(tab)s\n"
+        "delete table %(fam)s %(tab)s\n"
+        "table %(fam)s %(tab)s {\n"
+        "    chain prerouting {\n"
+        "        type filter hook prerouting priority mangle; policy accept;\n"
+        '        iifname "lo" return\n'
+        "        fib daddr type { local, broadcast, multicast } return\n"
+        "        ip daddr { 224.0.0.0/4, 255.255.255.255 } return\n"
+        "        counter queue flags bypass to %(queues)s\n"
+        "    }\n"
+        "}\n"
+    ) % {"fam": NFT_FAMILY, "tab": NFT_TABLE, "queues": QUEUES}
+
+
+class Nft:
+    """优先用 libnftables 的 Python 绑定；没有绑定就退回 nft -j"""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.ctx = None
+        self.binding = True
+        try:
+            import nftables  # python3-nftables
+            self.ctx = nftables.Nftables()
+            self.ctx.set_json_output(True)
+        except ImportError:
+            self.binding = False
+            log("python3-nftables 未安装，退回 nft -j")
+
+    def _run(self, text):
+        with self.lock:
+            if self.ctx is not None:
+                rc, out, err = self.ctx.cmd(text)
+                return rc, (out or ""), (err or "")
+        proc = subprocess.run([NFT_BIN, "-f", "-"], input=text, capture_output=True, text=True)
+        return proc.returncode, proc.stdout, proc.stderr
+
+    def _dump(self):
+        with self.lock:
+            if self.ctx is not None:
+                rc, out, err = self.ctx.cmd("list table %s %s" % (NFT_FAMILY, NFT_TABLE))
+                if rc != 0 or not out:
+                    return None
+                try:
+                    return json.loads(out)
+                except ValueError:
+                    return None
+        proc = subprocess.run([NFT_BIN, "-j", "list", "table", NFT_FAMILY, NFT_TABLE],
+                              capture_output=True, text=True)
+        if proc.returncode != 0 or not proc.stdout:
+            return None
+        try:
+            return json.loads(proc.stdout)
+        except ValueError:
+            return None
+
+    def has_queue(self):
+        data = self._dump()
+        if not data:
+            return False
+        for obj in data.get("nftables", []):
+            rule = obj.get("rule")
+            if not rule:
+                continue
+            if any("queue" in expr for expr in (rule.get("expr") or [])):
+                return True
+        return False
+
+    def apply(self):
+        rc, out, err = self._run(nft_rules())
+        if rc != 0:
+            return False, (err or out).strip()
+        return True, ""
+
+    def remove(self):
+        self._run("delete table %s %s" % (NFT_FAMILY, NFT_TABLE))
+
+
+class Child:
+    def __init__(self, name, argv, nice=None):
+        self.name = name
+        self.argv = argv
+        self.proc = None
+        self.nice = nice
+
+    def start(self):
+        log("启动 %s" % self.name)
+        kwargs = {"stdout": None, "stderr": None}
+        if self.nice is not None:
+            kwargs["preexec_fn"] = lambda: os.nice(self.nice)
+        started = time.time()
+        self.proc = subprocess.Popen(self.argv, **kwargs)
+        if self.name == "snort":
+            with open(SNORT_PIDFILE, "w") as handle:
+                handle.write(str(self.proc.pid) + "\n")
+            instance = os.path.join(SNORT_RUNDIR, "instance.json")
+            with open(instance + ".new", "w") as handle:
+                json.dump(dict(epoch=secrets.token_hex(16), started=started), handle)
+            os.replace(instance + ".new", instance)
+
+    def alive(self):
+        return self.proc is not None and self.proc.poll() is None
+
+    def returncode(self):
+        return None if self.proc is None else self.proc.poll()
+
+    def kill(self):
+        if self.alive():
+            try:
+                self.proc.kill()
+                self.proc.wait(timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+
+    def stop(self, timeout=20.0):
+        if not self.alive():
+            return
+        log("停止 %s" % self.name)
+        self.proc.terminate()
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self.proc.poll() is not None:
+                return
+            time.sleep(0.2)
+        log("%s 未在 %.0fs 内退出，强制结束" % (self.name, timeout))
+        try:
+            self.proc.kill()
+            self.proc.wait(timeout=5)
+        except OSError:
+            pass
+
+
+def clean_stale_pidfile():
+    """Snort 会因为残留的 pidfile 直接拒绝启动，这里提前清掉"""
+    pid = 0
+    try:
+        with open(SNORT_PIDFILE, encoding="utf-8") as handle:
+            pid = int(handle.read().strip())
+    except (OSError, ValueError):
+        pid = 0
+    if pid and os.path.isdir("/proc/%d" % pid):
+        return
+    try:
+        os.unlink(SNORT_PIDFILE)
+        log("清理了陈旧的 pidfile")
+    except OSError:
+        pass
+
+
+def queues_busy():
+    """返回仍被其它进程监听的 NFQ 队列号（peer_portid != 0 表示有监听者）"""
+    busy = set()
+    try:
+        with open(NFQ_PROC, encoding="utf-8") as handle:
+            for line in handle:
+                cols = line.split()
+                if len(cols) >= 2 and cols[0] in ("0", "1", "2", "3") and cols[1] != "0":
+                    busy.add(cols[0])
+    except OSError:
+        pass
+    return busy
+
+
+def wait_queues_free(timeout=20.0):
+    """旧实例退出后内核释放队列可能有延迟，先等一会儿再启动，避免 create_queue 失败"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        busy = queues_busy()
+        if not busy:
+            return True
+        time.sleep(0.5)
+    log("警告: 队列 %s 仍被占用，稍后重试" % ",".join(sorted(queues_busy())))
+    return False
+
+
+def status():
+    nft = Nft()
+    ok = nft.has_queue()
+    print("nft table %s %s: %s" % (NFT_FAMILY, NFT_TABLE, "OK" if ok else "MISSING"))
+    for name in ("snort", "ips-web"):
+        proc = subprocess.run(["pgrep", "-af", name], capture_output=True, text=True)
+        lines = [l for l in proc.stdout.splitlines() if "ips-supervisor" not in l]
+        print("%-8s %s" % (name, lines[0] if lines else "not running"))
+    for name in ('ips.service', 'ips-web.service'):
+        unit = subprocess.run(["systemctl", "is-active", name], capture_output=True, text=True)
+        print("%s: %s" % (name, unit.stdout.strip()))
+    return 0 if ok else 1
+
+
+def wait_snort_ready(snort, timeout=90.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not snort.alive():
+            return False
+        if os.path.exists(ENGINE_SOCKET):
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def ensure_nft():
+    """被 nftables.service 的 ExecStartPost 调用：表没了就补上"""
+    nft = Nft()
+    if nft.has_queue():
+        return 0
+    ok, err = nft.apply()
+    log("exec-hook 补建队列表: %s" % ("OK" if ok else "FAILED " + err))
+    return 0 if ok else 1
+
+
+def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--status":
+        return status()
+    if len(sys.argv) > 1 and sys.argv[1] == "--ensure-nft":
+        return ensure_nft()
+
+    os.makedirs(SNORT_RUNDIR, exist_ok=True)
+
+    stop = threading.Event()
+
+    def on_signal(_signum, _frame):
+        stop.set()
+
+    signal.signal(signal.SIGTERM, on_signal)
+    signal.signal(signal.SIGINT, on_signal)
+
+    nft = Nft()
+    ok, err = nft.apply()
+    log("NFQUEUE 规则: %s" % ("已应用" if ok else "应用失败: " + err))
+
+    snort = Child("snort", [SNORT, "--daq-dir", SNORT_PREFIX + "/lib/daq",
+        "--daq", "nfq", "-Q", "-s", "65535", "-z", "4", "-i", "0", "-i", "1", "-i", "2", "-i", "3",
+        "-c", SNORT_CONF, "-l", "/var/log/snort", "--control-socket", ENGINE_SOCKET,
+        "--script-path", SNORT_PREFIX + "/etc/snort"])
+
+    clean_stale_pidfile()
+    wait_queues_free(20)
+    snort.start()
+    started_at = time.time()
+
+    last_check = 0.0
+    while not stop.is_set():
+        for child in (snort,):
+            if stop.is_set():
+                break
+            if not child.alive():
+                log("%s 已退出 (rc=%s)，%.0fs 后重启" %
+                    (child.name, child.returncode(), RESTART_DELAY))
+                stop.wait(RESTART_DELAY)
+                if stop.is_set():
+                    break
+                if child is snort:
+                    clean_stale_pidfile()
+                    wait_queues_free(10)
+                    child.start()
+                    started_at = time.time()
+                else:
+                    child.start()
+        if stop.is_set():
+            break
+
+        if snort.alive() and not os.path.exists(ENGINE_SOCKET):
+            if time.time() - started_at > 120:
+                log("snort 存活但 unix socket 一直没出现，判定为卡死，重启")
+                snort.kill()
+                clean_stale_pidfile()
+                wait_queues_free(10)
+                snort.start()
+                started_at = time.time()
+
+        now = time.time()
+        if now - last_check >= CHECK_INTERVAL:
+            last_check = now
+            if not nft.has_queue():
+                log("队列表被清空（nftables 被重载？），正在重建")
+                ok, err = nft.apply()
+                log("重建%s" % ("成功" if ok else "失败: " + err))
+
+        stop.wait(1.0)
+
+    snort.stop(timeout=20)
+    nft.remove()
+    log("已停止")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

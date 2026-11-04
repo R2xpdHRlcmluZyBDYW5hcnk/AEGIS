@@ -1,0 +1,23 @@
+{
+  "repository": "https://github.com/mitre-attack/attack-stix-data",
+  "commit": "c2494b29dd268c46a5d0ea0990553e4327cd2253",
+  "commit_date": "2026-10-13T19:11:14Z",
+  "bundles": [
+    {
+      "url": "https://raw.githubusercontent.com/mitre-attack/attack-stix-data/c2494b29dd268c46a5d0ea0990553e4327cd2253/enterprise-attack/enterprise-attack.json",
+      "sha256": "81113ba98afa2928f3dcff62022539f7ce30c315c32e14422f11ff95ce534352"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/mitre-attack/attack-stix-data/c2494b29dd268c46a5d0ea0990553e4327cd2253/mobile-attack/mobile-attack.json",
+      "sha256": "824f7d8a37e7893b29e4c6ca6d87b5fbbf3b228ec6384f1a69ee20d523ff59e5"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/mitre-attack/attack-stix-data/c2494b29dd268c46a5d0ea0990553e4327cd2253/ics-attack/ics-attack.json",
+      "sha256": "c9ca0ce523a1b5e512060a390415e8aefe8f6d32c5f82d7de81264960c1e1183"
+    }
+  ],
+  "license": {
+    "url": "https://raw.githubusercontent.com/mitre-attack/attack-stix-data/c2494b29dd268c46a5d0ea0990553e4327cd2253/LICENSE.txt",
+    "sha256": "738144f7fb054722a4ef9d3367c51710341dc12fc574c6ac3a41daaaecd8bf5e"
+  }
+}

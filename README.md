@@ -1,0 +1,56 @@
+# Snort NDR Console
+
+Angular 与 Python 实现的 Snort 3 网络检测控制台，提供安全概览、事件调查、协议日志、规则源、规则草稿、封禁与告警抑制管理。前端针对桌面浏览器，静态资源本地打包，不依赖 CDN。
+
+## 本地预览
+
+需要 Python 3.13 或更新版本，以及用于获取构建依赖的网络环境：
+
+```sh
+python -B preview.py
+```
+
+打开 http://127.0.0.1:19090，账户 `admin`，密码 `preview-only`。预览仅绑定回环地址，使用临时合成数据，退出后清理，不连接检测设备。
+
+## 构建
+
+在 PowerShell 执行，输出目录必须在源码树之外：
+
+```powershell
+.\deploy.ps1 -BuildOnly -OutputDirectory "$env:TEMP\ndr-console-release"
+```
+
+Linux、macOS 或 Windows 也可单独构建静态资源：
+
+```sh
+python3 -B build_frontend.py --output /var/tmp/ndr-console-static
+```
+
+构建器按锁文件安装依赖，并校验清单固定的 Node.js、npm 与 ATT&CK 数据。依赖、缓存与生成目录只存于临时工作区。
+
+## 部署
+
+运行环境为 Linux 与 systemd，后端需要 Python 3.13 或更新版本。Snort 3、LibDAQ、规则与 PulledPork3 独立安装。面板源码不限定目标 CPU 架构；可选引擎交叉编译工具仅覆盖清单声明的 ARM64 目标。
+
+首次接入、更新和回滚见 [部署说明](README-deploy.md)，功能说明见 [使用说明](IPS-使用说明.md)。已有安装的更新必须显式指定 SSH 目标：
+
+```powershell
+.\deploy.ps1 -Target root@sensor.example -UpdateBackend
+```
+
+仓库不包含第三方二进制、引擎发行包、更新器修改、第三方规则包或真实运行数据库。
+
+## 测试
+
+完整后端回归应在 Linux 或 WSL 中执行，部分测试需要 Unix 套接字与文件锁：
+
+```sh
+python3 -B -m unittest discover -s tests -p 'test_*.py'
+python3 -B -m unittest -q test_ips_web
+```
+
+生产构建包含前端产物一致性与组件回归。桌面浏览器回归使用 `tests/run_chart_regression.py --release <发布包>`，Chrome 路径可用 `CHROME_PATH` 指定。测试在开发机上使用合成数据或临时副本。维护约定见 [AGENTS.md](AGENTS.md)。提交公开源码前执行 `python -B tests/check_public_source.py`，检查暂存区中的凭据、个人路径、私网主机地址和运行产物。
+
+## 许可
+
+面板独立实现采用 [MIT](LICENSE)。Snort 引擎补丁单独遵守上游 GPL-2.0-only，范围见 [第三方声明](THIRD_PARTY_NOTICES.md)。Snort、Cisco、Talos、MITRE 等名称用于说明来源与兼容性，不表示官方关联。

@@ -1,0 +1,9 @@
+[Unit]
+Description=Snort log size maintenance (rotate big files, trim old archives)
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/ips-log-maintenance
+Nice=10
+IOSchedulingClass=idle

@@ -1,0 +1,56 @@
+const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
+const ts=require('../frontend/node_modules/typescript');
+const compile=path=>ts.transpileModule(fs.readFileSync(path,'utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS,experimentalDecorators:true}}).outputText;
+const noop=()=>()=>{},templates=[];
+const angular={Component:config=>{templates.push(config.template);return value=>value;},Injectable:noop,Input:noop,ChangeDetectionStrategy:{Eager:0}};
+const core={};vm.runInNewContext(compile('frontend/src/app/core.ts'),{exports:core,require:name=>name==='@angular/core'?angular:{}});
+const fields={};vm.runInNewContext(compile('frontend/src/app/event-fields.ts'),{exports:fields,require:()=>core});
+const clean=value=>JSON.parse(JSON.stringify(value));
+for(const state of ['new','established','closed','bypassed']){
+ const modern={type:'flow',app:'dns',proto:'UDP',state,sig:'连接 dns [ '+state+' ]'};
+ assert.deepEqual(clean(fields.connectionSummary(modern)),{text:'连接 dns',state,details:''});
+ assert.deepEqual(clean(fields.connectionSummary({...modern,sig:'连接 dns \u00b7 '+state})),{text:'连接 dns',state,details:''});
+ const legacy={type:'flow',app:'http',proto:'TCP',state:'',sig:'连接 '+state+' \u00b7 804 → 72 bytes \u00b7 0s'};
+ const before=JSON.stringify(legacy);
+ assert.deepEqual(clean(fields.connectionSummary(legacy)),{text:'连接 http',state,details:'804 → 72 bytes 0s'});
+ const evidence=fields.evidenceGroups(legacy).flatMap(group=>group.fields);
+ assert.equal(evidence.find(field=>field.key==='state').value,state);
+ assert.equal(evidence.find(field=>field.key==='sig').value,'连接 http 804 → 72 bytes 0s');
+ assert.equal(JSON.stringify(legacy),before,'display normalization never changes evidence');
+}
+assert.deepEqual(clean(fields.connectionSummary({type:'flow',app:'tls',flow_state:'closed',sig:'连接 tls \u00b7 closed'})),{text:'连接 tls',state:'closed',details:''});
+assert.deepEqual(clean(fields.connectionSummary({type:'flow',proto:'TCP',sig:'连接 TCP \u00b7 established \u00b7 12 → 0 bytes'})),{text:'连接 TCP',state:'established',details:'12 → 0 bytes'});
+assert.equal(fields.connectionSummary({type:'flow',app:'http',state:'closed',sig:'连接 established \u00b7 804 → 72 bytes \u00b7 0s'}).state,'closed','structured state takes priority');
+assert.equal(fields.connectionSummary({type:'flow',sig:'连接 future_protocol'}).state,'','unknown words are not guessed to be states');
+for(const sig of ['连接 failed \u00b7 established','连接 UDP [ established ] 应用协议识别失败']){
+ const record={type:'flow',app:'failed',proto:'UDP',sig,state:'established',reason:'timeout'};
+ const before=JSON.stringify(record);
+ assert.deepEqual(clean(fields.connectionSummary(record)),{text:'连接 UDP',state:'established',details:'应用协议识别失败'});
+ const evidence=fields.evidenceGroups(record).flatMap(group=>group.fields);
+ assert.equal(evidence.find(field=>field.key==='sig').value,'连接 UDP 应用协议识别失败');
+ assert.equal(evidence.find(field=>field.key==='app').value,'FAILED（应用协议识别失败）');
+ assert.equal(evidence.find(field=>field.key==='reason').label,'连接结束原因');
+ assert.equal(JSON.stringify(record),before);
+}
+assert.deepEqual(clean(fields.connectionSummary({type:'flow',app:'failed',proto:'UDP',sig:'连接 UDP 应用协议识别失败 结束原因：timeout'})),{text:'连接 UDP',state:'',details:'应用协议识别失败 结束原因：timeout'});
+assert.deepEqual(clean(fields.connectionSummary({type:'flow',proto:'UDP',state:'future_state',sig:'连接 UDP [ future_state ]'})),{text:'连接 UDP',state:'future_state',details:''});
+for(const type of ['alert','fileinfo'])assert.equal(fields.connectionSummary({type,sig:'Signature \u00b7 established',state:'CLOSED'}).state,'','non-connection states and signatures stay plain');
+const blocked={type:'drop',sig:'Synthetic detection',sig_id:123,reason:'reset',ips_action:'reject',action:'blocked'};
+const original=JSON.stringify(blocked),evidence=fields.evidenceGroups(blocked).flatMap(group=>group.fields);
+assert.equal(evidence.find(field=>field.key==='reason').label,'引擎处置动作');
+assert.equal(evidence.find(field=>field.key==='reason').value,'重置连接（reset）');
+assert.equal(evidence.find(field=>field.key==='ips_action').value,'主动拒绝（reject）');
+assert.equal(evidence.find(field=>field.key==='action').value,'已阻断');
+assert.equal(evidence.find(field=>field.key==='sig').value,blocked.sig);
+assert.equal(JSON.stringify(blocked),original,'action display retains raw evidence and filter values');
+const legacyReason=fields.evidenceGroups({type:'drop',reason:'decoder event'}).flatMap(group=>group.fields).find(field=>field.key==='reason');
+assert.equal(legacyReason.label,'阻断原因');assert.equal(legacyReason.value,'decoder event');
+const flowReason=fields.evidenceGroups({type:'flow',reason:'reset'}).flatMap(group=>group.fields).find(field=>field.key==='reason');
+assert.equal(flowReason.label,'连接结束原因');assert.equal(flowReason.value,'reset');
+assert.equal(fields.engineAction('future_action'),'future_action');assert.equal(fields.engineAction('constructor'),'constructor');
+const widget={};vm.runInNewContext(compile('frontend/src/app/connection-summary.component.ts'),{exports:widget,require:name=>name==='@angular/core'?angular:name==='./event-fields'?fields:{}});
+const component=new widget.ConnectionSummaryComponent();component.record={type:'flow',app:'http',sig:'连接 established \u00b7 804 → 72 bytes \u00b7 0s'};component.ngOnChanges();
+assert.equal(component.summary.state,'established');assert.equal(component.summary.text,'连接 http');assert.ok(templates.join('').includes('badge flow-state'));assert.ok(templates.join('').includes('summary-details'));
+assert.ok(templates.join('').includes('>{{summary.state}}</span>'));
+assert.ok(!templates.join('').includes('[ {{summary.state}} ]'));
+console.log('ok - connection states, action versus reason labels, retained metrics and unchanged evidence');

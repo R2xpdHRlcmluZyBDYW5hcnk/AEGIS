@@ -1,0 +1,3 @@
+#!/bin/sh
+set -eu
+/usr/sbin/logrotate /etc/logrotate.d/ips-snort

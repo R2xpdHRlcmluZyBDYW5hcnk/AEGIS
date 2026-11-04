@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh Snort LAN IPv6 scope
+After=ips.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/snort-home-net
+TimeoutStartSec=10min
+MemoryMax=4G
+MemorySwapMax=0

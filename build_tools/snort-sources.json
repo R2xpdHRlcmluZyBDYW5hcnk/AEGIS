@@ -1,0 +1,21 @@
+{
+  "snort": {
+    "version": "3.12.4.0",
+    "url": "https://codeload.github.com/snort3/snort3/tar.gz/refs/tags/3.12.4.0",
+    "sha256": "5bab33f703ca09b74bc2de72d16d8be59c67ebb98dbd45e50c30989b5cdd510f"
+  },
+  "libdaq": {
+    "version": "3.0.28",
+    "url": "https://codeload.github.com/snort3/libdaq/tar.gz/refs/tags/v3.0.28",
+    "sha256": "a72bc8882abdcfaf475b18d547b5a08785d574005584ce258e533d247bc62771"
+  },
+  "openappid": {
+    "url": "https://www.snort.org/downloads/openappid/33380",
+    "sha256": "3046c5af1dd81a104f13d8e895226ef64bca7fa358238fb5f29c659081eaee2a"
+  },
+  "target": {
+    "architecture": "aarch64",
+    "distribution": "Debian 13",
+    "glibc": "2.41"
+  }
+}

@@ -1,0 +1,40 @@
+[Unit]
+Description=Snort rule manager and persistent update scheduler
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=ips-console
+ExecStart=/usr/local/bin/ips-rule-manager
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillMode=control-group
+Slice=system.slice
+TasksMax=64
+MemoryMax=4G
+MemorySwapMax=0
+UMask=0077
+RuntimeDirectory=ips-rule-manager
+RuntimeDirectoryMode=0755
+StateDirectory=ips-rule-manager
+StateDirectoryMode=0700
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+ReadWritePaths=/var/lib/snort /etc/snort /var/log/snort
+InaccessiblePaths=-/var/lib/private/ips-web /etc/ips-web.conf
+CapabilityBoundingSet=CAP_NET_ADMIN
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

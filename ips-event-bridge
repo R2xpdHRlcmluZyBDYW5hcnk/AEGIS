@@ -1,0 +1,228 @@
+#!/usr/bin/env python3
+"""Bounded native Snort extractor tailer; writes one durable console event stream."""
+import argparse
+import errno
+import hashlib
+import json
+import os
+from pathlib import Path
+import signal
+import sys
+import time
+import copy
+from collections import deque
+
+sys.dont_write_bytecode = True
+from snort_engine import record_kind,rule_metadata
+from parallel_cpu import shared_cpu
+from event_processing import decode_bridge
+
+
+def sparse_data_position(source,position):
+    """Locate data without changing the buffered reader's underlying offset."""
+    if not hasattr(os,'SEEK_DATA'):return None
+    try:descriptor=os.open(source.name,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0))
+    except OSError:return None
+    try:
+        current,other=os.fstat(source.fileno()),os.fstat(descriptor)
+        if (current.st_dev,current.st_ino)!=(other.st_dev,other.st_ino):return None
+        try:result=os.lseek(descriptor,position,os.SEEK_DATA)
+        except OSError as exc:
+            if exc.errno==errno.ENXIO:result=other.st_size
+            elif exc.errno in (errno.EINVAL,errno.ENOTSUP):return None
+            else:raise
+        return result if result>position else None
+    finally:os.close(descriptor)
+
+
+class Bridge:
+    LINE_LIMIT = 1 << 20
+    BATCH_BYTES = 4 << 20
+    FILE_BYTES = 1 << 20
+    CHUNK_BYTES = 256 << 10
+
+    def __init__(self, logs, output, checkpoint, instance):
+        self.logs, self.output, self.checkpoint, self.instance = map(Path, (logs, output, checkpoint, instance))
+        self.files = {}
+        self.epoch = ''
+        self.rejected = 0
+        self.sparse_bytes = 0
+        self.cpu = shared_cpu()
+        self.worker_pids = set()
+        self.cursor = 0
+        try:
+            state = json.loads(self.checkpoint.read_text())
+            self.files, self.epoch = state['files'], state['epoch']
+            self.rejected=state.get('rejected',0)
+            self.sparse_bytes=state.get('sparse_bytes',0)
+        except FileNotFoundError:
+            pass
+        self.output.parent.mkdir(parents=True, exist_ok=True)
+        self.checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        self._repair_tail()
+
+    def _repair_tail(self):
+        """A checkpoint never covers a torn output line; replay its native source."""
+        if not self.output.exists():
+            self.output.touch()
+            return
+        with self.output.open('r+b') as handle:
+            size=handle.seek(0,os.SEEK_END)
+            if not size:return
+            handle.seek(-1,os.SEEK_END)
+            if handle.read(1)==b'\n':return
+            limit=8<<20
+            start=max(0,size-limit);handle.seek(start)
+            tail=handle.read(limit)
+            boundary=tail.rfind(b'\n')
+            if boundary<0 and start:
+                raise RuntimeError('Incomplete bridge output exceeds recovery limit; raw logs retained')
+            handle.truncate(start+boundary+1)
+            handle.flush();os.fsync(handle.fileno())
+
+    @staticmethod
+    def _sync_directory(path):
+        if os.name!='posix':return
+        fd=os.open(path,os.O_RDONLY|getattr(os,'O_DIRECTORY',0))
+        try:os.fsync(fd)
+        finally:os.close(fd)
+
+    def save(self, state=None):
+        candidate = self.checkpoint.with_suffix('.new')
+        try:
+            with candidate.open('w') as handle:
+                json.dump(state or dict(epoch=self.epoch,files=self.files,rejected=self.rejected,sparse_bytes=self.sparse_bytes),handle)
+                handle.flush()
+                os.fsync(handle.fileno())
+            candidate.replace(self.checkpoint)
+            self._sync_directory(self.checkpoint.parent)
+        finally:
+            candidate.unlink(missing_ok=True)
+
+    def _batches(self, paths, state, started):
+        total=0
+        pending=deque(paths)
+        while pending and total<self.BATCH_BYTES:
+            path=pending.popleft()
+            self.cursor+=1
+            if path.is_symlink() or not path.is_file():continue
+            info=path.stat()
+            if info.st_mtime<started:continue
+            token=path.name;previous=state['files'].get(token,{})
+            with path.open('rb') as source:
+                info=os.fstat(source.fileno())
+                offset=previous.get('offset',0) if previous.get('inode')==info.st_ino else 0
+                discarding=bool(previous.get('discarding')) if offset else False
+                if info.st_size<offset:offset=0;discarding=False
+                if offset and previous.get('tail_hash'):
+                    source.seek(max(0,offset-256))
+                    if hashlib.sha256(source.read(min(offset,256))).hexdigest()!=previous['tail_hash']:
+                        offset=0;discarding=False
+                source.seek(offset)
+                consumed=0;batch=[];weight=0
+                while consumed<min(self.FILE_BYTES,self.BATCH_BYTES) and total<self.BATCH_BYTES:
+                    position=source.tell();line=source.readline(self.LINE_LIMIT+1)
+                    if not line:break
+                    content=line.lstrip(b'\0');padding=len(line)-len(content)
+                    if padding:
+                        discarding=False
+                        if not content:
+                            target=sparse_data_position(source,position)
+                            state['sparse_bytes']+=(target-position) if target else len(line)
+                            consumed+=len(line);total+=len(line)
+                            if target:source.seek(target)
+                            continue
+                        state['sparse_bytes']+=padding
+                        if not line.endswith(b'\n'):
+                            source.seek(position+padding);consumed+=padding;total+=padding
+                            continue
+                        line=content
+                    if discarding:
+                        consumed+=len(line);total+=len(line)
+                        if line.endswith(b'\n'):discarding=False
+                        continue
+                    if not line.endswith(b'\n'):
+                        if len(line)>self.LINE_LIMIT:
+                            state['rejected']+=1;discarding=True
+                            consumed+=len(line);total+=len(line)
+                            print('Skipped oversized native record; raw log retained: '+path.name,file=sys.stderr,flush=True)
+                            continue
+                        source.seek(position);break
+                    consumed+=len(line)+padding;total+=len(line)+padding
+                    batch.append(line);weight+=len(line)
+                    if weight>=self.CHUNK_BYTES:
+                        yield batch,state['epoch'],path.name.endswith('alert_json.txt')
+                        batch=[];weight=0
+                if batch:yield batch,state['epoch'],path.name.endswith('alert_json.txt')
+                offset=source.tell();source.seek(max(0,offset-256))
+                tail_hash=hashlib.sha256(source.read(min(offset,256))).hexdigest()
+            state['files'][token]=dict(inode=info.st_ino,offset=offset,tail_hash=tail_hash,discarding=discarding)
+            if offset>previous.get('offset',0) and offset<info.st_size:
+                pending.append(path)
+
+    def poll(self):
+        try:
+            instance=json.loads(self.instance.read_text())
+            epoch,started=instance['epoch'],instance['started']
+        except FileNotFoundError:return 0
+        before=dict(epoch=self.epoch,files=self.files,rejected=self.rejected,sparse_bytes=self.sparse_bytes)
+        state=dict(epoch=epoch,files=copy.deepcopy(self.files) if epoch==self.epoch else {},
+                   rejected=self.rejected,sparse_bytes=self.sparse_bytes)
+        paths=sorted(self.logs.glob('*file_connector_ndr_transmit'))+sorted(self.logs.glob('*alert_json.txt'))
+        if len(paths)>128:raise RuntimeError('Native log file count exceeds limit')
+        if paths:
+            self.cursor%=len(paths);paths=paths[self.cursor:]+paths[:self.cursor]
+        backlog=sum(max(0,path.stat().st_size-state['files'].get(path.name,{}).get('offset',0))
+                    for path in paths if path.is_file() and not path.is_symlink())
+        batches=self._batches(paths,state,started)
+        stats={};metadata=None;written=0
+        results=(self.cpu.ordered(decode_bridge,batches,stats) if backlog>=self.CHUNK_BYTES
+                 else map(decode_bridge,batches))
+        try:
+            with self.output.open('ab') as destination:
+                for segments,rejected,count in results:
+                    state['rejected']+=rejected
+                    for segment in segments:
+                        if isinstance(segment,dict):
+                            if metadata is None:metadata=rule_metadata()
+                            data=segment['data']
+                            segment['rule_metadata']=metadata.get((int(data.get('gid') or 0),int(data.get('sid') or 0)),{})
+                            segment=json.dumps(segment,ensure_ascii=False,separators=(',',':')).encode()+b'\n'
+                        destination.write(segment)
+                    written+=count
+                # Source progress is published only after every output batch is durable.
+                if written:
+                    destination.flush();os.fsync(destination.fileno())
+                    self._sync_directory(self.output.parent)
+            if state!=before:self.save(state)
+            self.files,self.epoch=state['files'],epoch
+            self.rejected,self.sparse_bytes=state['rejected'],state['sparse_bytes']
+            self.worker_pids=stats.get('pids',set())
+            return written
+        finally:
+            if hasattr(results,'close'):results.close()
+            if hasattr(batches,'close'):batches.close()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--logs', default='/var/log/snort')
+    parser.add_argument('--output', default='/var/log/ips/events.json')
+    parser.add_argument('--checkpoint', default='/var/lib/ips-event-bridge/offsets.json')
+    parser.add_argument('--instance', default='/run/snort/instance.json')
+    args = parser.parse_args()
+    bridge = Bridge(args.logs, args.output, args.checkpoint, args.instance)
+    running = True
+    def stop(*_):
+        nonlocal running
+        running = False
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    while running:
+        bridge.poll()
+        time.sleep(.25)
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

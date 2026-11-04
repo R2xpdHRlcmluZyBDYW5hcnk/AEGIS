@@ -1,0 +1,20 @@
+/var/log/snort/*file_connector_ndr_transmit /var/log/snort/*alert_json.txt {
+    daily
+    maxsize 16M
+    rotate 2
+    missingok
+    notifempty
+    copytruncate
+    compress
+    delaycompress
+}
+/var/log/ips/events.json {
+    daily
+    maxsize 64M
+    rotate 2
+    missingok
+    notifempty
+    compress
+    delaycompress
+    create 0644 root root
+}

@@ -1,0 +1,12 @@
+[Unit]
+Description=Persistent Snort console event stream
+RequiresMountsFor=/var/lib/ips-snort-logs
+
+[Mount]
+What=/var/lib/ips-snort-logs/events
+Where=/var/log/ips
+Type=none
+Options=bind
+
+[Install]
+WantedBy=local-fs.target
