@@ -10,6 +10,7 @@ const groups: {title:string; fields:[string,string][]}[] = [
  {title:'HTTP',fields:[['host','主机名'],['url','请求路径'],['method','请求方法'],['status','响应状态码'],['httpver','HTTP 版本'],['ua','用户代理'],['ct','内容类型'],['clen','内容长度'],['referrer','来源页面']]},
  {title:'DNS',fields:[['dns','查询域名'],['rrtype','记录类型'],['rcode','响应代码'],['answers','解析结果']]},
  {title:'TLS',fields:[['sni','服务器名称（SNI）'],['tlsver','TLS 版本'],['alpn','应用层协议协商（ALPN）'],['subject','证书主体'],['issuer','证书签发者'],['cipher','密码套件'],['curve','椭圆曲线'],['validation_status','证书验证状态']]},
+ {title:'QUIC 观察',fields:[['observer','采集组件'],['coverage','证据范围'],['quic_cids','可见连接 ID'],['quic_paths','可见通信路径']]},
  {title:'文件与连接',fields:[['file','文件名'],['size','文件大小'],['magic','文件类型'],['sha256','SHA-256 校验值'],['state','连接状态'],['flow_id','流标识（Flow ID）'],['session_id','会话 ID'],['native_uid','Snort 原生 UID'],['community','连接关联标识'],['history','连接历史'],['tenant_id','租户编号'],['fuid','文件标识'],['native_source','来源协议'],['analyzers','文件分析器'],['command','FTP 命令'],['arg','命令参数'],['user','用户名'],['reply_code','FTP 响应码'],['reply_msg','FTP 响应'],['client_protocol','客户端应用协议'],['tx','事务标识'],['icmp_type','ICMP 类型'],['icmp_code','ICMP 代码']]}
 ];
 const eventTypes:Record<string,string>={alert:'检测告警',drop:'阻断事件',flow:'网络连接',anomaly:'协议异常',fileinfo:'文件记录',stats:'引擎统计',dns:'DNS 查询',http:'HTTP 请求',tls:'TLS 会话',ssh:'SSH 会话',quic:'QUIC 会话'};
@@ -47,6 +48,7 @@ export function evidenceValue(key:string,value:any):string {
  if(key==='sev')return severity(value);
  if(key==='level')return levels[value]||String(value);
  if(key==='dir')return directions[value]||String(value);
+ if(key==='coverage'&&value==='passive_visible')return '被动可见 部分证据';
  if(key==='app'&&String(value).toLowerCase()==='failed')return 'FAILED（应用协议识别失败）';
  if(key==='app'||key==='proto')return String(value).toUpperCase();
  if(key==='size'||key==='clen'||key==='bytes_toserver'||key==='bytes_toclient')return bytes(value);
@@ -58,5 +60,5 @@ export function evidenceGroups(record:Record<string,any>):EvidenceGroup[] {
  const display=summary?{...record,state:summary.state}:record;
  return groups.map(group=>({title:group.title,fields:group.fields
   .filter(([key])=>display[key]!==null && display[key]!==undefined && display[key]!=='' && !(Array.isArray(display[key])&&display[key].length===0))
-  .map(([key,label])=>({key,label:summary&&key==='sig'?'连接摘要':summary&&key==='reason'?'连接结束原因':key==='reason'&&Object.hasOwn(engineActions,String(display[key]).toLowerCase())?'引擎处置动作':label,value:key==='sig'&&summary?summary.text+(summary.details?' '+summary.details:''):key==='reason'&&summary?String(display[key]):evidenceValue(key,display[key])}))})).filter(group=>group.fields.length>0);
+  .map(([key,label])=>({key,label:record.type==='quic'&&key==='alpn'?'客户端 ALPN 提议':summary&&key==='sig'?'连接摘要':summary&&key==='reason'?'连接结束原因':key==='reason'&&Object.hasOwn(engineActions,String(display[key]).toLowerCase())?'引擎处置动作':label,value:key==='sig'&&summary?summary.text+(summary.details?' '+summary.details:''):key==='reason'&&summary?String(display[key]):evidenceValue(key,display[key])}))})).filter(group=>group.fields.length>0);
 }

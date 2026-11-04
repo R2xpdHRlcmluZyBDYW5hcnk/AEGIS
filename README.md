@@ -32,13 +32,15 @@ python3 -B build_frontend.py --output /var/tmp/ndr-console-static
 
 运行环境为 Linux 与 systemd，后端需要 Python 3.13 或更新版本。Snort 3、LibDAQ、规则与 PulledPork3 独立安装。面板源码不限定目标 CPU 架构；可选引擎交叉编译工具仅覆盖清单声明的 ARM64 目标。
 
-首次接入、更新和回滚见 [部署说明](README-deploy.md)，功能说明见 [使用说明](IPS-使用说明.md)。已有安装的更新必须显式指定 SSH 目标：
+首次接入、更新和回滚见 [部署说明](README-deploy.md)，功能说明见 [使用说明](IPS-使用说明.md)。本地模型总结、规则建议及取消行为见 [本地模型研判](docs/local-llm.md)。已有安装的更新必须显式指定 SSH 目标：
 
 ```powershell
 .\deploy.ps1 -Target root@sensor.example -UpdateBackend
 ```
 
 仓库不包含第三方二进制、引擎发行包、更新器修改、第三方规则包或真实运行数据库。
+
+QUIC 握手及可见路径追踪可选接入受限的 Wireshark 观察组件，安装和能力边界见 [QUIC 观察](docs/quic-observer.md)。事件搜索语言的选型依据见 [事件搜索](docs/event-search.md)。
 
 ## 测试
 

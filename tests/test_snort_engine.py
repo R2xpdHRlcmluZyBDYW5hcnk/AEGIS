@@ -55,6 +55,27 @@ class NativeEventTests(unittest.TestCase):
         event=snort_engine.native_event(self.envelope(trans_id=1234,query='example.test',qtype_name='A',rcode_name='NOERROR',answers='198.51.100.1'))
         self.assertEqual(event['dns']['answers'],[{'rdata':'198.51.100.1'}])
 
+    def test_deferred_conn_log_time_does_not_invent_packet_time_bounds(self):
+        envelope=self.envelope(duration=5,orig_pkts=4,resp_pkts=3,proto='TCP',service='unknown')
+        normalized=snort_engine.native_event(envelope)
+        self.assertNotIn('start',normalized['flow']);self.assertNotIn('end',normalized['flow'])
+        self.assertEqual(normalized['flow']['age'],5)
+        m=self.web
+        with tempfile.TemporaryDirectory() as directory:
+            db=m.EventDB(str(Path(directory)/'events.db'))
+            try:
+                db.add(*m.EventStore._parse(json.dumps(envelope)));db.flush()
+                # A previous version persisted trigger-time-derived bounds.
+                db.conn.execute('UPDATE events SET flow_start=1700000000,flow_end=1700000005');db.conn.commit()
+                row=db.conn.execute('SELECT '+','.join(db.names)+' FROM events').fetchone()
+                self.assertNotIn('flow_start',db._row(row));self.assertNotIn('flow_end',db._row(row))
+                self.assertNotIn('flow_start',db._row_lite(row,{'flow_start'}))
+                for field in ('flow_start','flow_end'):
+                    where,args,complete=m.hunt_sql_pushdown(m.hunt_parse(field+':>0'))
+                    self.assertTrue(complete)
+                    self.assertEqual(db.conn.execute('SELECT COUNT(*) FROM events WHERE '+' AND '.join(where),args).fetchone()[0],0)
+            finally:db.conn.close()
+
     def test_passive_would_block_is_not_reported_as_an_actual_block(self):
         raw=self.envelope(sid=1,gid=1,rev=1,msg='fixture',action='would_block',ips_action='block',proto='TCP')
         event=snort_engine.native_event(raw,metadata={})

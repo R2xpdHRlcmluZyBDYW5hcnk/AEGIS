@@ -1,10 +1,12 @@
 """Explicit, serialized history reset for the separate native service layout."""
 import argparse
+from contextlib import closing
 import json
 import os
 from pathlib import Path
 import re
 import secrets
+import sqlite3
 import subprocess
 import time
 import urllib.request
@@ -15,7 +17,7 @@ CONFIG=Path('/etc/ips-snort-web.conf')
 WEB_STATE=Path('/var/lib/ips-snort-web')
 NATIVE,STREAM=log_paths()
 CHECKPOINT=Path('/var/lib/ips-event-bridge/offsets.json')
-NATIVE_NAMES=re.compile(r'(?:[0-9]+_)?(?:file_connector_ndr_transmit|alert_json\.txt|events?\.json)(?:\.[0-9]+(?:\.gz)?)?')
+NATIVE_NAMES=re.compile(r'(?:[0-9]+_)?(?:file_connector_ndr_transmit|alert_json\.txt|quic_observer\.json|events?\.json)(?:\.[0-9]+(?:\.gz)?)?')
 STREAM_NAMES=re.compile(r'events\.json(?:\.[0-9]+(?:\.gz)?)?')
 ARCHIVE_NAME=re.compile(r'\.response-[0-9]{8}T[0-9]{6}-[0-9]+(?:-failed)?')
 
@@ -35,11 +37,12 @@ def save(directory,value):
     finally:candidate.unlink(missing_ok=True)
 
 
-def queue(directory):
+def queue(directory,scope='all'):
+    if scope not in ('all','database'):raise ValueError('Invalid history reset scope')
     previous=status(directory)
     if previous.get('state') in ('queued','running'):return dict(ok=False,error='历史清空任务正在执行')
     job=secrets.token_hex(16)
-    value=dict(id=job,state='queued',phase='等待开始',started=time.time(),finished=0,error='')
+    value=dict(id=job,state='queued',scope=scope,phase='等待开始',started=time.time(),finished=0,error='')
     save(directory,value)
     try:
         subprocess.run(['systemd-run','--quiet','--collect','--unit=ips-history-reset-'+job[:12],
@@ -107,13 +110,55 @@ def remove_history_files(database):
     # the same access mode as the running installation.
 
 
+def reset_database(database):
+    """Archive the stopped console's database; leave detection and raw logs running."""
+    database=Path(database)
+    if database.name!='snort-ndr.db' or database.resolve().parent!=WEB_STATE.resolve():
+        raise ValueError('Invalid database reset target')
+    targets=[Path(str(database)+suffix) for suffix in ('','-wal','-shm','.summary.db','.summary.db-wal','.summary.db-shm')]
+    for path in targets:
+        if path.is_symlink() or path.resolve().parent!=WEB_STATE.resolve() or (path.exists() and not path.is_file()):
+            raise ValueError('Invalid database reset member')
+    if STREAM.is_symlink():raise ValueError('Invalid event stream')
+    info=STREAM.stat() if STREAM.exists() else None
+    cutoff=dict(device=info.st_dev,inode=info.st_ino,offset=info.st_size) if info else None
+    owner=database.stat() if database.exists() else WEB_STATE.stat()
+    backup=WEB_STATE/('history-backup-'+time.strftime('%Y%m%dT%H%M%S',time.gmtime())+'-'+secrets.token_hex(4))
+    backup.mkdir(mode=0o700)
+    moved=[];creating=False
+    try:
+        for path in targets:
+            if path.exists():
+                path.replace(backup/path.name);moved.append(path)
+        creating=True
+        with closing(sqlite3.connect(database)) as conn:
+            with conn:
+                conn.execute('CREATE TABLE event_state(key TEXT PRIMARY KEY,value TEXT NOT NULL)')
+                conn.executemany('INSERT INTO event_state VALUES(?,?)',[
+                    ('clear_epoch',secrets.token_hex(16)),('stream_cutoff',json.dumps(cutoff))])
+        os.chmod(database,owner.st_mode&0o777);os.chown(database,owner.st_uid,owner.st_gid)
+        if os.name=='posix':
+            for directory in (backup,WEB_STATE):
+                descriptor=os.open(directory,os.O_RDONLY|getattr(os,'O_DIRECTORY',0))
+                try:os.fsync(descriptor)
+                finally:os.close(descriptor)
+        return backup
+    except Exception:
+        # The complete old WAL group is kept together; never pair it with the new main file.
+        if creating:
+            for suffix in ('','-wal','-shm'):
+                Path(str(database)+suffix).unlink(missing_ok=True)
+        for path in moved:(backup/path.name).replace(path)
+        raise
+
+
 def run(directory,job):
     value=status(directory)
     if not re.fullmatch('[0-9a-f]{32}',job) or value.get('id')!=job or value.get('state')!='queued':
         raise ValueError('Invalid or already executed reset job')
     from ips_control import Client
     client=Client(timeout=10)
-    timers=[];acquired=False;stopping=False
+    timers=[];acquired=False;recover_units=[]
     def phase(text):
         value.update(state='running',phase=text);save(directory,value)
     try:
@@ -125,10 +170,28 @@ def run(directory,job):
         stream_info=STREAM.stat() if STREAM.exists() else None
         for unit in timers:command('systemctl','stop',unit)
         command('systemctl','stop','ips-log-maintenance.service','snort-home-net.service')
+        if value.get('scope','all')=='database':
+            phase('停止控制台');recover_units=['ips-web'];stop('ips-web')
+            phase('切换空事件库');backup=reset_database(WEB_STATE/'snort-ndr.db')
+            value['backup']=str(backup)
+            phase('恢复控制台');command('systemctl','start','ips-web')
+            deadline=time.monotonic()+150
+            while time.monotonic()<deadline:
+                try:
+                    if active('ips-web') and web_ready():break
+                except (OSError,RuntimeError,TimeoutError):pass
+                time.sleep(.5)
+            else:raise RuntimeError('控制台重启后未就绪，旧事件库已保存在回滚备份')
+            validate_log_storage()
+            value.update(state='done',phase='事件库已清空，检测与原始日志持续运行',finished=time.time(),error='')
+            save(directory,value);return
         phase('停止检测和采集')
+        observer=active('ips-quic-observer')
+        recover_units=['ips','ips-event-bridge','ips-web']+(['ips-quic-observer'] if observer else [])
+        if observer:stop('ips-quic-observer')
         # SIGSTOP would leave NFQUEUE listeners alive and fill their queues.
         # Orderly service stop closes listeners and removes the queue table.
-        stopping=True;stop('ips');stop('ips-event-bridge');stop('ips-web')
+        stop('ips');stop('ips-event-bridge');stop('ips-web')
         phase('清空事件和未入库日志')
         remove_history_files(WEB_STATE/'snort-ndr.db')
         STREAM.touch()
@@ -138,6 +201,7 @@ def run(directory,job):
         phase('重新启动检测和采集')
         command('systemctl','start','ips')
         command('systemctl','start','ips-event-bridge','ips-web')
+        if observer:command('systemctl','start','ips-quic-observer')
         from snort_engine import SnortControl
         deadline=time.monotonic()+150
         while time.monotonic()<deadline:
@@ -154,7 +218,7 @@ def run(directory,job):
         value.update(state='failed',phase='清空或重启失败',finished=time.time(),error=str(exc));save(directory,value)
         # Restore service availability without pretending discarded history can
         # be rolled back. The persisted status records any failure.
-        if stopping:subprocess.run(['systemctl','start','ips','ips-event-bridge','ips-web'],capture_output=True,timeout=150)
+        if recover_units:subprocess.run(['systemctl','start',*recover_units],capture_output=True,timeout=150)
         raise
     finally:
         try:

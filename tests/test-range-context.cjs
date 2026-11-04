@@ -7,7 +7,7 @@ const noop=()=>()=>{};
 const angular={Component:config=>{template=config.template;return value=>value;},Injectable:noop,Input:noop,Output:noop,effect:()=>{},EventEmitter,ChangeDetectionStrategy:{Eager:0}};
 const core={};vm.runInNewContext(compile('frontend/src/app/core.ts'),{exports:core,require:name=>name==='@angular/core'?angular:{}});
 const component={};vm.runInNewContext(compile('frontend/src/app/range.component.ts'),{exports:component,require:name=>name==='@angular/core'?angular:name==='./core'?core:{}});
-assert.ok(!template.includes('全部历史'));assert.ok(!template.includes('关联流范围'));assert.ok(!template.includes('value="all"'));
+assert.ok(!template.includes('全部历史'));assert.ok(!template.includes('关联流范围'));assert.ok(template.includes('*ngIf="sessionScope" value="all"'));assert.equal(new component.RangeComponent().sessionScope,false);
 const range=new component.RangeComponent();range.choice='custom';range.reset();assert.equal(range.choice,'1440');assert.equal(range.changed.values.at(-1).window,'1440');
 function fixture(bounds,selected=null){
  const requests=[];

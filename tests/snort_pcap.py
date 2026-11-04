@@ -12,14 +12,15 @@ def checksum(data):
     return ~value & 65535
 
 
-def capture(path, tls_hostname=None):
+def capture(path, tls_hostname=None, application='http'):
     frames=[]
     client, server=map(socket.inet_aton, ('192.0.2.10','198.51.100.20'))
     def packet(src,dst,proto,payload):
         ip=struct.pack('!BBHHHBBH4s4s',69,0,20+len(payload),len(frames)+1,0,64,proto,0,src,dst)
         ip=ip[:10]+struct.pack('!H',checksum(ip))+ip[12:]
         frames.append(bytes.fromhex('0200000000020200000000010800')+ip+payload)
-    def tcp(reverse,seq,ack,flags,data=b'',port=80,client_port=45000):
+    def tcp(reverse,seq,ack,flags,data=b'',port=None,client_port=45000):
+        if port is None:port=80 if application=='http' else 9009
         src,dst=(server,client) if reverse else (client,server)
         sport,dport=(port,client_port) if reverse else (client_port,port)
         header=struct.pack('!HHIIBBHHH',sport,dport,seq,ack,80,flags,65535,0,0)
@@ -29,6 +30,7 @@ def capture(path, tls_hostname=None):
         packet(src,dst,6,header+data)
     request=b'GET /ndr-smoke HTTP/1.1\r\nHost: example.test\r\nUser-Agent: NDR-Test\r\nConnection: close\r\n\r\n'
     response=b'HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello'
+    if application!='http':request=b'\x01\x02\x03\x04'*20;response=b'\x05\x06\x07\x08'*20
     tcp(False,1,0,2);tcp(True,100,2,18);tcp(False,2,101,16)
     tcp(False,2,101,24,request);tcp(True,101,2+len(request),24,response)
     tcp(False,2+len(request),101+len(response),17)

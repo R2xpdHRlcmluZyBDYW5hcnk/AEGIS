@@ -1,0 +1,9 @@
+{
+  "distribution": "Debian 13",
+  "suite": "trixie-security",
+  "package": "tshark",
+  "package_version": "4.4.19-0+deb13u1",
+  "version": "4.4.19",
+  "source": "https://packages.debian.org/trixie/tshark",
+  "verification": "APT signed repository metadata and package checksums"
+}

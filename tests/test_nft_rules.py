@@ -21,7 +21,7 @@ class NftRulesCase(unittest.TestCase):
         self.assertLess(rules.index('fib daddr'), rules.index('counter queue'))
         self.assertIn('fib daddr type { local, broadcast, multicast } return', rules)
         self.assertIn('ip daddr { 224.0.0.0/4, 255.255.255.255 } return', rules)
-        self.assertIn('type filter hook prerouting priority mangle; policy accept;', rules)
+        self.assertIn('type filter hook prerouting priority -90; policy accept;', rules)
         self.assertIn('counter queue flags bypass to 0-3', rules)
         self.assertNotIn('fanout',rules)
 

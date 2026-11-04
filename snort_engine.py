@@ -45,6 +45,7 @@ NATIVE_FIELDS = {
     'timedout': 'file_timeout', 'extracted_cutoff': 'extracted_cutoff',
     'ips_action': 'ips_action', 'ids_reason': 'ids_reason',
 }
+EVENT_FIELDS={**NATIVE_FIELDS,**__import__('quic_observer').OBSERVER_FIELDS}
 
 
 def record_kind(data):
@@ -141,6 +142,9 @@ def _load_rule_metadata(path):
 
 def native_event(envelope, metadata=None):
     """Map native values into the console's internal event model, retaining raw input."""
+    if envelope.get('engine')=='quic_observer':
+        from quic_observer import normalized_event
+        return normalized_event(envelope)
     if envelope.get('engine') != 'snort3' or not isinstance(envelope.get('data'), dict):
         return envelope
     data = envelope['data']
@@ -188,9 +192,10 @@ def native_event(envelope, metadata=None):
     elif kind == 'weird':
         obj['anomaly'] = dict(type=data.get('source', ''), event=data.get('msg', ''))
     elif kind == 'conn':
-        end = float(data['ts'])
         duration = float(data.get('duration') or 0)
-        obj['flow'] = dict(start=timestamp(end-duration), end=stamp, age=duration,
+        # Extractor ts belongs to the packet that triggers logging, including
+        # deferred cleanup. It is not the flow's first/last packet timestamp.
+        obj['flow'] = dict(age=duration,
             state=data.get('conn_state', ''), pkts_toserver=data.get('orig_pkts'),
             pkts_toclient=data.get('resp_pkts'), bytes_toserver=data.get('orig_bytes'),
             bytes_toclient=data.get('resp_bytes'))

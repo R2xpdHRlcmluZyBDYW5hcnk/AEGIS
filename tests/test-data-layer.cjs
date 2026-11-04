@@ -23,7 +23,7 @@ live.stop();assert.equal(interval,undefined);
 live.start('/api/events',{},'drops');timer();assert.equal(fetches,1,'missing SSE first frame falls back to REST');live.stop();
 const detailsExports={},requests=[];
 const detailApi={zone:{run:fn=>fn()},get:async(path,params)=>{requests.push({path,params});return {record:{ts:1000,flow_id:123,community:'1:test',src:'192.0.2.1'},raw:{flow_id:123,payload:'on demand'}};}};
-vm.runInNewContext(compile('frontend/src/app/details.component.ts'),{exports:detailsExports,require:name=>name==='@angular/core'?angular:name==='./core'?core:name==='./event-fields'?{evidenceGroups:record=>Object.keys(record)}:name==='./attack-mapping'?{mappingFromEvent:()=>({})}:{},document:{querySelector:()=>null}});
+vm.runInNewContext(compile('frontend/src/app/details.component.ts'),{exports:detailsExports,require:name=>name==='@angular/core'?angular:name==='./core'?core:name==='./event-fields'?{evidenceGroups:record=>Object.keys(record)}:name==='./attack-mapping'?{mappingFromEvent:()=>({})}:{},document:{querySelector:()=>null,addEventListener(){}},window:{addEventListener(){}}});
 const exact='{"uid":18446744073709551615,"nested":[{}, {"text":"a, b: c"}]}';
 const formatted=detailsExports.prettyJson(exact);
 assert.ok(formatted.includes('\n  "uid": 18446744073709551615,'));
@@ -92,7 +92,7 @@ const component=new detailsExports.DetailsComponent(drawer,relatedState,relatedA
 await component.investigate({session_id:session});
 assert.equal(relatedRequests[0].path,'/api/hunt/related');assert.equal(relatedRequests[0].params.incident_id,'session:'+session);
 assert.equal(navigations[0][0],relatedResult.query);
-assert.equal(navigations[0][2].choice,'custom');
+assert.equal(navigations[0][2].choice,'all','session investigation follows retained evidence beyond its initial time bounds');
 drawer.current={id:2};
 await component.investigate({community_id:'old',flow_id:123,tuple_hash:'legacy-key'});
 assert.equal(relatedRequests.length,1,'old identifiers never initiate inferred incident membership');

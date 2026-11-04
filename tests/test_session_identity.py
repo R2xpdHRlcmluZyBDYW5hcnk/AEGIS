@@ -104,5 +104,44 @@ class SessionIdentityCase(unittest.TestCase):
         self.assertEqual(row['signature_count'],2)
         self.assertEqual({r['gid'] for r in row['signatures']},{1,129})
 
+    def test_coincident_native_events_keep_their_generator_session_and_packet_identity(self):
+        stamp=self.stamp+.123456
+        first=dict(snort_native=dict(session_id=FIRST),alert=dict(gid=1,signature='same',signature_id=15,severity=1))
+        original=self.fixture.add('alert',stamp,**first)
+        self.fixture.add('alert',stamp,snort_native=dict(session_id=FIRST),alert=dict(first['alert'],gid=129))
+        self.fixture.add('alert',stamp,snort_native=dict(session_id=SECOND),alert=first['alert'])
+        self.fixture.add('alert',stamp,**dict(first,pkt_num=2))
+        # Replaying exactly the same source record still remains idempotent.
+        self.db.add(*m.EventStore._parse(json.dumps(original)));self.db.flush()
+        total,groups=self.groups()
+        self.assertEqual(total,2)
+        self.assertEqual(groups['session:'+FIRST]['alert_count'],3)
+        self.assertEqual(groups['session:'+FIRST]['signature_count'],2)
+        self.assertEqual(groups['session:'+SECOND]['alert_count'],1)
+
+    def test_fractional_bounds_include_the_boundary_and_exclude_its_neighbors(self):
+        stamp=self.stamp+.123456
+        self.fixture.add('alert',stamp,snort_native=dict(session_id=FIRST))
+        self.fixture.add('flow',stamp,snort_native=dict(session_id=FIRST))
+        self.fixture.add('alert',self.stamp+.123457,snort_native=dict(session_id=SECOND))
+        self.assertEqual(self.db.search_range(stamp,stamp)[0],2)
+        total,groups=self.db.security_incidents(stamp,stamp)
+        self.assertEqual(total,1);self.assertEqual(groups[0]['session_id'],FIRST)
+
+    def test_normal_session_timeline_and_all_history_hunt_include_late_eof(self):
+        self.add('http',0,FIRST,http=dict(hostname='example.test',url='/fixture'))
+        related=self.app.hunt_related({'incident_id':'session:'+FIRST})
+        first=self.app.session_events(dict(session_id=FIRST))
+        self.assertEqual(first['total'],1)
+        self.add('flow',120,FIRST)
+        self.app.data.invalidate()
+        timeline=self.app.session_events(dict(session_id=FIRST))
+        self.assertEqual(timeline['total'],2)
+        self.assertEqual({r['type'] for r in timeline['events']},{'http','flow'})
+        hunted=self.app.hunt(dict(q=related['query'],all='1',view='list'))
+        self.assertEqual(hunted['total'],2)
+        self.assertEqual(self.app.session_events(dict(session_id=FIRST,offset=1,limit=1))['total'],2)
+        with self.assertRaises(ValueError):self.app.session_events(dict(session_id='invalid'))
+
 
 if __name__=='__main__': unittest.main()

@@ -142,6 +142,54 @@ class ManagerCase(unittest.TestCase):
         self.assertTrue(self.manager.drafts.dirty)
         self.assertIn('sid:456', Path(self.manager.drafts.module.HUNT_RULES).read_text())
 
+    def test_generated_manual_rule_applies_independently_and_preserves_other_pending_edits(self):
+        rule = 'alert tcp 192.0.2.1 any -> 198.51.100.2 443 (msg:"Observed endpoint"; rev:1;)'
+        self.mutate('/api/rules/disable', {'values':['sid:123']})
+        self.mutate('/api/hunt/rules', {'rule':'alert ip any any -> any any (sid:9200001;)'})
+        pending_disable = Path(self.manager.drafts.module.DISABLE_CONF).read_bytes()
+        original = Path(self.module.RULES_FILE).read_bytes()
+        calls = []
+        with mock.patch.object(self.jobs, 'run', side_effect=lambda args,*a,**kw:calls.append(args)), \
+                mock.patch.object(self.jobs.local.engine, 'call', return_value={'ruleset-reload-rules':{}}):
+            result = self.mutate('/api/hunt/rules/add-apply', {'rule':rule})
+            self.assertTrue(result['ok'])
+            self.assertEqual(result['sid'],9200002)
+            self.assertEqual(self.wait()['rc'],0)
+        self.assertEqual(len(calls),1,'only final Snort validation; no merging updater')
+        self.assertIn('-T',calls[0])
+        self.assertEqual(Path(self.module.RULES_FILE).read_bytes(),original)
+        self.assertEqual(Path(self.module.DISABLE_CONF).read_text(),'')
+        self.assertEqual(Path(self.manager.drafts.module.DISABLE_CONF).read_bytes(),pending_disable)
+        self.assertTrue(self.manager.drafts.dirty)
+        self.assertIn('sid:9200002;',Path(self.module.HUNT_RULES).read_text())
+        self.assertNotIn('sid:9200001;',Path(self.module.HUNT_RULES).read_text())
+        self.assertIn('sid:9200002;',Path(self.manager.drafts.module.HUNT_RULES).read_text())
+        self.assertFalse(self.mutate('/api/hunt/rules/add-apply', {'rule':rule})['ok'])
+
+    def test_generated_manual_validation_failure_restores_active_and_pending_files(self):
+        rule = 'alert udp 192.0.2.1 any -> 198.51.100.2 53 (msg:"Observed endpoint"; rev:1;)'
+        before = Path(self.module.HUNT_RULES).read_bytes()
+        pending = Path(self.manager.drafts.module.HUNT_RULES).read_bytes()
+        with mock.patch.object(self.jobs,'run',side_effect=RuntimeError('invalid candidate')), \
+                mock.patch.object(self.jobs.local.engine,'call') as reload:
+            self.assertTrue(self.mutate('/api/hunt/rules/add-apply',{'rule':rule})['ok'])
+            self.assertEqual(self.wait()['rc'],1)
+        reload.assert_not_called()
+        self.assertEqual(Path(self.module.HUNT_RULES).read_bytes(),before)
+        self.assertEqual(Path(self.manager.drafts.module.HUNT_RULES).read_bytes(),pending)
+
+    def test_committed_manual_rule_recovers_pending_rebase_after_interruption(self):
+        rule = 'alert tcp 192.0.2.1 any -> 198.51.100.2 80 (msg:"Observed endpoint"; rev:1;)'
+        with mock.patch.object(self.jobs,'run'), \
+                mock.patch.object(self.jobs.local.engine,'call',return_value={'ruleset-reload-rules':{}}), \
+                mock.patch.object(self.manager.drafts,'add_applied_manual',side_effect=OSError('interrupted')):
+            self.assertTrue(self.mutate('/api/hunt/rules/add-apply',{'rule':rule})['ok'])
+            self.wait()
+        self.assertTrue(self.manager.paused)
+        rebuilt = control.Manager(self.module,self.manager.state)
+        self.assertIn('sid:9200001;',Path(rebuilt.drafts.module.HUNT_RULES).read_text())
+        self.assertEqual(list((self.base/'state').glob('transaction-*')),[])
+
     def test_update_failure_restores_generated_rules_and_removes_new_files(self):
         original = Path(self.module.RULES_FILE).read_bytes()
         def fail(arguments, job, timeout=600):

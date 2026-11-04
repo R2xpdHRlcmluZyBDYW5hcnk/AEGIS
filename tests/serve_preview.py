@@ -77,6 +77,20 @@ if not (static / 'index.html').is_file():
 cfg = dict(m.DEFAULT_CONFIG, static_dir=str(static), password_pbkdf2=m.make_password_hash('preview-only'), bind='127.0.0.1')
 app = m.App.__new__(m.App)
 app.config, app.started = cfg, m.now()
+from llm_assistant import LocalAssistant
+app.assistant = LocalAssistant({'enabled':False})
+ai_provider = None
+if os.environ.get('NDR_PREVIEW_AI') == '1':
+    import http.client
+    from test_llm_assistant import Provider
+    ai_provider = ThreadingHTTPServer(('127.0.0.1',0),Provider)
+    ai_provider.daemon_threads = True
+    ai_provider.entered, ai_provider.cancelled, ai_provider.stop = threading.Event(), threading.Event(), threading.Event()
+    ai_provider.stall, ai_provider.finish, ai_provider.text = False, 'stop', None
+    ai_provider.calls, ai_provider.cancellations = 0, 0
+    threading.Thread(target=ai_provider.serve_forever,daemon=True).start()
+    app.assistant = LocalAssistant()
+    app.assistant.connection = lambda:http.client.HTTPConnection('127.0.0.1',ai_provider.server_port,timeout=2)
 local_copy = os.environ.get('NDR_PREVIEW_DATABASE')
 if local_copy:
     local_copy = Path(local_copy).resolve()
@@ -230,6 +244,10 @@ app.network.start()
 m.Handler.app, m.Handler.config = app, cfg
 class PreviewHandler(m.Handler):
     def do_GET(self):
+        if self.path=='/__test/ai-status' and ai_provider:
+            if not self._require():return
+            stages=['hunt' if '狩猎助手' in p['messages'][0]['content'] else 'summary' if '四段' in p['messages'][0]['content'] else 'rule' for p in getattr(ai_provider,'payloads',[])]
+            return self._json(dict(calls=ai_provider.calls,cancellations=ai_provider.cancellations,stages=stages))
         if self.path.startswith('/api/rules') or self.path.split('?', 1)[0] in ('/api/incidents', '/api/events', '/api/hunt'):
             delay = min(5, max(0, float(os.environ.get('NDR_PREVIEW_DELAY', '0'))))
             if delay:
@@ -237,6 +255,20 @@ class PreviewHandler(m.Handler):
         return super().do_GET()
 
     def do_POST(self):
+        if self.path=='/__test/ai-plan' and ai_provider:
+            if not self._require():return
+            if self.headers.get('X-Requested-With')!='ips-web':return self._error(400,'missing header')
+            body=json.loads(self._read_body(1024) or b'{}')
+            ai_provider.natural_plan=body.get('mode')=='natural'
+            return self._json({'ok':True})
+        if self.path=='/__test/ai-stall' and ai_provider:
+            if not self._require():return
+            if self.headers.get('X-Requested-With')!='ips-web':return self._error(400,'missing header')
+            body=json.loads(self._read_body(1024) or b'{}')
+            ai_provider.stall=bool(body.get('stall'))
+            if body.get('stage'):ai_provider.stall_stage=body['stage']
+            elif hasattr(ai_provider,'stall_stage'):del ai_provider.stall_stage
+            return self._json({'ok':True})
         if self.path=='/__test/release-reload' and os.environ.get('NDR_PREVIEW_BLOCK_RELOAD')=='1':
             if not self._require():return
             if self.headers.get('X-Requested-With')!='ips-web':return self._error(400,'missing header')
@@ -272,6 +304,8 @@ print('Preview ready http://127.0.0.1:%d (%s)' % (port,'local disposable data co
 try:
     server.serve_forever()
 finally:
+    if ai_provider:
+        ai_provider.stop.set();ai_provider.shutdown();ai_provider.server_close()
     reload_release.set();runtime_stop.set()
     for thread in runtime_threads:thread.join(timeout=3)
     deadline=time.monotonic()+3

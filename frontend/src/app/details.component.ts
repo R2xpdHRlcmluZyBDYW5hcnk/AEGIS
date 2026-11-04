@@ -1,5 +1,5 @@
 import { TabMotionDirective } from './tab-motion.directive';
-import { Component, Injectable, signal, ChangeDetectionStrategy } from '@angular/core';
+import { Component, Injectable, signal, effect, untracked, ChangeDetectionStrategy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { Api, ConsoleState, action, date, severity, localDate } from './core';
 import { TableComponent, Column } from './table.component';
@@ -8,6 +8,7 @@ import { evidenceGroups, eventType } from './event-fields';
 import { ConnectionSummaryComponent } from './connection-summary.component';
 import { AttackMappingComponent } from './attack-mapping.component';
 import { mappingFromEvent, mappingFromMetadata, mappingFromRule } from './attack-mapping';
+import { generateLocal } from './local-assistant';
 function drawerGroups(record:any){const {flow_id,...visible}=record;return evidenceGroups(visible);}
 
 // Reindent the original tokens so 64-bit native identifiers retain every digit.
@@ -31,12 +32,49 @@ export function prettyJson(raw:string):string {
 export class Details {
  readonly stack=signal<any[]>([]);
  private sequence=0;
+ private inference?:AbortController;
+ private evidenceRequest?:AbortController;
  get current():any{return this.stack().at(-1);}
- constructor(private api:Api){}
- close():void{this.stack.update(s=>s.slice(0,-1));}
- dismiss():void{this.stack.set([]);}
+ constructor(private api:Api,state:ConsoleState){
+  effect(()=>{state.page();untracked(()=>this.dismiss());});
+  window.addEventListener('pagehide',()=>this.stopGeneration());
+  window.addEventListener('beforeunload',()=>this.stopGeneration());
+ }
+ stopGeneration():void{this.inference?.abort();this.inference=undefined;this.stack.update(s=>s.map(v=>v.aiBusy?{...v,aiBusy:'',aiError:'已停止生成'}:v));}
+ private stopEvidence():void{this.evidenceRequest?.abort();this.evidenceRequest=undefined;this.stack.update(s=>s.map(v=>v.sessionBusy?{...v,sessionBusy:false}:v));}
+ close():void{this.stopGeneration();this.stopEvidence();this.stack.update(s=>s.slice(0,-1));if(this.current?.kind==='incident')void this.generate('summary');else if(this.current?.kind==='event')void this.sessionPage(0);}
+ dismiss():void{this.stopGeneration();this.stopEvidence();this.stack.set([]);}
+ private patch(id:number,patch:any):void{this.api.zone.run(()=>this.stack.update(s=>s.map(v=>v.id===id?{...v,...patch}:v)));}
+ async generate(kind:'summary'|'rule'):Promise<void>{
+  const view=this.current;if(!view||view.status!=='ready'||view.aiBusy)return;
+  const target=view.kind==='incident'?{kind:'incident',params:view.params}:view.record?.record_id?{kind:'record',key:view.record.record_id}:view.record?.id!=null?{kind:'event',id:view.record.id}:null;
+  if(!target){this.patch(view.id,{aiError:'当前证据缺少可查询标识，无法生成'});return;}
+  this.stopGeneration();const controller=this.inference=new AbortController();
+  this.patch(view.id,{aiBusy:kind,aiError:'',...(kind==='rule'?{aiRule:null,aiAdded:null,aiApplyError:''}:{aiSummary:null})});
+  try{const result=await generateLocal(kind,target,controller.signal);if(!controller.signal.aborted&&this.current?.id===view.id)this.patch(view.id,{[kind==='rule'?'aiRule':'aiSummary']:result});}
+  catch(e:any){if(!controller.signal.aborted&&this.current?.id===view.id)this.patch(view.id,{aiError:e.message});}
+  finally{if(this.inference===controller){this.inference=undefined;this.patch(view.id,{aiBusy:''});}}
+ }
+ async addRule():Promise<void>{
+  const view=this.current;if(!view?.aiRule?.proposal||view.aiApplying||view.aiAdded)return;
+  this.patch(view.id,{aiApplying:true,aiApplyError:''});
+  try{
+   const result=await this.api.post('/api/ai/rules/add',{proposal:view.aiRule.proposal});
+   this.patch(view.id,{aiAdded:result});
+   // This is an explicitly accepted rule transaction; closing the drawer only stops inference.
+   while(this.current?.id===view.id){
+    const status=await this.api.get('/api/actions/status');
+    if(status.id!==result.job_id){this.patch(view.id,{aiApplyError:'请到规则管理查看应用结果'});break;}
+    if(status.state==='done'){this.patch(view.id,{aiApplyStatus:status,aiApplyError:status.rc===0?'':'规则应用失败，已尝试恢复旧规则；请到规则管理查看任务日志'});break;}
+    await new Promise(resolve=>setTimeout(resolve,750));
+   }
+  }catch(e:any){this.patch(view.id,{aiApplyError:e.message});}
+  finally{this.patch(view.id,{aiApplying:false});}
+ }
  private async open(kind:string,title:string,key:string,loader:()=>Promise<any>):Promise<void>{
   if(this.current?.key===key&&this.current?.status==='loading')return;
+  this.stopGeneration();
+  this.stopEvidence();
   if(this.current)this.current.scrollTop=document.querySelector('ndr-details .modal-scroll')?.scrollTop||0;
   const view={id:++this.sequence,key,kind,title,status:'loading',scrollTop:0,tab:'network',loader};
   this.api.zone.run(()=>this.stack.update(s=>[...s,view]));
@@ -44,7 +82,7 @@ export class Details {
  }
  private async load(view:any):Promise<void>{
   this.api.zone.run(()=>this.stack.update(s=>s.map(item=>item.id===view.id?{...item,status:'loading',error:''}:item)));
-  try{const payload=await view.loader();this.api.zone.run(()=>this.stack.update(s=>s.map(item=>item.id===view.id?{...item,...payload,status:'ready'}:item)));}
+  try{const payload=await view.loader();this.api.zone.run(()=>this.stack.update(s=>s.map(item=>item.id===view.id?{...item,...payload,status:'ready'}:item)));if(this.current?.id===view.id){if(view.kind==='incident')void this.generate('summary');else if(view.kind==='event')void this.sessionPage(0);}}
   catch(e:any){this.api.zone.run(()=>this.stack.update(s=>s.map(item=>item.id===view.id?{...item,status:'error',error:e.message}:item)));}
  }
  retry():void{if(this.current)void this.load(this.current);}
@@ -56,15 +94,22 @@ export class Details {
   update({networkBusy:true,networkError:''});
   try{const data=await this.api.get('/api/incident',{...view.params,network_offset:offset});update({data:this.incidentData(data)});}catch(e:any){update({networkError:e.message});}finally{update({networkBusy:false});}
  }
+ async sessionPage(offset:number):Promise<void>{
+  const view=this.current;if(view?.kind!=='event'||view.showSession===false||!view.record?.session_id||view.sessionBusy)return;
+  this.stopEvidence();const request=this.evidenceRequest=new AbortController();this.patch(view.id,{sessionBusy:true,sessionError:''});
+  try{const result=await this.api.get('/api/session',{session_id:view.record.session_id,offset,limit:50},request.signal);if(!request.signal.aborted&&this.current?.id===view.id)this.patch(view.id,{session:{...result,events:(result.events||[]).map((r:any)=>({...r,summary:r.sig||r.sni||r.dns||r.host||r.type}))}});}
+  catch(e:any){if(!request.signal.aborted)this.patch(view.id,{sessionError:e.message});}
+  finally{if(this.evidenceRequest===request){this.evidenceRequest=undefined;this.patch(view.id,{sessionBusy:false});}}
+ }
  rule(row:any):Promise<void>{const sid=row.sid||row.sig_id,gid=row.gid||1,selector='sid:'+(gid===1?'':gid+':')+sid;return this.open('rule','规则详情 '+gid+':'+sid,'rule:'+gid+':'+sid,async()=>{
   let rule=row;
   if(!rule.line&&!rule.builtin){const d=await this.api.get('/api/rules/search',{q:selector,limit:1});rule=d.rules?.[0];}
   if(!rule?.line&&!rule?.builtin)throw new Error('当前目录未找到该规则原文');return {data:rule,attackMapping:mappingFromRule(rule.line||'')};
  });}
- event(row:any):Promise<void>{return this.open('event','事件证据','event:'+(row.record_id||row.id||row.ts)+'/'+row.sig_id,async()=>{
-  if(row.record_id){const result=await this.api.get('/api/record',{key:row.record_id});return {data:result.raw,rawText:result.raw_text?prettyJson(result.raw_text):undefined,record:result.record,groups:drawerGroups(result.record),attackMapping:mappingFromEvent(result.record,result.raw)};}
+ event(row:any,showSession=true):Promise<void>{return this.open('event','事件证据','event:'+(row.record_id||row.id||row.ts)+'/'+row.sig_id,async()=>{
+  if(row.record_id){const result=await this.api.get('/api/record',{key:row.record_id});return {showSession,data:result.raw,rawText:result.raw_text?prettyJson(result.raw_text):undefined,record:{...result.record,record_id:row.record_id},groups:drawerGroups(result.record),attackMapping:mappingFromEvent(result.record,result.raw)};}
   let raw=row._raw;const rawText=typeof raw==='string'?raw:undefined;if(raw)raw=typeof raw==='string'?JSON.parse(raw):raw;else if(row.id!=null)raw=await this.api.get('/api/event/'+row.id);else raw={...row};
-  return {data:raw,rawText:rawText?prettyJson(rawText):undefined,record:row,groups:drawerGroups(row),attackMapping:mappingFromEvent(row,raw)};
+  return {showSession,data:raw,rawText:rawText?prettyJson(rawText):undefined,record:row,groups:drawerGroups(row),attackMapping:mappingFromEvent(row,raw)};
  });}
 }
 @Component({changeDetection:ChangeDetectionStrategy.Eager,selector:'ndr-details',standalone:true,imports:[TabMotionDirective,CommonModule,TableComponent,ModalComponent,AttackMappingComponent,ConnectionSummaryComponent],template:`
@@ -72,13 +117,23 @@ export class Details {
   <div class="detail-loading" role="status" *ngIf="view.status==='loading'"><span class="loading-dot"></span>正在加载{{view.kind==='rule'?'规则详情':'事件详情'}}…</div>
   <div class="detail-error" role="alert" *ngIf="view.status==='error'"><h3>暂时无法加载</h3><p>{{view.error}}</p><button class="quiet" (click)="details.retry()">重新加载</button></div>
   <ng-container *ngIf="view.status==='ready'">
+   <section class="evidence-group local-assistant" *ngIf="view.kind==='incident'||view.kind==='event'" aria-label="本地智能研判">
+    <div class="section-heading"><h3>本地智能研判</h3><span class="badge">Qwen3.5-2B</span></div>
+    <div class="toolbar"><button class="quiet" [disabled]="!!view.aiBusy" (click)="details.generate('summary')">{{view.aiBusy==='summary'?'正在总结…':view.aiSummary?'重新生成总结':(view.record?.session_id||view.data?.incident?.session_id)?'生成会话总结':'生成事件总结'}}</button><button class="quiet" *ngIf="view.kind==='incident'" [disabled]="!!view.aiBusy||view.aiApplying||!!view.aiAdded" (click)="details.generate('rule')">{{view.aiBusy==='rule'?'正在生成规则…':view.aiRule?'重新生成规则建议':'生成规则建议'}}</button><button class="text-button" *ngIf="view.aiBusy" (click)="details.stopGeneration()">停止生成</button></div>
+    <p class="muted" *ngIf="view.aiBusy" role="status">正在分析当前证据</p><p class="error" *ngIf="view.aiError" role="alert">{{view.aiError}}</p>
+    <div *ngIf="view.aiSummary as summary" class="ai-summary"><div class="section-heading"><h4>{{summary.context?.scope==='session'?'会话总结':'事件总结'}}</h4><button class="text-button" (click)="copy(summary.text)">复制总结</button></div><p>{{summary.text}}</p><p class="muted" *ngIf="summary.context as context">已检索 {{context.total_records}} 条{{context.scope==='session'?'会话':'事件'}}记录 使用 {{context.evidence_records}} 条证据摘录</p><small class="muted">依据已保留的日志分析，请结合原始证据核查</small>
+     <details class="ai-hunts" *ngIf="summary.hunts?.length"><summary>狩猎检索 {{summary.hunts.length}}</summary><section *ngFor="let hunt of summary.hunts"><div class="section-heading"><span>{{hunt.label}}</span><span class="badge">{{hunt.error_kind==='validation'?'条件无效':hunt.error?'检索失败':'命中 '+hunt.total+' 条'}}</span><button class="text-button" *ngIf="hunt.query&&!hunt.error" (click)="openSummaryHunt(hunt.query,summary.context)">查看命中日志 ↗</button></div><pre>{{hunt.query||hunt.predicate}}</pre><p class="muted" *ngIf="hunt.error">{{hunt.error}}</p></section></details>
+     <p class="muted" *ngIf="summary.hunt_status==='no_session'">当前证据没有引擎会话 ID，未扩展检索</p><p class="muted" *ngIf="summary.hunt_status==='fallback'">模型未返回有效检索条件，已使用基础核查条件</p>
+    </div>
+    <div *ngIf="view.aiRule as rule" class="ai-rule"><h4>Snort 3 规则建议</h4><p *ngIf="rule.unavailable">{{rule.reason}}</p><ng-container *ngIf="rule.rule"><p>{{rule.scope}}</p><pre>{{rule.rule}}</pre><p>{{rule.reason}}</p><p>{{rule.limitations}}</p><p class="muted">{{rule.notice}}</p><div class="toolbar"><strong class="rule-source">手动规则</strong><button [disabled]="view.aiApplying||!!view.aiAdded" (click)="details.addRule()">{{view.aiApplying?'正在校验并应用…':view.aiAdded?'已提交应用':'添加并应用规则'}}</button></div><p class="muted">SID 在添加时分配，仅保存到独立手动规则文件</p><p role="status" *ngIf="view.aiApplyStatus?.rc===0">手动规则 {{view.aiAdded.sid}} 已通过校验并应用</p><p class="error" role="alert" *ngIf="view.aiApplyError">{{view.aiApplyError}}</p></ng-container></div>
+   </section>
    <ng-container *ngIf="view.kind==='incident'">
     <div class="detail-actions"><div class="toolbar"><button (click)="investigate(view.data.incident)" [disabled]="investigating || !canInvestigate(view.data.incident)">{{investigating?'正在准备调查…':'调查关联事件 ↗'}}</button></div><div class="toolbar"><button class="quiet danger" [disabled]="!view.data.incident.src || banning" (click)="ban(view.data.incident.src)">封禁源地址</button><button class="quiet danger" [disabled]="!view.data.incident.dst || banning" (click)="ban(view.data.incident.dst)">封禁目的地址</button></div></div>
     <div class="incident-heading"><div class="detail-tags"><span class="badge" [class.danger]="view.data.incident.sev===1">{{sev(view.data.incident.sev)}}</span><span class="badge" [class.danger]="view.data.incident.action==='blocked'">{{act(view.data.incident.action)}}</span></div><h3>{{view.data.incident.sig}}</h3><p class="muted">{{dt(view.data.incident.first_ts)}} — {{dt(view.data.incident.last_ts)}}</p></div>
     <p class="muted" *ngIf="view.data.incident.session_id">会话 ID：{{view.data.incident.session_id}}</p><p class="muted" *ngIf="view.data.incident.tuple_hash">五元组关联键：{{view.data.incident.tuple_hash}}</p><div class="mini-stats"><div><small>告警</small><strong>{{view.data.incident.alert_count}}</strong></div><div><small>检测签名</small><strong>{{view.data.incident.signature_count}}</strong></div><div><small>关联网络日志</small><strong>{{view.data.incident.network_count}}</strong></div></div>
     <div class="path"><div><small>源地址</small><span>{{endpoint(view.data.incident.src,view.data.incident.sport)}}</span></div><b aria-hidden="true">→</b><div><small>目的地址</small><span>{{endpoint(view.data.incident.dst,view.data.incident.dport)}}</span></div></div>
     <ndr-attack-mapping [mapping]="view.data.attackMapping"/>
-    <div ndrTabMotion class="tabs detail-tabs" role="tablist" aria-label="事件研判内容"><button role="tab" id="detail-tab-network" aria-controls="detail-panel-network" [attr.tabindex]="view.tab==='network'?0:-1" (keydown)="tabKey($event,view,'network')" [attr.aria-selected]="view.tab==='network'" [class.active]="view.tab==='network'" (click)="view.tab='network'">网络时间线 {{view.data.incident.network_count}}</button><button role="tab" id="detail-tab-alerts" aria-controls="detail-panel-alerts" [attr.tabindex]="view.tab==='alerts'?0:-1" (keydown)="tabKey($event,view,'alerts')" [attr.aria-selected]="view.tab==='alerts'" [class.active]="view.tab==='alerts'" (click)="view.tab='alerts'">告警证据 {{view.data.incident.alert_count}}</button><button role="tab" id="detail-tab-signatures" aria-controls="detail-panel-signatures" [attr.tabindex]="view.tab==='signatures'?0:-1" (keydown)="tabKey($event,view,'signatures')" [attr.aria-selected]="view.tab==='signatures'" [class.active]="view.tab==='signatures'" (click)="view.tab='signatures'">检测签名 {{view.data.incident.signature_count}}</button></div>
+    <div ndrTabMotion class="tabs detail-tabs" role="tablist" aria-label="事件研判内容"><button role="tab" id="detail-tab-network" aria-controls="detail-panel-network" [attr.tabindex]="view.tab==='network'?0:-1" (keydown)="tabKey($event,view,'network')" [attr.aria-selected]="view.tab==='network'" [class.active]="view.tab==='network'" (click)="view.tab='network'">网络时间线</button><button role="tab" id="detail-tab-alerts" aria-controls="detail-panel-alerts" [attr.tabindex]="view.tab==='alerts'?0:-1" (keydown)="tabKey($event,view,'alerts')" [attr.aria-selected]="view.tab==='alerts'" [class.active]="view.tab==='alerts'" (click)="view.tab='alerts'">告警证据</button><button role="tab" id="detail-tab-signatures" aria-controls="detail-panel-signatures" [attr.tabindex]="view.tab==='signatures'?0:-1" (keydown)="tabKey($event,view,'signatures')" [attr.aria-selected]="view.tab==='signatures'" [class.active]="view.tab==='signatures'" (click)="view.tab='signatures'">检测签名</button></div>
     <section animate.enter="section-enter" class="detail-section" role="tabpanel" id="detail-panel-signatures" aria-labelledby="detail-tab-signatures" *ngIf="view.tab==='signatures'"><h3>检测签名</h3><ndr-table id="incident-signatures" [columns]="signatureColumns" [rows]="view.data.incident.signatures" keyField="sid" [interactive]="true" (rowOpen)="details.rule($event)"/></section>
     <section animate.enter="section-enter" class="detail-section" role="tabpanel" id="detail-panel-alerts" aria-labelledby="detail-tab-alerts" *ngIf="view.tab==='alerts'"><h3>原始告警证据</h3><ndr-table id="incident-alerts" [columns]="eventColumns" [rows]="view.data.alerts" [interactive]="true" (rowOpen)="details.event($event)"/></section>
     <section animate.enter="section-enter" class="detail-section" role="tabpanel" id="detail-panel-network" aria-labelledby="detail-tab-network" *ngIf="view.tab==='network'"><h3>关联网络时间线</h3><p class="error" role="alert" *ngIf="view.networkError">{{view.networkError}}</p><ndr-table id="incident-network" [total]="view.data.incident.network_count" [offset]="view.data.network_offset || 0" [size]="view.data.network_limit || 50" [busy]="view.networkBusy" (pageChange)="details.networkPage($event)" [columns]="networkColumns" [rows]="view.data.network" [interactive]="true" (rowOpen)="details.event($event)"/></section>
@@ -86,6 +141,7 @@ export class Details {
    <ng-container *ngIf="view.kind==='rule'"><div class="detail-actions"><button (click)="investigateRule(view.data.sid,view.data.gid)">调查相关事件 ↗</button></div><section class="evidence-group"><h3>规则信息</h3><dl class="evidence-fields"><div class="wide"><dt>规则描述</dt><dd>{{view.data.msg || '手动规则'}}</dd></div><div><dt>规则编号（GID:SID）</dt><dd>{{view.data.gid||1}}:{{view.data.sid}}</dd></div><div><dt>实际动作</dt><dd>{{view.data.action || '—'}}</dd></div><div *ngIf="view.data.classtype"><dt>威胁分类</dt><dd>{{view.data.classtype}}</dd></div><div class="wide" *ngIf="view.data.origins?.length"><dt>规则来源</dt><dd><span *ngFor="let o of view.data.origins"><strong class="rule-source">{{o.source}}</strong> {{o.group}} </span></dd></div></dl></section><ndr-attack-mapping [mapping]="view.attackMapping" source="当前规则元数据"/><p class="muted" *ngIf="view.data.builtin"><strong class="rule-source">Snort 内置</strong> 检测签名，支持按签名或分组抑制告警。</p><section class="evidence-group" *ngIf="view.data.line"><div class="section-heading"><h3>规则原文</h3><button class="text-button" (click)="copy(view.data.line)">复制原文</button></div><pre>{{view.data.line}}</pre></section></ng-container>
    <ng-container *ngIf="view.kind==='event'"><div class="detail-actions"><div class="toolbar"><button [disabled]="investigating || !canInvestigate(view.record)" (click)="investigate(view.record)">{{investigating?'正在准备调查…':'调查关联事件 ↗'}}</button><button class="quiet" *ngIf="view.record.sig_id" (click)="details.rule(view.record)">检测规则</button></div><button class="quiet danger" [disabled]="!view.record.src || banning" (click)="ban(view.record.src)">封禁源地址</button></div>
     <div class="evidence-heading"><div class="detail-tags"><span class="badge">{{eventName(view.record.type)}}</span><span class="badge" *ngIf="view.record.action" [class.danger]="view.record.action==='blocked'">{{act(view.record.action)}}</span></div><h3><ndr-connection-summary *ngIf="view.record.type==='flow';else eventHeading" [record]="view.record" [wrap]="true"/><ng-template #eventHeading>{{view.record.sig || view.record.host || view.record.sni || view.record.dns || eventName(view.record.type)}}</ng-template></h3><p class="muted">{{dt(view.record.ts)}}</p></div>
+    <section class="evidence-group session-evidence" *ngIf="view.showSession!==false&&view.record.session_id"><header class="section-heading"><h3>会话</h3><button class="quiet" [disabled]="view.sessionBusy" (click)="details.sessionPage(0)">刷新</button></header><p class="error" role="alert" *ngIf="view.sessionError">{{view.sessionError}}</p><ndr-table id="session-evidence" [columns]="networkColumns" [rows]="view.session?.events || []" [total]="view.session?.total || 0" [offset]="view.session?.offset || 0" [busy]="view.sessionBusy" [interactive]="true" (pageChange)="details.sessionPage($event)" (rowOpen)="details.event($event,false)"/></section>
     <ndr-attack-mapping [mapping]="view.attackMapping"/>
     <section class="evidence-group" *ngFor="let group of view.groups"><h3>{{group.title}}</h3><dl class="evidence-fields"><div *ngFor="let field of group.fields" [class.wide]="['sig','url','ua','answers','community'].includes(field.key)"><dt>{{field.label}}</dt><dd><ndr-connection-summary *ngIf="field.key==='sig'&&view.record.type==='flow';else evidenceFieldValue" [record]="view.record" [wrap]="true"/><ng-template #evidenceFieldValue><span [class.badge]="field.key==='state'&&view.record.type==='flow'" [class.flow-state]="field.key==='state'&&view.record.type==='flow'">{{field.value}}</span></ng-template></dd></div></dl></section>
     <details class="raw-evidence"><summary>原始 JSON</summary><div class="raw-actions"><button class="text-button" (click)="copyJson(view.data,view.rawText)">复制 JSON</button></div><pre>{{view.rawText || (view.data | json)}}</pre></details>
@@ -111,12 +167,13 @@ export class DetailsComponent {
    if(view?.kind==='incident')Object.assign(params,{incident_id:row.id});
    const result=await this.api.get('/api/hunt/related',params);
    if(this.details.current?.id!==view?.id)return;
-   const range={choice:'custom',from:localDate(new Date(Number(result.from)*1000)),to:localDate(new Date(Number(result.to)*1000))};
+   const range=row.session_id||row.id?.startsWith('session:')?{choice:'all',from:'',to:''}:{choice:'custom',from:localDate(new Date(Number(result.from)*1000)),to:localDate(new Date(Number(result.to)*1000))};
    this.state.investigate(result.query,undefined,range);this.details.dismiss();
   }catch(error:any){if(this.details.current?.id===view?.id)this.state.toast(error.message);}
   finally{this.investigating=false;}
  }
  investigateRule(sid:any,gid:any=1):void{this.state.investigate('gid: '+gid+' AND sid: '+sid);this.details.dismiss();}
+ openSummaryHunt(query:string,context:any):void{if(!query||context?.from==null||context?.to==null)return;this.state.investigate(query,undefined,{choice:'custom',from:localDate(new Date(context.from*1000)),to:localDate(new Date(context.to*1000))});this.details.dismiss();}
  async copy(value:string):Promise<void>{try{await navigator.clipboard.writeText(value);this.state.toast('已复制');}catch{this.state.toast('当前浏览器无法复制，请选中文本复制');}}
  copyJson(data:any,raw?:string):void{void this.copy(raw || JSON.stringify(data,null,2));}
  async ban(target:string):Promise<void>{if(!target||this.banning)return;if(!await this.state.confirm('封禁地址',target+' 将被加入封禁规则，确定继续？'))return;this.banning=true;try{const d=await this.api.post('/api/bans',{target});this.state.toast(d.message||'已提交封禁');}catch(e:any){this.state.toast(e.message);}finally{this.banning=false;}}

@@ -9,7 +9,7 @@ import time
 from ips_control import Client
 from deployment_layout import layout
 
-PROGRAMS=('ips-web','ips-rule-manager','ips_control.py','rule_drafts.py','snort_engine.py',
+PROGRAMS=('ips-web','ips-rule-manager','ips_control.py','rule_drafts.py','llm_assistant.py','quic_observer.py','snort_engine.py',
           'snort_rules.py','rule_policy.py','parallel_cpu.py','parallel_sql.py','event_processing.py','native_rules.py','rule_sources.py','rule_identity.py','rule_inventory.py','runtime_status.py','history_reset.py','log_storage.py','ips-event-bridge','ips-snort-rules','snort-home-net','deployment_layout.py')
 CONFIG=Path(layout()['config'])
 BIN=Path(layout()['program_dir'])

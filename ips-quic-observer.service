@@ -1,0 +1,36 @@
+[Unit]
+Description=QUIC connection and handshake observations
+After=network.target ips-event-bridge.service
+ConditionPathExists=/etc/ips-quic-observer.json
+
+[Service]
+Type=simple
+User=ips-quic
+Group=ips-quic
+Environment=IPS_LOG_STORAGE_ROOT=/var/lib/ips-snort-logs
+Environment=WIRESHARK_CONFIG_DIR=/etc/ips-quic-observer
+Environment=HOME=/etc/ips-quic-observer
+ExecStartPre=+/usr/bin/python3 -B /opt/ips-console/bin/quic_observer.py --prepare-output
+ExecStart=/usr/bin/python3 -B /opt/ips-console/bin/quic_observer.py --config /etc/ips-quic-observer.json
+Restart=on-failure
+RestartSec=10
+KillMode=control-group
+TimeoutStopSec=20
+Nice=10
+CPUQuota=50%
+MemoryHigh=192M
+MemoryMax=256M
+TasksMax=16
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN CAP_CHOWN CAP_FOWNER
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/ips-snort-logs/snort
+PrivateTmp=yes
+UMask=0022
+LogRateLimitIntervalSec=30
+LogRateLimitBurst=20
+
+[Install]
+WantedBy=multi-user.target

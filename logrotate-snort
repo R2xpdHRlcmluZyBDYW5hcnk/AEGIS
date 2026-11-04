@@ -1,4 +1,4 @@
-/var/log/snort/*file_connector_ndr_transmit /var/log/snort/*alert_json.txt {
+/var/log/snort/*file_connector_ndr_transmit /var/log/snort/*alert_json.txt /var/log/snort/*quic_observer.json {
     daily
     maxsize 16M
     rotate 2

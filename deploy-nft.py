@@ -85,6 +85,42 @@ def process_identity(pid):
     return [int(pid), fields[19]]
 
 
+def priority_transaction(table, priority):
+    """Recreate only the dedicated IPS table in one atomic nft transaction."""
+    commands=[{'delete':{'table':{'family':'inet','name':'ips'}}}]
+    chains=[]
+    for item in table['nftables']:
+        if 'metainfo' in item:continue
+        if len(item)!=1:raise ValueError('Unexpected IPS object')
+        kind,data=next(iter(item.items()));data=copy.deepcopy(data)
+        if kind not in ('table','chain','rule') or data.get('family')!='inet':
+            raise ValueError('Unsupported IPS table object')
+        if (data.get('name') if kind=='table' else data.get('table'))!='ips':
+            raise ValueError('Unexpected IPS table')
+        data.pop('handle',None)
+        if kind=='chain':
+            if data.get('name')!='prerouting' or data.get('hook')!='prerouting' or data.get('prio') not in (-150,-90):
+                raise ValueError('Unexpected IPS chain')
+            chains.append(data);data['prio']=priority
+        commands.append({'add':{kind:data}})
+    if len(chains)!=1:raise ValueError('Expected one IPS base chain')
+    return json.dumps({'nftables':commands})
+
+
+def policy_signature(table):
+    objects=[]
+    for item in table['nftables']:
+        if 'metainfo' in item:continue
+        item=copy.deepcopy(item)
+        for kind,data in item.items():
+            data.pop('handle',None)
+            if kind=='chain':data.pop('prio',None)
+            for expr in data.get('expr',[]):
+                if 'counter' in expr:expr['counter']={}
+        objects.append(item)
+    return objects
+
+
 def processes():
     supervisor = int(run(['systemctl', 'show', 'ips.service', '-p', 'MainPID', '--value']).strip())
     engine = int(Path('/run/snort/snort.pid').read_text().strip())
@@ -119,16 +155,22 @@ def generated_rules(path):
 
 
 def upgrade(release):
-    if TARGET.is_symlink() or not TARGET.is_file():
+    target=TARGET.resolve()
+    if TARGET==Path('/usr/local/bin/ips-supervisor') and not TARGET.exists():
+        target=Path('/opt/ips-console/bin/ips-supervisor')
+    if TARGET.is_symlink() and target!=Path('/opt/ips-console/bin/ips-supervisor'):
+        raise ValueError('Unexpected supervisor symlink target')
+    if not target.is_file():
         raise ValueError('Expected a regular installed supervisor file')
-    original = TARGET.read_bytes()
+    original = target.read_bytes()
     candidate = (release / 'ips-supervisor').read_bytes()
     validate_source(original, candidate)
     before_processes = processes()
     before = json.loads(run([NFT, '-j', 'list', 'table', 'inet', 'ips']))
     rule = ingress_rule(before)
-    change = replacement(rule, LO_EXPR)
-    rollback = replacement(rule, rule['expr'])
+    old_priority=next(obj['chain']['prio'] for obj in before['nftables'] if 'chain' in obj)
+    change = priority_transaction(before, -90)
+    rollback = priority_transaction(before, old_priority)
     run([NFT, '-c', '-f', '-'], generated_rules(release / 'ips-supervisor'))
     run([NFT, '-c', '-j', '-f', '-'], change)
     backup = BACKUPS / (datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ'))
@@ -137,27 +179,29 @@ def upgrade(release):
     atomic_write(original, backup / 'ips-supervisor.before', 0o700)
     atomic_write(rollback.encode(), backup / 'rollback-rule.json', 0o600)
     atomic_write(json.dumps(before).encode(), backup / 'table.before.json', 0o600)
-    mode = TARGET.stat().st_mode & 0o777
+    mode = target.stat().st_mode & 0o777
     applied = False
     try:
-        atomic_write(candidate, TARGET, mode)
+        atomic_write(candidate, target, mode)
         run([NFT, '-j', '-f', '-'], change)
         applied = True
         after = json.loads(run([NFT, '-j', 'list', 'table', 'inet', 'ips']))
         if ingress_rule(after)['expr'] != LO_EXPR:
             raise RuntimeError('Ingress-rule verification failed')
-        if stable_table(before, rule['handle']) != stable_table(after, rule['handle']):
+        if policy_signature(before) != policy_signature(after):
             raise RuntimeError('Unrelated NFQUEUE objects changed')
+        if next(obj['chain']['prio'] for obj in after['nftables'] if 'chain' in obj)!=-90:
+            raise RuntimeError('NFQUEUE hook priority verification failed')
         if processes() != before_processes:
             raise RuntimeError('IPS process identities changed')
-        if TARGET.read_bytes() != candidate:
+        if target.read_bytes() != candidate:
             raise RuntimeError('Installed generator verification failed')
     except BaseException:
-        atomic_write(original, TARGET, mode)
+        atomic_write(original, target, mode)
         if applied:
             run([NFT, '-j', '-f', '-'], rollback)
         raise
-    print('NFQUEUE ingress: iifname "lo" return')
+    print('NFQUEUE ingress: prerouting priority -90, after destination NAT')
     print('Generator installed; supervisor and Snort process identities unchanged.')
     print('Backup: ' + str(backup))
     print('The running supervisor retains its old generator until its next start;')

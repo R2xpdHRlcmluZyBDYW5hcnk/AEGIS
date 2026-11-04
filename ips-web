@@ -58,6 +58,7 @@ from rule_identity import group_selector,parse_group,group_matches,group_policy_
 from parallel_sql import ReadExecutor, fetch_many
 from parallel_cpu import shared_cpu, byte_batches
 from log_storage import log_paths
+from llm_assistant import LocalAssistant, disconnected
 
 NATIVE_LOGS, EVENT_STREAM = log_paths()
 EVE = str(EVENT_STREAM)
@@ -722,7 +723,7 @@ class EventDB:
 
     # 列名 -> 记录字段；None 表示特殊处理（ts 存毫秒、raw 压缩、size 改名 fsize）
     COLUMNS = [
-        *[(field, field) for field in __import__("snort_engine").NATIVE_FIELDS.values()],
+        *[(field, field) for field in __import__("snort_engine").EVENT_FIELDS.values()],
         ("ts", None), ("type", "type"), ("sev", "sev"), ("sid", "sig_id"),
         ("src", "src"), ("sport", "sport"), ("dst", "dst"), ("dport", "dport"),
         ("ip_version", "ip_version"),
@@ -796,9 +797,9 @@ class EventDB:
                 sql_type = "INTEGER" if column in self.NUMERIC_COLUMNS else "TEXT"
                 defs.append("%s %s" % (column, sql_type))
             defs.insert(0, "id INTEGER PRIMARY KEY")
-            self.conn.execute("CREATE TABLE IF NOT EXISTS events (%s,"
-                              " UNIQUE(ts, type, sid, src, dst, sport, dport))"
-                              % ", ".join(defs))
+            # Only an identical source record is a duplicate. Timestamp, tuple
+            # and SID can coincide across generators, packets and sessions.
+            self.conn.execute("CREATE TABLE IF NOT EXISTS events (%s)" % ", ".join(defs))
             self.conn.execute('CREATE TABLE IF NOT EXISTS event_state (key TEXT PRIMARY KEY,value TEXT NOT NULL)')
             self.conn.execute('INSERT OR IGNORE INTO event_state VALUES(?,?)',('clear_epoch',secrets.token_hex(16)))
             floor=self.conn.execute("SELECT value FROM event_state WHERE key='stream_cutoff'").fetchone()
@@ -849,7 +850,7 @@ class EventDB:
             elif column == "raw":
                 # Native envelopes retain protocol evidence and exact 64-bit
                 # values beyond the indexed projection. Retention remains bounded.
-                keep_raw = (rec.get('_native_snort') or rec.get("type") == "alert" or
+                keep_raw = (rec.get('_native_snort') or rec.get('observer') or rec.get("type") == "alert" or
                             (rec.get("type") == "drop" and rec.get("sig_id")))
                 values.append(zlib.compress(raw.encode("utf-8", "replace"), 6)
                               if keep_raw else b"")
@@ -1001,6 +1002,8 @@ class EventDB:
             rec[key] = http_version(rec['type'], pairs.get('app'), value) if key == 'httpver' else ("" if value is None else value)
         if rec['type'] == 'flow' and 'sig' in keys:
             rec['sig'] = flow_summary(*(pairs.get(key) for key in ('app','proto','state','reason','sig')))
+        if rec['type']=='flow' and pairs.get('native_uid') not in (None,''):
+            rec.pop('flow_start',None);rec.pop('flow_end',None)
         return rec
 
     def _row(self, row, matcher=None, need_raw=False):
@@ -1047,11 +1050,13 @@ class EventDB:
             "subject": pairs.get("subject") or "", "issuer": pairs.get("issuer") or "",
             "anom": pairs.get("anom") or "",
         }
-        for field in __import__("snort_engine").NATIVE_FIELDS.values():
+        for field in __import__("snort_engine").EVENT_FIELDS.values():
             rec[field] = pairs.get(field) if pairs.get(field) is not None else ""
         if rec['type'] == 'flow':
             rec['sig'] = flow_summary(*(rec.get(key) for key in ('app','proto','state','reason','sig')))
         for key in ("bytes_toserver", "bytes_toclient", "pkts_toserver", "pkts_toclient", "flow_start", "flow_end", "flow_age"):
+            if key in ('flow_start','flow_end') and rec['type']=='flow' and rec.get('native_uid') not in (None,''):
+                continue
             if pairs.get(key) is not None:
                 rec[key] = pairs[key]
         if sev == 1:
@@ -1135,8 +1140,8 @@ class EventDB:
         if self.conn is None:
             return 0, []
         self._association_functions()
-        low = int(low * 1000)
-        high = int(high * 1000)
+        low = low * 1000
+        high = high * 1000
         push_sql, push_args = (push or ([], []))
         conditions = ["ts >= ?", "ts <= ?"]
         args = [low, high]
@@ -1149,7 +1154,7 @@ class EventDB:
         source = self._security_from(" WHERE " + " AND ".join(conditions), dedup)
         selected = self.names
         if list_view:
-            wanted = LIST_COLUMNS | {'session_id'} | {self.REC_KEY_COLUMN.get(key, key) for key in fields or ()}
+            wanted = LIST_COLUMNS | {'session_id','native_uid'} | {self.REC_KEY_COLUMN.get(key, key) for key in fields or ()}
             if 'tuple_hash' in (fields or ()):
                 wanted.update(('community','flow_id'))
             if need_raw:
@@ -1257,20 +1262,21 @@ class EventDB:
             self.last_truncated = truncated
             return matched, out
 
-    def read_record(self, token):
+    def read_record(self, token, include_raw=True):
         ident, separator, expected = str(token).partition(':')
         if not separator or not ident.isdigit() or len(ident) > 19:
             raise ValueError('事件标识无效')
         with self.lock:
-            row = self.conn.execute('SELECT '+', '.join(self.names)+' FROM events WHERE id=?',
+            columns = [name for name in self.names if include_raw or name != 'raw']
+            row = self.conn.execute('SELECT '+', '.join(columns)+' FROM events WHERE id=?',
                                     (int(ident),)).fetchone() if self.conn is not None else None
         if row is None:
             return None
-        pairs = dict(zip(self.names, row))
+        pairs = dict(zip(columns, row))
         actual = pairs.get('event_key') or 't' + str(pairs.get('ts'))
         if not hmac.compare_digest(expected, actual):
             return None
-        record = self._row(row)
+        record = self._row(tuple(pairs.get(name) for name in self.names))
         record['record_id'] = token
         raw = None
         raw_text = ''
@@ -1281,6 +1287,50 @@ class EventDB:
             except (ValueError, zlib.error):
                 pass
         return dict(record=record, raw=raw if raw is not None else dict(record), raw_text=raw_text)
+
+    def context_records(self, conditions, arguments, limit=1, oldest=False):
+        """Internal fixed predicates; project facts without fetching payload blobs."""
+        columns = ['id', *[name for name in self.names if name != 'raw']]
+        direction = 'ASC' if oldest else 'DESC'
+        with self.lock:
+            rows = self.conn.execute('SELECT '+','.join(columns)+' FROM events WHERE '+conditions+
+                ' ORDER BY ts '+direction+',id '+direction+' LIMIT ?', [*arguments, limit]).fetchall()
+        output = []
+        for row in rows:
+            pairs = dict(zip(columns, row))
+            record = self._row(tuple(pairs.get(name) for name in self.names))
+            record['_context_id'] = pairs['id']
+            output.append(record)
+        return output
+
+    def session_context(self, session):
+        """Retained facts and bounded representative evidence for one exact session."""
+        if not isinstance(session, str) or not re.fullmatch(r'[0-9a-f]{32}:[0-9a-f]{16}',session):
+            raise ValueError('引擎会话 ID 无效')
+        with self.lock:
+            stats = self.conn.execute('SELECT COUNT(*),MIN(ts),MAX(ts) FROM events WHERE session_id=?',[session]).fetchone()
+            if not stats or not stats[0]:
+                return None
+            kinds = dict(self.conn.execute('SELECT type,COUNT(*) FROM events WHERE session_id=? GROUP BY type',[session]))
+            actions = dict(self.conn.execute("SELECT action,COUNT(*) FROM events WHERE session_id=? AND type IN ('alert','drop') AND COALESCE(action,'')!='' GROUP BY action",[session]))
+        records, used = [], set()
+        def collect(predicate='', args=(), limit=1, oldest=False):
+            rows = self.context_records('session_id=?'+(' AND '+predicate if predicate else ''),[session,*args],limit,oldest)
+            for row in rows:
+                if row['_context_id'] not in used:
+                    used.add(row['_context_id']);records.append(row)
+        # Include detection/disposition and connection outcome before protocol details.
+        collect("type IN ('alert','drop')",limit=2)
+        collect("type IN ('alert','drop') AND action IN ('blocked','drop','reject','reset')")
+        collect("type='flow' OR (type='quic' AND flow_start IS NOT NULL)")
+        for kind in ('dns','tls','http','anomaly','fileinfo'):
+            if kinds.get(kind):
+                collect('type=?',[kind])
+        collect(oldest=True)
+        collect()
+        return dict(scope='session', session_id=session, total_records=stats[0],
+                    first_ts=stats[1]/1000, last_ts=stats[2]/1000,
+                    event_counts=kinds, action_counts=actions, records=records)
 
     def search(self, window=60, matcher=None, limit=100, offset=0, max_scan=300000):
         return self.search_range(now() - window * 60, now() + 5, matcher=matcher,
@@ -1349,7 +1399,7 @@ class EventDB:
     def security_incidents(self, low, high, sev=None, proto=None, q="", offset=0, limit=50,
                            incident_id=None, signature_limit=3):
         self._association_functions()
-        low_ms, high_ms = int(low*1000),int(high*1000)
+        low_ms, high_ms = low*1000,high*1000
         key = 'incident_id'
         membership = None
         if incident_id:
@@ -1540,7 +1590,7 @@ class EventDB:
                     "SELECT raw"+self._security_from(" WHERE ts >= ? AND ts <= ? AND type IN ('alert','drop') AND " +
                     " AND ".join(alert_push[0]),dedup=True) +
                     " ORDER BY ts DESC LIMIT -1 OFFSET ?",
-                    [int(low * 1000), int(high * 1000)] + alert_push[1] + [len(alerts)])
+                    [low * 1000, high * 1000] + alert_push[1] + [len(alerts)])
                 for (blob,) in remaining:
                     if blob:
                         try:
@@ -2426,7 +2476,7 @@ class EventStore:
             "reason": reason,
             "iif": obj.get("in_iface") or "",
         }
-        if etype == 'flow':
+        if etype == 'flow' or (etype=='quic' and obj.get('observer_fields')):
             flow = obj.get('flow') or {}
             for key in ('bytes_toserver', 'bytes_toclient', 'pkts_toserver', 'pkts_toclient'):
                 try:
@@ -2441,9 +2491,11 @@ class EventStore:
                 rec['flow_age'] = None
             rec['state'] = flow.get('state') or ''
             rec['reason'] = flow.get('reason') or ''
-            rec['sig'] = flow_summary(rec['app'], rec['proto'], rec['state'], rec['reason'])
+            if etype=='flow':rec['sig'] = flow_summary(rec['app'], rec['proto'], rec['state'], rec['reason'])
         rec.update(attack_metadata(obj))
         rec.update(obj.get("snort_native") or {})
+        rec.update({k:v for k,v in (obj.get('observer_fields') or {}).items()
+                    if k in __import__('snort_engine').EVENT_FIELDS.values()})
         if 'snort_native' in obj:
             rec['_native_snort'] = True
         return rec, line
@@ -3967,7 +4019,7 @@ class Sessions:
 #   逻辑：AND(&&) / OR(||) / NOT(!)，支持 a AND (b OR c)、a NOT b、-field:value
 # --------------------------------------------------------------------------
 HUNT_FIELDS = {
-    **__import__("snort_engine").NATIVE_FIELDS,
+    **__import__("snort_engine").EVENT_FIELDS,
     "native_uid": "native_uid", "orig_pkts": "pkts_toserver", "resp_pkts": "pkts_toclient",
     "orig_bytes": "bytes_toserver", "resp_bytes": "bytes_toclient", "duration": "flow_age",
     "conn_state": "state", "server_name": "sni", "query": "dns", "uri": "url",
@@ -3995,6 +4047,7 @@ HUNT_FIELDS = {
     **{field: field for field in FLOW_METRIC_FIELDS},
 }
 HUNT_SUBSTRING_FIELDS = {"sig", "cat", "reason", "sni", "host", "dns", "url", "ua", "file",
+                         'quic_cids','quic_paths',
                          "magic", "md5", "sha1", "sha256", "subject", "issuer", "answers",
                          "ct", "referrer", "alpn", "anom", "ja3", "ja3s", "ja4",
                          "mitre_tactic_name", "mitre_technique_name"}
@@ -4086,7 +4139,7 @@ def app_event_summary(app_obj):
     return " ".join(parts)
 
 DB_COLUMN_FIELDS = {
-    *__import__("snort_engine").NATIVE_FIELDS.values(),
+    *__import__("snort_engine").EVENT_FIELDS.values(),
     'tuple_hash', 'ts',
     *FLOW_METRIC_FIELDS,
     "type", "sev", "level", "sig_id", "src", "sport", "dst", "dport", "ip_version",
@@ -4301,6 +4354,9 @@ def _hunt_num(actual, value):
 
 SQL_FIELD_COLUMNS = {key: column for column, key in EventDB.COLUMNS if key in DB_COLUMN_FIELDS}
 SQL_FIELD_COLUMNS.update({'dns': 'dnsname', 'file': 'fname', 'size': 'fsize', 'ts': '(ts/1000.0)'})
+for _flow_time in ('flow_start','flow_end'):
+    # Ignore old inferred projections as well as keeping new ingestion faithful.
+    SQL_FIELD_COLUMNS[_flow_time]="(CASE WHEN type='flow' AND COALESCE(native_uid,'')!='' THEN NULL ELSE "+_flow_time+' END)'
 SQL_EXACT_COLUMNS = {key: column for key, column in SQL_FIELD_COLUMNS.items() if key not in HUNT_SUBSTRING_FIELDS}
 SQL_NUMERIC = HUNT_NUMBER_FIELDS
 # 事件类型在入库时限制为受支持的小写名称。
@@ -5404,6 +5460,7 @@ class App:
 
     def __init__(self, config):
         self.config = config
+        self.assistant = LocalAssistant(config.get('local_llm'))
         self.stop=threading.Event()
         self.control = None
         if config.get("rule_manager_socket"):
@@ -5781,6 +5838,96 @@ class App:
     def record(self, params):
         return self.db.read_record(params.get('key','')) or {'error':'事件已不存在或已超过保留范围'}
 
+    @data_query(cache=False)
+    def session_events(self, params):
+        identity=str(params.get('session_id') or '')
+        if not re.fullmatch(r'[0-9a-f]{32}:[0-9a-f]{16}',identity):
+            raise ValueError('会话 ID 无效')
+        offset=max(0,int(params.get('offset') or 0))
+        limit=min(100,max(1,int(params.get('limit') or 50)))
+        low,high=self.db.history_range()
+        total,records=self.db.search_range(low,high,push=(['session_id=?'],[identity]),
+                                          limit=limit,offset=offset,list_view='network')
+        return dict(session_id=identity,total=total,events=records,offset=offset,limit=limit)
+
+    @data_query(cache=False)
+    def summary_context(self, target):
+        """Resolve trusted record identity and search only its engine-owned session."""
+        if not isinstance(target, dict):
+            raise ValueError('需要事件标识')
+        if target.get('kind') == 'record':
+            detail = self.db.read_record(target.get('key',''), include_raw=False)
+            if not detail:
+                raise ValueError('事件已不存在或已超过保留范围')
+            anchor = detail['record']
+        elif target.get('kind') == 'event':
+            raw = self.store.detail(int(target.get('id')))
+            parsed = self.store._parse(raw) if raw is not None else None
+            if not parsed:
+                raise ValueError('事件明细已不在缓存中')
+            anchor = parsed[0]
+        elif target.get('kind') == 'incident':
+            params = target.get('params')
+            identity = params.get('id') if isinstance(params, dict) else None
+            if not isinstance(identity,str) or not re.fullmatch(r'(?:session:[0-9a-f]{32}:[0-9a-f]{16}|event:[0-9a-f]{64}|record:[0-9]+:[0-9.e+\-]+)',identity):
+                raise ValueError('安全事件标识无效')
+            conditions, args = self.db.incident_filter(identity)
+            rows = self.db.context_records(' AND '.join(conditions),args)
+            if not rows:
+                raise ValueError('事件已不存在或已超过保留范围')
+            anchor = rows[0]
+        else:
+            raise ValueError('不支持的事件类型')
+        session = anchor.get('session_id')
+        if session:
+            context = self.db.session_context(session)
+            if context:
+                context['anchor'] = anchor
+                return context
+        return dict(scope='event', session_id='', total_records=1,
+                    first_ts=anchor.get('ts'), last_ts=anchor.get('ts'),
+                    event_counts={anchor.get('type','unknown'):1}, action_counts={},
+                    records=[anchor], anchor=anchor)
+
+    @data_query(cache=False)
+    def summary_hunt(self, params):
+        """Bounded model-authored DSL, always intersected with the trusted session."""
+        session, query = params.get('session_id'), params.get('query')
+        if not isinstance(session,str) or not re.fullmatch(r'[0-9a-f]{32}:[0-9a-f]{16}',session):
+            raise ValueError('狩猎检索需要引擎会话 ID')
+        if not isinstance(query,str) or not query.strip() or len(query)>160:
+            raise ValueError('狩猎搜索词为空或过长')
+        try:
+            node = hunt_parse(query)
+        except HuntError as exc:
+            raise ValueError('狩猎语法无效：'+str(exc)) from None
+        allowed = {'type','action','level','app','state','rcode','status','method','sig','sig_id',
+                   'reason','sni','host','dns','validation_status','ips_action','bytes_toserver',
+                   'bytes_toclient','pkts_toserver','pkts_toclient'}
+        def validate(term, depth=0):
+            if depth>12:
+                raise ValueError('狩猎条件过于复杂')
+            if term[0] in ('and','or'):
+                validate(term[1],depth+1);validate(term[2],depth+1)
+            elif term[0]=='not':
+                validate(term[1],depth+1)
+            elif term[0]!='cmp' or term[1] not in allowed or len(term[2])>100:
+                raise ValueError('狩猎搜索词包含不支持的字段或条件')
+        validate(node)
+        where, args, complete = hunt_sql_pushdown(node)
+        if not complete:
+            raise ValueError('狩猎条件不能执行有界结构化查询')
+        condition = 'session_id=? AND ('+' AND '.join(where)+')'
+        with self.db.lock:
+            self.db._hunt_functions()
+            try:
+                total = self.db.conn.execute('SELECT COUNT(*) FROM events WHERE '+condition,[session,*args]).fetchone()[0]
+                records = self.db.context_records(condition,[session,*args],limit=4)
+            except sqlite3.Error:
+                raise RuntimeError('狩猎检索中断或未完成') from None
+        return dict(query='session_id: '+json.dumps(session)+' AND ('+query+')',
+                    predicate=query, total=total, records=records)
+
     def cache_stats(self):
         try:
             process = {key:int(value.split()[0])*1024 for line in Path('/proc/self/status').read_text().splitlines()
@@ -5971,7 +6118,8 @@ class App:
         schema['fields'].extend({'name': name, 'desc': label, 'example': name+': '+('>=1700000000' if name in ('flow_start','flow_end') else '>1000')} for name,label in FLOW_METRIC_FIELDS.items())
         unsupported = {'ja3','ja3s','ja4','alpn','md5','sha1','vlan','pkt_src','icmp_type','icmp_code','flow','community','community_id','iface'}
         schema['fields'] = [field for field in schema['fields'] if field['name'] not in unsupported]
-        native_labels = {'session_id':'引擎独立会话 ID','uid':'Snort 原生 UID（原文精确匹配）','history':'连接历史','tenant_id':'租户编号','cipher':'密码套件','curve':'椭圆曲线','validation_status':'证书验证状态','client_protocol':'客户端应用协议','command':'FTP 命令','arg':'FTP 命令参数','user':'FTP 用户名','reply_code':'FTP 响应码','reply_msg':'FTP 响应','fuid':'文件标识','source':'来源协议','analyzers':'文件分析器','timedout':'文件分析超时','extracted_cutoff':'文件截断','ips_action':'规则动作','ids_reason':'IDS 模式原因'}
+        native_labels = {'session_id':'采集会话 ID（原文精确匹配）','uid':'Snort 原生 UID（原文精确匹配）','history':'连接历史','tenant_id':'租户编号','cipher':'密码套件','curve':'椭圆曲线','validation_status':'证书验证状态','client_protocol':'客户端应用协议','command':'FTP 命令','arg':'FTP 命令参数','user':'FTP 用户名','reply_code':'FTP 响应码','reply_msg':'FTP 响应','fuid':'文件标识','source':'来源协议','analyzers':'文件分析器','timedout':'文件分析超时','extracted_cutoff':'文件截断','ips_action':'规则动作','ids_reason':'IDS 模式原因'}
+        native_labels.update(observer='采集组件',quic_cids='可见 QUIC 连接 ID',quic_paths='可见 QUIC 通信路径',coverage='QUIC 证据范围')
         schema['fields'].extend({'name':name,'desc':label,'example':name+':'+('1234567890' if name=='uid' else '*')} for name,label in native_labels.items())
         for field in schema['fields']:
             if field['name']=='state':
@@ -6693,6 +6841,8 @@ button:disabled{opacity:.4;cursor:not-allowed}
                 return self._json(self.app.overview(params))
             if path == '/api/record':
                 return self._json(self.app.record(params))
+            if path == '/api/session':
+                return self._json(self.app.session_events(params))
             if path == '/api/cache/stats':
                 return self._json(self.app.cache_stats())
             if path == "/api/incidents":
@@ -6878,7 +7028,7 @@ button:disabled{opacity:.4;cursor:not-allowed}
         try:
             return self._write("POST")
         finally:
-            if self.path.startswith('/api/') and getattr(self.app,'data',None):
+            if self.path.startswith('/api/') and not self.path.startswith('/api/ai/') and getattr(self.app,'data',None):
                 self.app.data.invalidate()
 
     def do_DELETE(self):  # noqa: N802
@@ -6921,13 +7071,46 @@ button:disabled{opacity:.4;cursor:not-allowed}
             return self._error(400, "invalid json")
         if not isinstance(body, dict):
             return self._error(400, "json body must be an object")
+        if method == 'POST' and path == '/api/ai/generate':
+            return self._generate(body)
+        if method == 'POST' and path == '/api/ai/rules/add':
+            result = self.app.assistant.add(self.app, self._cookie_token(), body.get('proposal'))
+            self.app.data.invalidate()
+            return self._json(result)
         with self.mutation_lock:
             return self._mutate(method,path,body)
 
+    def _generate(self, body):
+        # One streaming connection owns one inference. Closing it cancels upstream.
+        self.close_connection = True
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/x-ndjson; charset=utf-8')
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.send_header('X-Accel-Buffering', 'no')
+        self.send_header('Connection', 'close')
+        self.end_headers()
+        def send(value):
+            try:
+                self.wfile.write(json.dumps(value, ensure_ascii=False).encode() + b'\n')
+                self.wfile.flush()
+                return True
+            except OSError:
+                return False
+        try:
+            self.app.assistant.generate(self.app, self._cookie_token(), body, send,
+                                        lambda: disconnected(self.connection))
+        except (ValueError, TypeError) as exc:
+            send({'error': str(exc)})
+        except Exception:
+            send({'error': '本地模型调用失败，请稍后重试'})
+
     def _mutate(self,method,path,body):
         if method == "POST" and path == "/api/db/clear":
+            scope=body.get('scope','all')
+            if scope not in ('all','database'):raise ValueError('历史清理范围无效')
             if getattr(self.app,'control',None):
-                return self._json(self.app.control.request('history-reset'))
+                return self._json(self.app.control.request('history-reset',scope=scope))
             ok = self.app.clear_history()
             return self._json({"ok": ok, "stats": self.app.db.stats()})
         if method == "POST" and path == "/api/db/settings":

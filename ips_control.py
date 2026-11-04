@@ -26,7 +26,7 @@ FUNCTIONS = ('governance_state', 'rule_group_catalog', 'suppression_group_catalo
 APP_READS = ('rules_search', 'sources_catalog', 'rules_payload', 'rule_selection','rules_page')
 SYS_READS = ('reload_state','update_status','service')
 POST_PATHS = frozenset(('/api/actions/reload', '/api/actions/update', '/api/actions/apply',
-    '/api/rules/schedule', '/api/hunt/rules', '/api/rules/suppress-groups', '/api/rules/suppress-groups/remove',
+    '/api/rules/schedule', '/api/hunt/rules', '/api/hunt/rules/add-apply', '/api/rules/suppress-groups', '/api/rules/suppress-groups/remove',
     '/api/rules/suppress', '/api/rules/action', '/api/rules/source', '/api/rules/source/config',
     '/api/rules/action-apply', '/api/rules/reject', '/api/rules/drop',
     '/api/rules/disable', '/api/rules/batch-delete', '/api/rules/pending/discard', '/api/bans/batch-delete', '/api/bans'))
@@ -177,10 +177,12 @@ class RuleBackup:
         with (self.directory/'reload-detectors').open('w') as handle:
             handle.write('required\n');handle.flush();os.fsync(handle.fileno())
 
-    def commit(self, clear_pending=False):
+    def commit(self, clear_pending=False, applied_manual=None):
         target = self.directory / 'manifest.json'
         manifest = json.loads(target.read_text())
         manifest.update(committed=True, clear_pending=clear_pending)
+        if applied_manual:
+            manifest['applied_manual'] = applied_manual
         staged = target.with_suffix('.new')
         with open(staged, 'w') as handle:
             json.dump(manifest, handle)
@@ -224,14 +226,16 @@ class Jobs:
     def update_rules(self, offline=False, on_complete=None, trigger='manual'):
         return self.start('apply' if offline else 'update', on_complete, trigger)
 
-    def start(self, kind, on_complete=None, trigger='manual'):
+    def start(self, kind, on_complete=None, trigger='manual', rule=None):
         with self.owner.lock:
             if self.owner.busy or self.owner.paused:
                 return dict(ok=False, error='规则任务正在执行，请稍后重试')
             backup = RuleBackup(self.owner.module, self.owner.state)
             self.owner.busy = True
             job = dict(state='running', kind=kind, trigger=trigger, started=time.time(),
-                       finished=0, rc=None, lines=deque(maxlen=300))
+                       finished=0, rc=None, lines=deque(maxlen=300), id=os.urandom(16).hex())
+            if rule is not None:
+                job['manual_rule'] = rule
             self.rule_job = job
             self.reload_job = dict(state='running', since=time.strftime('%Y-%m-%d %H:%M:%S'))
             try:
@@ -242,7 +246,7 @@ class Jobs:
                 backup.restore()
                 backup.close()
                 raise
-            return dict(ok=True)
+            return dict(ok=True, job_id=job['id'])
 
     def run(self, arguments, job, timeout=600):
         # Fixed argv only; bounded captured output, deadline covers downloads and validation.
@@ -279,6 +283,7 @@ class Jobs:
         reload_attempted = False
         committed = False
         detectors_changed = False
+        applied_manual = None
         guard = ExitStack()
         try:
             guard.enter_context(configuration_lock(m.SNORT_CONF))
@@ -286,6 +291,11 @@ class Jobs:
             before_detector=detector.read_bytes() if detector.exists() else None
             download_pending = False
             with self.owner.lock:
+                if job['kind'] == 'manual-add':
+                    ok, message = m.hunt_rule_add(job['manual_rule'])
+                    if not ok:
+                        raise ValueError(message)
+                    applied_manual = Path(m.HUNT_RULES).read_text(encoding='utf-8').splitlines()[-1]
                 download_pending = job['kind']=='update' and job['trigger']=='manual' and self.owner.drafts.sources_changed()
                 if job['kind'] == 'apply' and self.owner.drafts.dirty:
                     self.owner.drafts.promote()
@@ -313,10 +323,12 @@ class Jobs:
             result = self.engine_call(['ruleset-reload-rules'], timeout=300)
             if 'ruleset-reload-rules' not in result:
                 raise RuntimeError(result.get('__error__', '规则重载失败'))
-            backup.commit(clear_pending=job['kind'] == 'apply')
+            backup.commit(clear_pending=job['kind'] == 'apply', applied_manual=applied_manual)
             committed = True
             with self.owner.lock:
-                if job['kind'] == 'apply' or not self.owner.drafts.dirty:
+                if applied_manual:
+                    self.owner.drafts.add_applied_manual(applied_manual)
+                elif job['kind'] == 'apply' or not self.owner.drafts.dirty:
                     self.owner.drafts.reset()
                 else:
                     self.owner.drafts.refresh_catalog()
@@ -407,6 +419,9 @@ class Manager:
         if clear_pending:
             self.drafts.reset()
         for backup in committed_backups:
+            manifest = json.loads((backup.directory / 'manifest.json').read_text())
+            if manifest.get('applied_manual'):
+                self.drafts.add_applied_manual(manifest['applied_manual'])
             backup.close()
         draft = self.drafts.module
         self.app = object.__new__(draft.App)
@@ -433,15 +448,17 @@ class Manager:
         if not isinstance(request, dict):
             raise ValueError('invalid request')
         operation = request.get('operation')
-        if operation == 'history-reset' and set(request) == {'operation'}:
+        if operation == 'history-reset' and set(request) in ({'operation'},{'operation','scope'}):
             import history_reset
+            scope=request.get('scope','all')
+            if scope not in ('all','database'):raise ValueError('Invalid history reset scope')
             with self.lock:
                 if self.busy or self.paused:
                     return dict(ok=False,error='规则或维护任务正在执行，请稍后重试')
                 marker=Path(self.state)/'maintenance'
                 marker.write_text('history-reset\n');self.paused=True
                 try:
-                    result=history_reset.queue(self.state)
+                    result=history_reset.queue(self.state,scope=scope)
                     if not result.get('ok'):raise RuntimeError(result.get('error','无法开始清空历史'))
                 except Exception:
                     marker.unlink(missing_ok=True);self.paused=False;raise
@@ -509,6 +526,26 @@ class Manager:
                     return self.app.rule_schedule.configure(body)
                 if self.busy or self.paused:
                     return dict(ok=False, error='规则任务正在执行，请稍后重试')
+                if path == '/api/hunt/rules/add-apply':
+                    from llm_assistant import validate_rule
+                    rule = validate_rule(body.get('rule'))
+                    import re
+                    used = set()
+                    for module in (self.module, self.drafts.module):
+                        for key in ('RULES_FILE', 'LOCAL_RULES', 'HUNT_RULES', 'BAN_RULES'):
+                            path_value = Path(getattr(module, key))
+                            if path_value.exists():
+                                with path_value.open(encoding='utf-8') as handle:
+                                    for line in handle:
+                                        used.update(int(n) for n in re.findall(r'\bsid\s*:\s*(\d+)', line))
+                                        if key == 'HUNT_RULES' and re.sub(r'\s*sid\s*:\s*\d+\s*;', '', line).strip() == rule:
+                                            return dict(ok=False, error='该规则已在手动规则中，请勿重复添加')
+                    sid = 9200001
+                    while sid in used:
+                        sid += 1
+                    rule = rule[:-1] + ' sid:%d;)' % sid
+                    result = self.jobs.start('manual-add', rule=rule)
+                    return dict(result, sid=sid)
                 if path == '/api/actions/apply':
                     return self.jobs.update_rules(offline=True)
                 if path == '/api/actions/update':

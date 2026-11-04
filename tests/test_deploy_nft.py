@@ -24,7 +24,22 @@ def table():
             {'counter': {'packets': 10, 'bytes': 100}}, {'queue': {'num': {'range': [0, 3]}}}]}}]}
 
 
+def full_table():
+    return {'nftables':[{'table':{'family':'inet','name':'ips','handle':1}},
+            {'chain':{'family':'inet','table':'ips','name':'prerouting','handle':2,
+                      'type':'filter','hook':'prerouting','prio':-150,'policy':'accept'}}]+table()['nftables']}
+
+
 class DeployNftCase(unittest.TestCase):
+    def test_priority_transaction_rejects_unknown_objects_and_detects_other_policy_changes(self):
+        before=full_table();after=copy.deepcopy(before)
+        after['nftables'][1]['chain']['prio']=-90
+        self.assertEqual(deployer.policy_signature(before),deployer.policy_signature(after))
+        after['nftables'][-1]['rule']['expr'][-1]['queue']['num']=7
+        self.assertNotEqual(deployer.policy_signature(before),deployer.policy_signature(after))
+        before['nftables'].append({'set':{'family':'inet','table':'ips','name':'unexpected'}})
+        with self.assertRaises(ValueError):deployer.priority_transaction(before,-90)
+
     def test_standalone_stage_can_import_the_supervisor_generator(self):
         with tempfile.TemporaryDirectory() as directory:
             stage=Path(directory)
@@ -71,15 +86,15 @@ class DeployNftCase(unittest.TestCase):
             original = candidate.replace(b'iifname "lo" return', b'iifname != { %(ifaces)s } return')
             target.write_bytes(original)
             (release / 'ips-supervisor').write_bytes(candidate)
-            live = table()
+            live = full_table()
             calls = []
             def run(args, text=None):
                 calls.append((args, text))
                 if 'list' in args:
                     return json.dumps(live)
                 if '-j' in args and '-c' not in args:
-                    command = json.loads(text)['nftables'][0]['replace']['rule']
-                    live['nftables'][0]['rule']['expr'] = command['expr']
+                    commands = json.loads(text)['nftables']
+                    live['nftables']=[entry['add'] for entry in commands if 'add' in entry]
                 return ''
             identities = [[[10, 'start'], [11, 'start']]] * 2
             if failure:
@@ -93,11 +108,13 @@ class DeployNftCase(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, 'identities changed'):
                         deployer.upgrade(release)
                     self.assertEqual(target.read_bytes(), original)
-                    self.assertEqual(live, table())
+                    self.assertEqual(deployer.policy_signature(live),deployer.policy_signature(full_table()))
+                    self.assertEqual(live['nftables'][1]['chain']['prio'],-150)
                 else:
                     deployer.upgrade(release)
                     self.assertEqual(target.read_bytes(), candidate)
                     self.assertEqual(deployer.ingress_rule(live)['expr'], deployer.LO_EXPR)
+                    self.assertEqual(live['nftables'][1]['chain']['prio'],-90)
             self.assertFalse(any('restart' in args or 'flush' in args or 'delete' in args for args, _ in calls))
             self.assertEqual(len(list((work / 'backups').glob('*/ips-supervisor.before'))), 1)
 

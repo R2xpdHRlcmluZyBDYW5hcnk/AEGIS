@@ -128,6 +128,25 @@ class RuleDrafts:
         if index.exists():
             atomic_copy(index, self.data / 'update/cache/index.yaml')
 
+    def add_applied_manual(self, line):
+        """Rebase one applied manual rule without promoting unrelated pending edits."""
+        import re
+        sid = re.search(r'\bsid\s*:\s*(\d+)', line)
+        if not sid or '\n' in line or '\r' in line:
+            raise ValueError('Invalid applied manual rule')
+        target = self.control_path('HUNT_RULES')
+        text = target.read_text(encoding='utf-8') if target.exists() else ''
+        if any(re.search(r'\bsid\s*:\s*'+sid[1]+r'\s*;', item) for item in text.splitlines()):
+            return
+        staged = target.with_suffix('.applied-new')
+        try:
+            with staged.open('w', encoding='utf-8') as handle:
+                handle.write(text.rstrip()+'\n'+line+'\n')
+                handle.flush();os.fsync(handle.fileno())
+            os.replace(staged, target)
+        finally:
+            staged.unlink(missing_ok=True)
+
     def signature(self):
         paths = [self.control_path(key) for key in CONTROLS]
         paths.append(group_policy_path(self.control_path('THRESHOLD_CONF')))

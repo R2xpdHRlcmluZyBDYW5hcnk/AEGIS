@@ -36,7 +36,8 @@ class HuntQueryMatrix(unittest.TestCase):
         self.app.store = m.EventStore(str(Path(self.temp.name) / 'eve.json'))
         self.app.store.db = self.db
         self.records = []
-        stamp = m.now() - 100
+        # Whole seconds are exactly representable in both the memory and millisecond store.
+        stamp = int(m.now()) - 100
         for index, severity in enumerate((1, 2, 3, 4)):
             record = {field: ('Example Évent ' + field) for field in m.SQL_FIELD_COLUMNS}
             record.update({field: 42 for field in m.HUNT_NUMBER_FIELDS})

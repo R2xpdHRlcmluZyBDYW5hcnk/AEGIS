@@ -9,7 +9,7 @@ import subprocess
 import sys
 
 ROOT=Path(__file__).resolve().parents[1]
-WORK=Path('/var/tmp/ips-snort3-vm')
+WORK=Path(os.environ.get('SNORT_INLINE_WORK','/var/tmp/ips-snort3-vm'))
 KERNEL='6.12.115+deb13-arm64'
 
 
@@ -29,7 +29,7 @@ def copy(source,target):
     else: shutil.copy2(source,target)
 
 
-def prepare():
+def prepare(test='native'):
     if os.geteuid()!=0:
         raise RuntimeError('Run from WSL Debian as root')
     root=WORK/'root';init=WORK/'initramfs';downloads=WORK/'downloads'
@@ -56,10 +56,12 @@ def prepare():
     loader=root/'usr/lib/ld-linux-aarch64.so.1'
     if not loader.exists(): loader.symlink_to('aarch64-linux-gnu/ld-linux-aarch64.so.1')
     # Keep the project copy and runtime outside the source tree.
-    for name in ('snort.lua','ips-event-bridge','snort_engine.py','snort_rules.py','rule_policy.py','parallel_cpu.py','parallel_sql.py','event_processing.py','native_rules.py','rule_sources.py','rule_identity.py','rule_inventory.py','log_storage.py','ips-web'):
+    for name in ('snort.lua','ips-event-bridge','snort_engine.py','quic_observer.py','llm_assistant.py','snort_rules.py','rule_policy.py','parallel_cpu.py','parallel_sql.py','event_processing.py','native_rules.py','rule_sources.py','rule_identity.py','rule_inventory.py','log_storage.py','ips-web'):
         copy(ROOT/name,root/'project'/name)
-    for name in ('check_snort_native.py','snort_pcap.py'):
+    for name in ('check_snort_native.py','snort_pcap.py','check_nfq_nat.py'):
         copy(ROOT/'tests'/name,root/'project/tests'/name)
+    for name in ('deploy-nft.py','ips-supervisor'):
+        copy(ROOT/name,root/'project'/name)
     copy(os.environ.get('SNORT_ENGINE_PREFIX','/opt/ips-snort3/3.12.4.0'),root/'opt/ips-snort3/3.12.4.0')
     for name in ('sh','mount','modprobe','unshare','poweroff','mkdir'):
         path=root/'usr/bin'/name
@@ -100,12 +102,20 @@ modprobe libcrc32c
 modprobe nf_tables
 modprobe nft_queue
 modprobe nfnetlink_queue
+modprobe nft_nat
+modprobe nft_masq
+modprobe nft_fib_inet
+mkdir -p /var/run/netns
+touch /run/ndr-isolated-vm
 cd /project
 unshare -n python3 -B tests/check_snort_native.py --inline
 result=$?
 echo ARM64_INLINE_RESULT=$result
 busybox dmesg | busybox tail -n 12
 ''')
+    if test=='nat':
+        path=root/'run-test.sh'
+        path.write_text(path.read_text().replace('tests/check_snort_native.py --inline','tests/check_nfq_nat.py'))
     names=subprocess.check_output(['find','.','-print0'],cwd=init)
     archive=subprocess.run(['cpio','--null','-o','--format=newc'],input=names,cwd=init,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,check=True).stdout
     (WORK/'initrd.gz').write_bytes(gzip.compress(archive,compresslevel=1))
@@ -113,7 +123,11 @@ busybox dmesg | busybox tail -n 12
 
 
 def main():
-    root=prepare()
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--nat',action='store_true');args=parser.parse_args()
+    if WORK.parent!=Path('/var/tmp') or not WORK.name.startswith('ips-snort3-vm'):
+        raise ValueError('Unexpected VM workspace')
+    root=prepare('nat' if args.nat else 'native')
     command=['qemu-system-aarch64','-machine','virt','-cpu','max','-smp','4','-m','2048','-nographic','-no-reboot',
              '-kernel',str(root/'boot'/('vmlinuz-'+KERNEL)),'-initrd',str(WORK/'initrd.gz'),
              '-append','console=ttyAMA0 panic=-1','-virtfs','local,path='+str(root)+',mount_tag=rootfs,security_model=none',

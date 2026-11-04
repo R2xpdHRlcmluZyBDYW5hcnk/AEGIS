@@ -244,12 +244,12 @@ class ServerCase(unittest.TestCase):
 
     def test_login_page_has_favicon_and_hides_hostname(self):
         ips_web.Handler.config = {"user": "admin", "password_sha256": "x" * 64}
-        with mock.patch.object(ips_web.socket, 'gethostname', return_value='route-box'):
+        with mock.patch.object(ips_web.socket, 'gethostname', return_value='sensor.example.test'):
             status, _, body = self.request('GET', '/login')
         self.assertEqual(status, 200)
         self.assertIn('<img class="brand-icon" src="/favicon.svg" alt="">', body.decode('utf-8'))
         self.assertNotIn('<h1', body.decode('utf-8'))
-        self.assertNotIn('route-box', body.decode('utf-8'))
+        self.assertNotIn('sensor.example.test', body.decode('utf-8'))
 
     def test_login_neutral_palette_matches_console(self):
         ips_web.Handler.config = {'user': 'admin', 'password_sha256': 'x' * 64}

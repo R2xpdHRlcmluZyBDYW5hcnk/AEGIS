@@ -50,9 +50,9 @@ def log(message):
 
 
 def nft_rules():
-    """NFQUEUE 分发规则；拦截点在 prerouting mangle(-150)：
+    """NFQUEUE 分发规则；拦截点在 prerouting dstnat + 10(-90)：
     - 在 conntrack/defrag 之后，报文已重组
-    - 在 dstnat 之前，目的地址改写前的原始 5 元组可见
+    - 在 dstnat 之后，反向 NAT 已恢复客户端地址，双向使用同一连接元组
     - 隧道回注流量也经过相同的地址过滤与队列分发
     - 仅按入口接口排除 lo；其他接口继续经过目的地址过滤与队列分发
     """
@@ -61,7 +61,7 @@ def nft_rules():
         "delete table %(fam)s %(tab)s\n"
         "table %(fam)s %(tab)s {\n"
         "    chain prerouting {\n"
-        "        type filter hook prerouting priority mangle; policy accept;\n"
+        "        type filter hook prerouting priority -90; policy accept;\n"
         '        iifname "lo" return\n'
         "        fib daddr type { local, broadcast, multicast } return\n"
         "        ip daddr { 224.0.0.0/4, 255.255.255.255 } return\n"

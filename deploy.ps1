@@ -12,6 +12,7 @@ param(
     [switch]$RemoveLegacySuricata,
     [switch]$ClearNativeLogs,
     [switch]$ClearEventStream,
+    [string]$QuicInterface = '',
     [string]$EnginePackage = '',
     [string]$ReleasePackage = '',
     [string]$ReuseUiPackage = '',
@@ -37,6 +38,7 @@ if ($MigrateLogs -and (-not $UpdateBackend -or $BuildOnly -or $UpdateEngine)) { 
 if ($RemoveLegacySuricata -and (-not $UpdateBackend -or $BuildOnly -or $UpdateEngine -or $InstallSnort3)) { throw '-RemoveLegacySuricata requires -UpdateBackend after native activation, without an engine upgrade' }
 if ($ClearNativeLogs -and (-not $UpdateBackend -or $BuildOnly -or $UpdateEngine -or $InstallSnort3)) { throw '-ClearNativeLogs requires -UpdateBackend after native activation, without an engine upgrade' }
 if ($ClearEventStream -and -not $ClearNativeLogs) { throw '-ClearEventStream requires -ClearNativeLogs and explicit authorization to clear the full raw stream' }
+if ($QuicInterface -and (-not $UpdateBackend -or $BuildOnly -or $QuicInterface -notmatch '^[a-zA-Z0-9_.:-]{1,15}$')) { throw '-QuicInterface requires -UpdateBackend and a valid capture interface name' }
 if ($ReleasePackage -and ($BuildOnly -or -not (Test-Path -LiteralPath $ReleasePackage))) { throw '-ReleasePackage requires an existing release and cannot be combined with -BuildOnly' }
 if ($ReuseUiPackage -and ($ReleasePackage -or -not (Test-Path -LiteralPath $ReuseUiPackage))) { throw '-ReuseUiPackage requires an existing UI release and cannot be combined with -ReleasePackage' }
 $resourceFlags = [ordered]@{WebReadWorkers='--read-workers';CacheMemoryPercent='--cache-memory-percent';CacheMaxMiB='--cache-max-mib';StatsBatchSize='--stats-batch-size';StatsDutyPercent='--stats-duty-percent'}
@@ -179,6 +181,7 @@ try {
     if ($MigrateLogs) { $backendStep = 'python3 snort-ndr/deploy-log-storage.py --release snort-ndr && ' + $backendStep }
     if ($RemoveLegacySuricata) { $staticStep += ' && python3 snort-ndr/cleanup-legacy-suricata.py --apply' }
     if ($ClearNativeLogs) { $staticStep += ' && python3 snort-ndr/cleanup-native-logs.py --apply'; if ($ClearEventStream) { $staticStep += ' --event-stream' } }
+    if ($QuicInterface) { $staticStep += " && python3 snort-ndr/deploy-quic-observer.py --release snort-ndr --interface '$QuicInterface'" }
     & ssh @options $Target "cd '$stage' && sha256sum -c '$fileName.sha256' && tar -xzf '$fileName' && ${backendStep}$staticStep"
     if ($LASTEXITCODE -ne 0) { throw 'Deployment or health check failed' }
 } finally {

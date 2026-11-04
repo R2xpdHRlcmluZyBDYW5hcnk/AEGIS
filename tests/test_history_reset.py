@@ -1,5 +1,8 @@
 """Clear history only after stopping writers; preserve all operational settings."""
 from pathlib import Path
+from contextlib import closing
+import json
+import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -124,6 +127,48 @@ class HistoryResetTests(unittest.TestCase):
             with self.assertRaises(OSError):case.manager.dispatch({'operation':'history-reset'})
         self.assertFalse(case.manager.paused)
         self.assertEqual(reset.status(case.manager.state)['state'],'failed')
+
+    def test_database_reset_preserves_raw_inputs_and_archives_the_complete_database_group(self):
+        old={path.name:path.read_bytes() for path in self.history if str(path).startswith(str(self.database))}
+        with mock.patch.object(reset.os,'chown',create=True):backup=reset.reset_database(self.database)
+        self.assertEqual({path.name:path.read_bytes() for path in backup.iterdir()},old)
+        with closing(sqlite3.connect(self.database)) as conn:
+            state=dict(conn.execute('SELECT key,value FROM event_state'))
+        info=self.stream.stat()
+        self.assertEqual(json.loads(state['stream_cutoff']),dict(device=info.st_dev,inode=info.st_ino,offset=info.st_size))
+        self.assertEqual(self.stream.read_text(),'preserve-or-clear')
+        self.assertTrue(self.checkpoint.exists())
+        self.assertTrue(all(path.read_text()=='preserve-or-clear' for path in self.protected))
+
+    def test_database_reset_move_failure_preserves_unmoved_members(self):
+        before={path:path.read_bytes() for path in self.history}
+        original=Path.replace
+        def replace(path,target):
+            if path.name.endswith('-wal'):raise OSError('move failed')
+            return original(path,target)
+        with mock.patch.object(Path,'replace',replace):
+            with self.assertRaisesRegex(OSError,'move failed'):reset.reset_database(self.database)
+        self.assertEqual({path:path.read_bytes() for path in self.history},before)
+
+    def test_database_only_reset_never_stops_or_starts_detection_or_bridge(self):
+        job=self.queued();value=reset.status(self.state);value['scope']='database';reset.save(self.state,value)
+        with mock.patch.object(reset,'command',return_value=mock.Mock(stdout='0')) as command, \
+             mock.patch.object(reset,'active',return_value=True),mock.patch.object(reset,'web_ready',return_value=True), \
+             mock.patch.object(reset,'reset_database',return_value=self.web/'backup') as clear, \
+             mock.patch('ips_control.Client') as client:
+            client.return_value.request.return_value={'ok':True};reset.run(self.state,job)
+        clear.assert_called_once_with(self.database)
+        self.assertEqual(reset.status(self.state)['state'],'done')
+        service_calls=[c.args for c in command.call_args_list]
+        self.assertIn(('systemctl','stop','ips-web'),service_calls)
+        self.assertIn(('systemctl','start','ips-web'),service_calls)
+        self.assertFalse(any(unit in args[2:] for args in service_calls for unit in ('ips','ips-event-bridge')))
+
+    def test_database_creation_failure_restores_the_old_wal_group(self):
+        before={path:path.read_bytes() for path in self.history}
+        with mock.patch.object(reset.sqlite3,'connect',side_effect=OSError('create failed')):
+            with self.assertRaisesRegex(OSError,'create failed'):reset.reset_database(self.database)
+        self.assertEqual({path:path.read_bytes() for path in self.history},before)
 
 
 if __name__=='__main__':unittest.main()

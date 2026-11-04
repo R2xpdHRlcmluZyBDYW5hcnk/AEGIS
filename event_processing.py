@@ -16,6 +16,12 @@ def decode_bridge(argument):
             data = json.loads(line)
             if not isinstance(data,dict):
                 raise ValueError('Native event must be an object')
+            if not decoder and data.get('engine')=='quic_observer':
+                from quic_observer import normalized_event
+                if not normalized_event(data):raise ValueError('Invalid QUIC observation')
+                buffer.extend(json.dumps(data,ensure_ascii=False,separators=(',',':')).encode()+b'\n')
+                written+=1
+                continue
             if decoder:
                 if data.get('gid') != 116:
                     continue
