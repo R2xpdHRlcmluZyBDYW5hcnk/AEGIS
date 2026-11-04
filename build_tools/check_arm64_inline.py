@@ -56,7 +56,7 @@ def prepare():
     loader=root/'usr/lib/ld-linux-aarch64.so.1'
     if not loader.exists(): loader.symlink_to('aarch64-linux-gnu/ld-linux-aarch64.so.1')
     # Keep the project copy and runtime outside the source tree.
-    for name in ('snort.lua','ips-event-bridge','snort_engine.py','snort_rules.py','rule_policy.py','parallel_cpu.py','parallel_sql.py','event_processing.py','native_rules.py','rule_sources.py','rule_identity.py','rule_inventory.py','ips-web'):
+    for name in ('snort.lua','ips-event-bridge','snort_engine.py','snort_rules.py','rule_policy.py','parallel_cpu.py','parallel_sql.py','event_processing.py','native_rules.py','rule_sources.py','rule_identity.py','rule_inventory.py','log_storage.py','ips-web'):
         copy(ROOT/name,root/'project'/name)
     for name in ('check_snort_native.py','snort_pcap.py'):
         copy(ROOT/'tests'/name,root/'project/tests'/name)

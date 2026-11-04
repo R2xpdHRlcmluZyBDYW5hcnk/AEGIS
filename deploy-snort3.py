@@ -25,7 +25,7 @@ PROGRAM_DIR=Path('/opt/ips-console/bin')
 STATIC_DIR=Path('/usr/local/share/ips-snort-web')
 LAYOUT=Path('/etc/ips-snort-deployment.json')
 PROGRAMS=('ips-web','ips-supervisor','ips-rule-manager','ips-event-bridge','ips-snort-rules','ips-log-maintenance',
-          'ips_control.py','rule_drafts.py','snort_engine.py','snort_rules.py','rule_policy.py','parallel_cpu.py','parallel_sql.py','event_processing.py','native_rules.py','rule_sources.py','rule_identity.py','rule_inventory.py','runtime_status.py','history_reset.py','deployment_layout.py','snort-home-net')
+          'ips_control.py','rule_drafts.py','snort_engine.py','snort_rules.py','rule_policy.py','parallel_cpu.py','parallel_sql.py','event_processing.py','native_rules.py','rule_sources.py','rule_identity.py','rule_inventory.py','runtime_status.py','history_reset.py','log_storage.py','deployment_layout.py','snort-home-net')
 UNITS=('ips.service','ips-web.service','ips-rule-manager.service','ips-event-bridge.service',
        'snort-home-net.service','snort-home-net.timer','ips-log-maintenance.service','ips-log-maintenance.timer')
 ACTIVE_UNITS=('ips-web','ips-rule-manager','ips-event-bridge','ips')

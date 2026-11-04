@@ -4,6 +4,8 @@ import importlib.util
 import json
 from pathlib import Path
 import tempfile
+import subprocess
+import sys
 import unittest
 from unittest import mock
 
@@ -23,6 +25,14 @@ def table():
 
 
 class DeployNftCase(unittest.TestCase):
+    def test_standalone_stage_can_import_the_supervisor_generator(self):
+        with tempfile.TemporaryDirectory() as directory:
+            stage=Path(directory)
+            with mock.patch('builtins.print'):deployer.prepare(stage)
+            command='import pathlib,runpy; d=runpy.run_path("deploy-nft.py",run_name="fixture"); print(d["generated_rules"](pathlib.Path("ips-supervisor")))'
+            rules=subprocess.check_output([sys.executable,'-B','-c',command],cwd=stage,text=True)
+            self.assertIn('counter queue flags bypass to 0-3',rules)
+
     def test_source_changes_outside_generator_are_rejected(self):
         after = (ROOT / 'ips-supervisor').read_text(encoding='utf-8')
         before = after.replace('iifname "lo" return', 'iifname != { %(ifaces)s } return')

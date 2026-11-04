@@ -15,13 +15,13 @@ import tempfile
 import time
 import urllib.request
 from contextlib import closing
+from log_storage import log_paths, validate_log_storage
 
-NATIVE=Path('/var/log/snort')
+NATIVE,STREAM=log_paths()
 CHECKPOINT=Path('/var/lib/ips-event-bridge/offsets.json')
 BACKUPS=Path('/var/backups/ips-log-storage')
 ACTIVE=re.compile(r'[0-9]+_(?:file_connector_ndr_transmit|alert_json\.txt)')
 ARCHIVE=re.compile(ACTIVE.pattern+r'\.[0-9]+(?:\.gz)?')
-STREAM=Path('/var/log/ips/events.json')
 DATABASE=Path('/var/lib/ips-snort-web/snort-ndr.db')
 CONFIG=Path('/etc/ips-snort-web.conf')
 
@@ -154,6 +154,10 @@ def remove_snapshots():
         state_path=backup/'state.json'
         if not state_path.is_file():continue
         state=json.loads(state_path.read_text())
+        if state.get('mode')=='direct':
+            # These archives include covered logs and configuration rollback
+            # inputs; ordinary consumed-prefix cleanup must retain them.
+            continue
         if set(state.get('originals',{}))!={'/var/log/snort','/var/log/ips'}:raise ValueError('Unrecognized log snapshot')
         state['logs_removed']=True
         storage.private_json(state_path,state)
@@ -173,6 +177,7 @@ def main():
     args=parser.parse_args()
     if os.geteuid()!=0:raise SystemExit('Run as root')
     if not args.apply:raise SystemExit('Use --apply only after validating native event ingestion')
+    validate_log_storage()
     from ips_control import Client
     client=Client(timeout=3)
     if not client.request('ping').get('ready'):raise RuntimeError('Rule manager unavailable')

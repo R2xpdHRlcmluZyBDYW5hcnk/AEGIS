@@ -57,11 +57,13 @@ from native_rules import (builtin_catalog, LABELS as BUILTIN_LABELS, identity as
 from rule_identity import group_selector,parse_group,group_matches,group_policy_path
 from parallel_sql import ReadExecutor, fetch_many
 from parallel_cpu import shared_cpu, byte_batches
+from log_storage import log_paths
 
-EVE = "/var/log/ips/events.json"
+NATIVE_LOGS, EVENT_STREAM = log_paths()
+EVE = str(EVENT_STREAM)
 RULE_UPDATER = os.environ.get('IPS_PROGRAM_DIRECTORY','/usr/local/bin').rstrip('/')+'/ips-snort-rules'
-STATS_LOG = "/var/log/snort/stats.log"
-SNORT_LOG = "/var/log/snort/snort.log"
+STATS_LOG = str(NATIVE_LOGS / 'stats.log')
+SNORT_LOG = str(NATIVE_LOGS / 'snort.log')
 LOCAL_RULES = "/var/lib/snort/rules/local.rules"
 RULES_FILE = "/var/lib/snort/rules/snort.rules"
 SOURCES_DIR = "/var/lib/snort/update/sources"
@@ -3208,8 +3210,8 @@ class SysInfo:
             out["disk"] = {"total": usage.total, "used": usage.used, "free": usage.free}
         except OSError:
             pass
-        paths = [EVE, *glob.glob('/var/log/snort/*file_connector_ndr_transmit'),
-                 *glob.glob('/var/log/snort/*alert_json.txt')]
+        paths = [EVE, *glob.glob(str(NATIVE_LOGS / '*file_connector_ndr_transmit')),
+                 *glob.glob(str(NATIVE_LOGS / '*alert_json.txt'))]
         for path in paths[:128]:
             name = os.path.basename(path)
             try:
@@ -3221,7 +3223,7 @@ class SysInfo:
         return out
 
     def log_tail(self, name="snort.log", lines=40):
-        path = os.path.join("/var/log/snort", name)
+        path = os.path.join(str(NATIVE_LOGS), name)
         try:
             with open(path, "rb") as fh:
                 fh.seek(max(0, os.path.getsize(path) - 32 * 1024))

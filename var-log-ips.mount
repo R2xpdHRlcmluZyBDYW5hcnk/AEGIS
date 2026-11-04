@@ -1,6 +1,10 @@
 [Unit]
 Description=Persistent Snort console event stream
-RequiresMountsFor=/var/lib/ips-snort-logs
+DefaultDependencies=no
+RequiresMountsFor=/var/lib/ips-snort-logs /var/log
+After=local-fs.target armbian-zram-config.service armbian-ramlog.service
+Before=umount.target
+Conflicts=umount.target
 
 [Mount]
 What=/var/lib/ips-snort-logs/events
@@ -9,4 +13,4 @@ Type=none
 Options=bind
 
 [Install]
-WantedBy=local-fs.target
+WantedBy=multi-user.target

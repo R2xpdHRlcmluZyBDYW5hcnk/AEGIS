@@ -11,12 +11,13 @@ import shutil
 import subprocess
 import sys
 import time
+from log_storage import log_paths
 
 PROGRAM=Path('/opt/ips-console/bin')
 LIBRARY=Path('/opt/ips-native-response/1/libips-response.so')
 OVERRIDE=Path('/etc/systemd/system/ips.service.d/60-native-response.conf')
 BACKUPS=Path('/var/backups/ips-native-response')
-LOGS=Path('/var/log/snort')
+LOGS=log_paths()[0]
 CHECKPOINT=Path('/var/lib/ips-event-bridge/offsets.json')
 INSTANCE=Path('/run/snort/instance.json')
 PID=Path('/run/snort/snort.pid')
@@ -36,7 +37,7 @@ def verified(release):
     release=Path(release)
     manifest=json.loads((release/'manifest.json').read_text())
     if manifest.get('revision')!=1 or manifest.get('architecture')!='aarch64':raise ValueError('Unsupported response adapter')
-    if set(manifest['sha256'])!={'libips-response.so','native_response.c','deploy-native-response.py'}:raise ValueError('Unexpected response package files')
+    if set(manifest['sha256'])!={'libips-response.so','native_response.c','deploy-native-response.py','log_storage.py'}:raise ValueError('Unexpected response package files')
     for name,value in manifest['sha256'].items():
         path=release/name
         if path.is_symlink() or digest(path)!=value:raise ValueError('Response package digest mismatch')

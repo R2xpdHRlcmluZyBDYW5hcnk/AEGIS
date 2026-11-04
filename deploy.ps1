@@ -109,7 +109,7 @@ try {
         & ssh @options $Target "mkdir -p '$stage'"
         if ($LASTEXITCODE -ne 0) { throw 'Remote staging failed' }
         $stageReady = $true
-        & scp @options (Join-Path $destination 'ips-supervisor') (Join-Path $destination 'deploy-nft.py') (Join-Path $destination 'SHA256SUMS') ($Target + ':' + $stage + '/')
+        & scp @options (Join-Path $destination 'ips-supervisor') (Join-Path $destination 'log_storage.py') (Join-Path $destination 'deploy-nft.py') (Join-Path $destination 'SHA256SUMS') ($Target + ':' + $stage + '/')
         if ($LASTEXITCODE -ne 0) { throw 'NFQUEUE upload failed' }
         & ssh @options $Target "cd '$stage' && sha256sum --strict -c SHA256SUMS && python3 -B deploy-nft.py --release ."
         if ($LASTEXITCODE -ne 0) { throw 'NFQUEUE deployment or verification failed' }
@@ -176,7 +176,7 @@ try {
         $backendStep = "sha256sum -c '$engineFileName.sha256' && python3 snort-ndr/$engineDeployer --release snort-ndr --engine-package '$engineFileName' && "
     }
     $staticStep = if ($InstallSnort3 -or $UpdateEngine) { 'true' } else { 'bash snort-ndr/deploy.sh --web-only' }
-    if ($MigrateLogs) { $backendStep += 'python3 snort-ndr/deploy-log-storage.py --release snort-ndr && ' }
+    if ($MigrateLogs) { $backendStep = 'python3 snort-ndr/deploy-log-storage.py --release snort-ndr && ' + $backendStep }
     if ($RemoveLegacySuricata) { $staticStep += ' && python3 snort-ndr/cleanup-legacy-suricata.py --apply' }
     if ($ClearNativeLogs) { $staticStep += ' && python3 snort-ndr/cleanup-native-logs.py --apply'; if ($ClearEventStream) { $staticStep += ' --event-stream' } }
     & ssh @options $Target "cd '$stage' && sha256sum -c '$fileName.sha256' && tar -xzf '$fileName' && ${backendStep}$staticStep"

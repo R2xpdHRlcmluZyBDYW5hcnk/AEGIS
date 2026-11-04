@@ -171,7 +171,7 @@ def prepare(output):
         raise ValueError('Stage NFQUEUE releases outside the source directory')
     output.mkdir(parents=True, exist_ok=True)
     checksums = []
-    for name in ('ips-supervisor', 'deploy-nft.py'):
+    for name in ('ips-supervisor', 'log_storage.py', 'deploy-nft.py'):
         data = (root / name).read_bytes().removeprefix(b'\xef\xbb\xbf').replace(b'\r\n', b'\n')
         load_source(data)
         (output / name).write_bytes(data)

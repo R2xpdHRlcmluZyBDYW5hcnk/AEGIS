@@ -16,6 +16,7 @@ sys.dont_write_bytecode = True
 from snort_engine import record_kind,rule_metadata
 from parallel_cpu import shared_cpu
 from event_processing import decode_bridge
+from log_storage import log_paths, validate_log_storage
 
 
 def sparse_data_position(source,position):
@@ -203,15 +204,28 @@ class Bridge:
             if hasattr(results,'close'):results.close()
             if hasattr(batches,'close'):batches.close()
 
+    def drain(self):
+        """Consume a stopped writer's complete records through normal checkpoints."""
+        while True:
+            before=(self.epoch,copy.deepcopy(self.files))
+            self.poll()
+            if before==(self.epoch,self.files):return
+
 
 def main():
+    native, stream = log_paths()
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--logs', default='/var/log/snort')
-    parser.add_argument('--output', default='/var/log/ips/events.json')
+    parser.add_argument('--logs', default=str(native))
+    parser.add_argument('--output', default=str(stream))
     parser.add_argument('--checkpoint', default='/var/lib/ips-event-bridge/offsets.json')
     parser.add_argument('--instance', default='/run/snort/instance.json')
+    parser.add_argument('--drain',action='store_true',help='Drain a stopped source and exit')
     args = parser.parse_args()
+    validate_log_storage()
     bridge = Bridge(args.logs, args.output, args.checkpoint, args.instance)
+    if args.drain:
+        bridge.drain()
+        return 0
     running = True
     def stop(*_):
         nonlocal running

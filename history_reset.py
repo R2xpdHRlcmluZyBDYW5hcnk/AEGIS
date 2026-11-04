@@ -8,12 +8,12 @@ import secrets
 import subprocess
 import time
 import urllib.request
+from log_storage import log_paths, validate_log_storage
 
 STATE=Path('/var/lib/ips-snort-rule-manager')
 CONFIG=Path('/etc/ips-snort-web.conf')
 WEB_STATE=Path('/var/lib/ips-snort-web')
-NATIVE=Path('/var/log/snort')
-STREAM=Path('/var/log/ips/events.json')
+NATIVE,STREAM=log_paths()
 CHECKPOINT=Path('/var/lib/ips-event-bridge/offsets.json')
 NATIVE_NAMES=re.compile(r'(?:[0-9]+_)?(?:file_connector_ndr_transmit|alert_json\.txt|events?\.json)(?:\.[0-9]+(?:\.gz)?)?')
 STREAM_NAMES=re.compile(r'events\.json(?:\.[0-9]+(?:\.gz)?)?')
@@ -120,6 +120,7 @@ def run(directory,job):
         maintenance=client.request('history-reset-begin',job=job)
         if not maintenance.get('ok'):raise RuntimeError(maintenance.get('error','规则任务正在执行'))
         acquired=True
+        validate_log_storage()
         timers=[unit for unit in ('ips-log-maintenance.timer','snort-home-net.timer') if active(unit)]
         stream_info=STREAM.stat() if STREAM.exists() else None
         for unit in timers:command('systemctl','stop',unit)
@@ -142,7 +143,9 @@ def run(directory,job):
         while time.monotonic()<deadline:
             try:
                 SnortControl().command('show_config_generation()',timeout=2)
-                if active('ips-web') and active('ips-event-bridge') and web_ready():break
+                if active('ips-web') and active('ips-event-bridge') and web_ready():
+                    validate_log_storage()
+                    break
             except (OSError,RuntimeError,TimeoutError):pass
             time.sleep(.5)
         else:raise RuntimeError('重启后服务未就绪')

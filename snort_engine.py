@@ -11,13 +11,14 @@ import time
 import threading
 import os
 from parallel_cpu import shared_cpu, byte_batches
+from log_storage import log_paths
 
 PREFIX = os.environ.get('SNORT_ENGINE_PREFIX','/opt/ips-snort3/3.12.4.0')
 BINARY = PREFIX + '/bin/snort'
 CONFIG = '/etc/snort/snort.lua'
 SOCKET = '/run/snort/control.sock'
 RULES = '/var/lib/snort/rules/snort.rules'
-EVENTS = '/var/log/ips/events.json'
+EVENTS = str(log_paths()[1])
 _CONFIG_THREAD_LOCK = threading.RLock()
 
 

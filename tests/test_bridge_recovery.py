@@ -27,6 +27,15 @@ class BridgeRecoveryCase(unittest.TestCase):
 
     def rows(self):return [json.loads(line)['data'] for line in (self.root/'events.json').read_text().splitlines()]
 
+    def test_stopped_source_drain_crosses_rejected_batches_and_leaves_partial_tail(self):
+        raw=b'bad json\n'*80+self.record('recovered')+b'partial'
+        self.source.write_bytes(raw)
+        bridge=self.m.Bridge(*self.args);bridge.BATCH_BYTES=128;bridge.FILE_BYTES=128
+        bridge.drain()
+        self.assertEqual(self.rows(),[json.loads(self.record('recovered'))])
+        self.assertEqual(bridge.files[self.source.name]['offset'],len(raw)-len(b'partial'))
+        self.assertEqual(self.source.read_bytes(),raw)
+
     def test_bridge_carries_rule_grade_across_web_filesystem_isolation(self):
         raw=dict(ts=1700000000,uid=1,gid=1,sid=498,rev=11,msg='native reject',action='reset')
         self.source.write_text(json.dumps(raw)+'\n')

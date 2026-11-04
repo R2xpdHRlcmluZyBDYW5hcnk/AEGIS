@@ -77,6 +77,30 @@ class HistoryResetTests(unittest.TestCase):
         self.assertIn('ips-web',recover.call_args.args[0])
         client.return_value.request.assert_any_call('history-reset-finish',job=job)
 
+    def test_covered_storage_is_rejected_before_stopping_writers_or_removing_history(self):
+        job=self.queued()
+        with mock.patch.object(reset,'validate_log_storage',side_effect=RuntimeError('covered storage')), \
+             mock.patch.object(reset,'command') as command,mock.patch.object(reset,'remove_history_files') as remove, \
+             mock.patch('ips_control.Client') as client:
+            client.return_value.request.return_value={'ok':True}
+            with self.assertRaisesRegex(RuntimeError,'covered storage'):reset.run(self.state,job)
+        command.assert_not_called();remove.assert_not_called()
+        self.assertTrue(all(path.exists() for path in self.history))
+        self.assertEqual(reset.status(self.state)['state'],'failed')
+        client.return_value.request.assert_any_call('history-reset-finish',job=job)
+
+    def test_repeated_resets_keep_settings_and_validate_storage_each_time(self):
+        with mock.patch.object(reset,'command',return_value=mock.Mock(stdout='0')), \
+             mock.patch.object(reset,'active',return_value=True),mock.patch.object(reset,'web_ready',return_value=True), \
+             mock.patch.object(reset,'validate_log_storage') as validate,mock.patch('ips_control.Client') as client, \
+             mock.patch('snort_engine.SnortControl'),mock.patch.object(reset.os,'chown',create=True):
+            client.return_value.request.return_value={'ok':True}
+            for _ in range(2):
+                reset.run(self.state,self.queued())
+                self.assertEqual(reset.status(self.state)['state'],'done')
+        self.assertEqual(validate.call_count,4)
+        self.assertTrue(all(path.read_text()=='preserve-or-clear' for path in self.protected))
+
     def test_queue_serializes_rule_jobs_and_requires_root_to_finish(self):
         case=fixture.ManagerCase();case.setUp();self.addCleanup(case.doCleanups)
         manager=case.manager

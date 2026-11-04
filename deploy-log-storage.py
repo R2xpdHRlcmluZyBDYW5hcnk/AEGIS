@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Transactional migration of native logs to a larger persistent volume."""
 import argparse
+import ast
 from contextlib import closing
 import datetime
 import hashlib
@@ -110,7 +111,7 @@ def bridge_drained(paths,state):
     return True
 
 
-def stop_services(config):
+def stop_services(config,drain=True):
     run('systemctl','stop','ips-log-maintenance.timer','ips-log-maintenance.service','snort-home-net.timer')
     instance=Path('/run/snort/instance.json')
     generation=json.loads(instance.read_text())
@@ -118,6 +119,11 @@ def stop_services(config):
     # RuntimeDirectory is removed when the detector stops. Retain its last epoch
     # long enough for the normal collector to drain the closed native log files.
     private_json(instance,generation)
+    if not drain:
+        # A full source volume cannot accept the bridge's output. Stop its
+        # writers and replay from verified copies on the destination instead.
+        run('systemctl','stop','ips-event-bridge','ips-web','ips-rule-manager')
+        return generation
     # The detector is stopped; the normal bridge drains its existing log files.
     deadline=time.monotonic()+30
     while time.monotonic()<deadline:
@@ -141,6 +147,30 @@ def stop_services(config):
     else:raise RuntimeError('Console did not finish its production event queue')
     # Web shutdown flushes its current batch before releasing the database.
     run('systemctl','stop','ips-web','ips-rule-manager')
+    return generation
+
+
+def drain_preserved_logs(release,backup,generation):
+    instance=backup/'stopped-instance.json';private_json(instance,generation)
+    preserved=backup/('visible-'+LOGS[0].name)
+    if CHECKPOINT.exists():
+        state=json.loads(CHECKPOINT.read_text())
+        if state.get('epoch')==generation['epoch']:
+            for name,position in state.get('files',{}).items():
+                if Path(name).name!=name:raise ValueError('Invalid bridge checkpoint filename')
+                source=LOGS[0]/name;copied=preserved/name
+                if source.is_file() and copied.is_file() and position.get('inode')==source.stat().st_ino:
+                    position['inode']=copied.stat().st_ino
+            private_json(CHECKPOINT,state)
+    run(sys.executable,'-B',str(release/'ips-event-bridge'),'--drain',
+        '--logs',str(preserved),
+        '--output',str(ROOT/'events/events.json'),'--checkpoint',str(CHECKPOINT),
+        '--instance',str(instance))
+    state=json.loads(CHECKPOINT.read_text()).get('files',{})
+    paths=list(preserved.glob('*file_connector_ndr_transmit'))
+    paths+=list(preserved.glob('*alert_json.txt'))
+    paths=[p for p in paths if p.stat().st_mtime>=generation['started'] and p.stat().st_size]
+    if not bridge_drained(paths,state):raise RuntimeError('Preserved native log queue did not finish')
 
 
 def resume(state):
@@ -153,6 +183,8 @@ def rollback(backup):
     backup=Path(backup).resolve()
     if backup.parent!=BACKUPS.resolve():raise ValueError('Rollback must use a migration backup')
     state=json.loads((backup/'state.json').read_text())
+    if state.get('mode')=='direct':
+        return rollback_direct(backup,state)
     run('systemctl','stop','ips-log-maintenance.timer','ips-log-maintenance.service','snort-home-net.timer',*reversed(SERVICES))
     for mount in reversed(MOUNTS):
         subprocess.run(['systemctl','stop',mount],check=False,capture_output=True)
@@ -189,8 +221,13 @@ def rollback(backup):
 def apply(release):
     release=Path(release).resolve()
     if MARKER.exists():
-        if not all(os.path.ismount(path) for path in LOGS):raise RuntimeError('Persistent log mount is unavailable')
-        print(json.dumps(dict(log_storage_unchanged=True)));return
+        current=json.loads(MARKER.read_text())
+        if current.get('root')!=str(ROOT):raise RuntimeError('Unexpected persistent log root')
+        if current.get('direct_paths'):
+            from log_storage import validate_log_storage
+            validate_log_storage()
+            print(json.dumps(dict(log_storage_unchanged=True)));return
+        return apply_direct(release)
     if ROOT.exists():raise RuntimeError('Persistent log directory already exists; inspect prior migration first')
     fs=run('findmnt','--noheadings','--output','FSTYPE','--target',str(ROOT.parent)).strip()
     if fs in ('tmpfs','ramfs'):raise ValueError('Persistent log destination is memory-backed')
@@ -219,7 +256,7 @@ def apply(release):
     private_json(backup/'state.json',state)
     shutil.copy2(Path(__file__),backup/'deploy-log-storage.py')
     # Rollback's imports must survive removal of the deployment staging directory.
-    for name in ('ips_control.py','deployment_layout.py','deploy-backend.py'):
+    for name in ('ips_control.py','deployment_layout.py','deploy-backend.py','log_storage.py'):
         shutil.copy2(release/name,backup/name)
     script=backup/'rollback.sh'
     script.write_text('#!/bin/sh\nset -eu\nexec python3 -B '+str(backup/'deploy-log-storage.py')+' --rollback '+str(backup)+'\n');script.chmod(0o700)
@@ -245,7 +282,7 @@ def apply(release):
             path.write_text('[Unit]\nRequiresMountsFor=/var/log/snort /var/log/ips\n')
         timer=UNIT_ROOT/'ips-log-maintenance.timer.d/60-log-storage.conf';timer.parent.mkdir(parents=True,exist_ok=True)
         timer.write_text('[Timer]\nOnBootSec=\nOnBootSec=1min\nOnUnitActiveSec=\nOnUnitActiveSec=1min\nAccuracySec=10s\n')
-        shutil.copy2(release/'logrotate-snort',ROTATION)
+        ROTATION.write_text(rotation_text(release))
         run('systemctl','daemon-reload');run('systemctl','enable',*MOUNTS);run('systemctl','start',*MOUNTS)
         if not all(os.path.ismount(path) for path in LOGS):raise RuntimeError('Persistent log bind mount failed')
         run('logrotate','--debug',str(ROTATION))
@@ -265,6 +302,170 @@ def apply(release):
         print(json.dumps(dict(log_storage_migrated=True,root=str(ROOT),backup=str(backup))))
     except BaseException:
         rollback(backup);raise
+    finally:
+        try:Client().request('maintenance',enabled=False)
+        except OSError:pass
+
+
+def rotation_text(release):
+    return (Path(release)/'logrotate-snort').read_text().replace(
+        '/var/log/snort/',str(ROOT/'snort')+'/').replace('/var/log/ips/',str(ROOT/'events')+'/')
+
+
+def repair_programs(release):
+    spec=importlib.util.spec_from_file_location('log_repair_modules',Path(release)/'deploy-native-backend.py')
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    return (*module.PROGRAMS,'ips-supervisor')
+
+
+def external_updater(program_dir):
+    """Keep an existing independent updater entry point without copying its code."""
+    source=Path(program_dir)/'snort_rules.py'
+    if not source.is_file():return None
+    for node in ast.parse(source.read_bytes()).body:
+        if not isinstance(node,ast.Assign) or not any(isinstance(t,ast.Name) and t.id=='PULLEDPORK' for t in node.targets):continue
+        value=node.value
+        if isinstance(value,ast.Call) and isinstance(value.func,ast.Name) and value.func.id=='Path' and value.args and isinstance(value.args[0],ast.Constant):
+            path=Path(value.args[0].value)
+            if path.is_absolute() and path.name=='pulledpork.py' and path.is_file():return path
+    return None
+
+
+def direct_overrides(updater=None):
+    common='[Unit]\nRequiresMountsFor=\nRequiresMountsFor='+str(ROOT)+'\n[Service]\nEnvironment=IPS_LOG_STORAGE_ROOT='+str(ROOT)+'\n'
+    result={
+        'ips':common+'ReadWritePaths=\nReadWritePaths=/var/lib/snort/rules '+str(ROOT/'snort')+' /run/snort /etc/snort\n',
+        'ips-event-bridge':common+'LogsDirectory=\nReadOnlyPaths=\nReadOnlyPaths='+str(ROOT/'snort')+' /run/snort\nReadWritePaths=\nReadWritePaths='+str(ROOT/'events')+'\n',
+        'ips-web':common+'ReadOnlyPaths=\nReadOnlyPaths='+str(ROOT/'events')+'\n',
+        'ips-rule-manager':common+'ReadWritePaths=\nReadWritePaths=/var/lib/snort /etc/snort '+str(ROOT/'snort')+'\n',
+        'ips-log-maintenance':common,
+    }
+    if updater is not None:
+        result['ips-rule-manager']+='Environment='+json.dumps('IPS_PULLEDPORK='+str(updater)).replace('%','%%')+'\n'
+    return result
+
+
+def install_private(source,target,mode):
+    target=Path(target)
+    if target.is_symlink():raise ValueError('Refusing linked managed file')
+    target.parent.mkdir(parents=True,exist_ok=True)
+    staged=target.with_name(target.name+'.log-new')
+    try:
+        shutil.copy2(source,staged);staged.chmod(mode);staged.replace(target)
+    finally:staged.unlink(missing_ok=True)
+
+
+def rollback_direct(backup,state):
+    run('systemctl','stop','ips-log-maintenance.timer','ips-log-maintenance.service','snort-home-net.timer',*reversed(SERVICES))
+    # Restarting file_connector opens fresh files, including after an early
+    # shutdown failure. Preserve the stopped source before any restart.
+    native_backup=backup/('visible-'+LOGS[0].name)
+    if not native_backup.exists():copy_verified(LOGS[0],native_backup)
+    for name in state['moved']:
+        current=ROOT/name
+        if current.exists():
+            saved=backup/('failed-generated-'+name)
+            if saved.exists():raise RuntimeError('Rollback log destination already exists')
+            current.rename(saved)
+        (backup/('persistent-before-'+name)).rename(current)
+    for target,saved in state['files'].items():
+        path=Path(target)
+        if saved is None:path.unlink(missing_ok=True)
+        else:install_private(backup/saved,path,0o600 if path in (MARKER,CHECKPOINT) or str(path)==state['config_path'] else 0o644)
+    for name,saved in state['programs'].items():
+        target=Path(state['program_dir'])/name
+        if saved is None:target.unlink(missing_ok=True)
+        else:install_private(backup/saved,target,0o644 if name.endswith('.py') else 0o755)
+    if 'cutoff_before' in state:cutoff(state['database'],state['cutoff_before'],write=True)
+    run('systemctl','daemon-reload');resume(state)
+    healthy(state['config'])
+    print(json.dumps(dict(log_storage_rollback=True,backup=str(backup),logs_preserved=True)))
+
+
+def apply_direct(release):
+    """Preserve both visible and covered logs, then stop depending on /var/log aliases."""
+    release=Path(release).resolve()
+    current=json.loads(MARKER.read_text())
+    if current.get('root')!=str(ROOT) or ROOT.is_symlink():raise ValueError('Unexpected persistent log root')
+    if run('findmnt','--noheadings','--output','FSTYPE','--target',str(ROOT)).strip() in ('tmpfs','ramfs'):
+        raise ValueError('Persistent log destination is memory-backed')
+    destinations=(ROOT/'snort',ROOT/'events')
+    for path in (*LOGS,*destinations):
+        if path.is_symlink() or not path.is_dir():raise ValueError('Unexpected log directory')
+    if any(path.stat().st_dev!=BACKUPS.parent.stat().st_dev for path in destinations):
+        raise ValueError('Persistent log archive must share a filesystem with its source')
+    required=sum(p.stat().st_size for base in LOGS for p in base.rglob('*') if p.is_file())*2+(256<<20)
+    if shutil.disk_usage(ROOT).free<required:raise ValueError('Insufficient space for verified log preservation')
+    programs=repair_programs(release)
+    for name in programs:compile((release/name).read_bytes(),name,'exec')
+    layout_value=layout();program_dir=Path(layout_value['program_dir']);config_path=Path(layout_value['config'])
+    config=json.loads(config_path.read_text())
+    overrides=direct_overrides(external_updater(program_dir))
+    targets=[MARKER,ROTATION,config_path,CHECKPOINT,*[UNIT_ROOT/name for name in MOUNTS]]
+    targets += [UNIT_ROOT/(name+'.service.d')/'65-direct-log-storage.conf' for name in overrides]
+    token='direct-'+datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+    backup=BACKUPS/token;backup.mkdir(parents=True,mode=0o700)
+    state=dict(mode='direct',config=config,config_path=str(config_path),program_dir=str(program_dir),
+               database=config['event_db'],files={},programs={},moved=[],timers={})
+    for timer in ('ips-log-maintenance.timer','snort-home-net.timer'):
+        state['timers'][timer]=subprocess.run(['systemctl','is-active','--quiet',timer]).returncode==0
+    for index,path in enumerate(targets):
+        saved='file-'+str(index) if path.exists() else None
+        if saved:shutil.copy2(path,backup/saved);(backup/saved).chmod(0o600)
+        state['files'][str(path)]=saved
+    for index,name in enumerate(programs):
+        source=program_dir/name;saved='program-'+str(index) if source.exists() else None
+        if saved:shutil.copy2(source,backup/saved)
+        state['programs'][name]=saved
+    for name in ('deploy-log-storage.py','ips_control.py','deployment_layout.py','deploy-backend.py','log_storage.py'):
+        shutil.copy2(release/name,backup/name)
+    private_json(backup/'state.json',state)
+    script=backup/'rollback.sh'
+    script.write_text('#!/bin/sh\nset -eu\nexec python3 -B '+str(backup/'deploy-log-storage.py')+' --rollback '+str(backup)+'\n');script.chmod(0o700)
+    client=Client();paused=client.request('maintenance',enabled=True)
+    if not paused.get('ok'):raise RuntimeError('Rule manager is busy')
+    stopping=False
+    try:
+        if config_path.read_bytes()!=(backup/state['files'][str(config_path)]).read_bytes():
+            raise RuntimeError('Console configuration changed during log repair preparation')
+        stopping=True
+        generation=stop_services(config,drain=False)
+        # Capture the final checkpoint only after the bridge has stopped.
+        saved=state['files'][str(CHECKPOINT)]
+        if CHECKPOINT.exists():
+            if saved is None:saved='stopped-checkpoint';state['files'][str(CHECKPOINT)]=saved
+            shutil.copy2(CHECKPOINT,backup/saved);(backup/saved).chmod(0o600)
+        for path in LOGS:copy_verified(path,backup/('visible-'+path.name))
+        state['cutoff_before']=cutoff(state['database'])
+        original_stream=(LOGS[1]/'events.json').stat()
+        private_json(backup/'state.json',state)
+        for path in destinations:
+            path.rename(backup/('persistent-before-'+path.name));state['moved'].append(path.name)
+            private_json(backup/'state.json',state)
+        (ROOT/'snort').mkdir(mode=0o755)
+        copy_verified(backup/('visible-'+LOGS[1].name),ROOT/'events')
+        before=state['cutoff_before'];value=json.loads(before['value']) if before['exists'] else None
+        if value:
+            value=translate_cutoff(value,original_stream,(ROOT/'events/events.json').stat())
+            cutoff(state['database'],dict(exists=True,value=json.dumps(value)),write=True)
+        for name in programs:install_private(release/name,program_dir/name,0o644 if name.endswith('.py') else 0o755)
+        updated=dict(config,eve=str(ROOT/'events/events.json'))
+        private_json(config_path,updated)
+        for name,text in overrides.items():
+            path=UNIT_ROOT/(name+'.service.d')/'65-direct-log-storage.conf'
+            path.parent.mkdir(parents=True,exist_ok=True);path.write_text(text)
+        for name in MOUNTS:shutil.copy2(release/name,UNIT_ROOT/name)
+        ROTATION.write_text(rotation_text(release))
+        private_json(MARKER,dict(current,root=str(ROOT),direct_paths=True,backup=str(backup)))
+        run('systemctl','daemon-reload')
+        run('logrotate','--debug',str(ROTATION))
+        drain_preserved_logs(release,backup,generation)
+        resume(state);healthy(updated)
+        (backup/'complete').write_text('Direct persistent logging active; visible and covered logs preserved\n')
+        print(json.dumps(dict(log_storage_repaired=True,direct_paths=True,backup=str(backup),logs_preserved=True)))
+    except BaseException:
+        if stopping:rollback_direct(backup,state)
+        raise
     finally:
         try:Client().request('maintenance',enabled=False)
         except OSError:pass
