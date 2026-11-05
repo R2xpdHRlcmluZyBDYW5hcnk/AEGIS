@@ -81,6 +81,15 @@ class DataLayerCase(unittest.TestCase):
             result=pool.submit(self.app.database_stats).result(2)
         self.assertEqual(result['rows'],1)
 
+    def test_unreadable_statistics_attachment_is_not_reported_as_event_db_corruption(self):
+        path = self.root / 'broken-projection.db'
+        path.write_bytes(b'not a SQLite database' * 10)
+        self.db.analytics = types.SimpleNamespace(path=str(path),ready=True,generation=self.db.network_generation,error='')
+        with self.assertRaises(sqlite3.Error):
+            self.service.execute(lambda reader:reader.db.conn.execute('SELECT 1').fetchone())
+        self.assertIn('读取统计索引失败', self.db.analytics.error)
+        self.assertFalse(self.db.read_health)
+
     def test_clear_invalidates_already_running_security_responses(self):
         entered=threading.Event();release=threading.Event()
         def incidents(reader,params):

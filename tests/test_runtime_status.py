@@ -7,7 +7,6 @@ import json
 from pathlib import Path
 import threading
 import time
-import types
 import unittest
 from unittest import mock
 
@@ -38,7 +37,8 @@ class RuntimeStatusCase(unittest.TestCase):
         app.config=dict(web.DEFAULT_CONFIG,read_workers=2);app.started=web.now()
         app.db=web.EventDB(str(self.fixture.base/'events.db'));self.addCleanup(app.db.conn.close)
         app.cache=web.SharedCache(1<<20);app.store=web.EventStore(web.EVE);app.store.db=app.db
-        app.sys=web.SysInfo();app.network=types.SimpleNamespace(get=lambda *a,**kw:{})
+        app.sys=web.SysInfo();app.network=web.NetworkSnapshots(app.db,cache=app.cache)
+        app.analytics=web.StoredNetworkStats(app.db)
         app.sessions=web.Sessions(3600);token=app.sessions.create('fixture','127.0.0.1')
         app.data=web.DataService(app,app.cache);self.addCleanup(app.data.close)
         raw=dict(timestamp=web.iso(web.now()),event_type='alert',src_ip='192.0.2.1',dest_ip='198.51.100.1',

@@ -228,6 +228,31 @@ class NetworkSnapshotTests(unittest.TestCase):
             self.assertIsNone(failed['records'])
             self.assertIn('fixture error', failed['error'])
 
+    def test_system_health_separates_read_corruption_from_ingestion_and_queue_state(self):
+        app = backend.App.__new__(backend.App)
+        app.db, app.network = self.db, self.cache
+        app.analytics = types.SimpleNamespace(ready=False,error='')
+        app.store = types.SimpleNamespace(path=self.db.path,offset=Path(self.db.path).stat().st_size,last_error='')
+        queue = dict(listeners_known=True, queues=[dict(id=i) for i in (1,2,3)])
+        def health():
+            return {item['id']:item for item in app.component_health(dict(state='active',pid=123),queue,{})}
+
+        error = sqlite3.DatabaseError('database disk image is malformed')
+        error.sqlite_errorcode = sqlite3.SQLITE_CORRUPT
+        self.add()
+        with mock.patch.object(backend.EventDB,'compute_network_summary',side_effect=error):
+            self.cache.start()
+            self.wait_for(lambda:self.get()['status']=='error')
+            status=health()
+            self.assertEqual(status['event-read']['state'],'error')
+            self.assertEqual(status['network']['state'],'error')
+            self.assertEqual(status['ingest']['state'],'ok')
+            self.assertEqual(status['nfqueue']['message'],'缺少监听的队列 0')
+        self.advance()
+        self.wait_for(lambda:self.get()['status']=='ready')
+        self.assertEqual(health()['network']['state'],'ok')
+        self.assertEqual(health()['event-read']['state'],'error','a narrower successful read cannot certify integrity')
+
     def test_database_clear_discards_cached_and_inflight_results(self):
         self.add()
         captured, release = threading.Event(), threading.Event()

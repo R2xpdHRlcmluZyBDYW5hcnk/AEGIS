@@ -61,6 +61,14 @@ try {
  await evaluate(`fetch('/__test/release-reload',{method:'POST',headers:{'X-Requested-With':'ips-web'}}).then(r=>r.json())`);
  await until(`document.querySelector('.job-log')?.textContent.includes('规则已校验并完成热重载')`);
  await nav('system');await until(`!!document.querySelector('ndr-system .system-grid')&&!document.querySelector('ndr-system .telemetry-status')`);
+ if(process.env.NDR_PREVIEW_COMPONENT_HEALTH==='1'){
+  await nav('overview');await click('查看组件健康 ↗');
+  await until(`location.hash==='#system'&&document.querySelector('.component-health [data-component="network"]')?.textContent.includes('malformed')`);
+  assert.equal(await evaluate(`document.querySelector('[data-component="event-read"] .badge').textContent.trim()`),'异常');
+  assert.equal(await evaluate(`document.querySelector('[data-component="ingest"] .badge').textContent.trim()`),'正常');
+  assert.equal(await evaluate(`document.querySelector('.component-health h2').textContent.trim()`),'组件健康');
+  console.log('PASS: overview error links to component health, separating event database reads, statistics, and ingestion');
+ }
  assert.deepEqual(exceptions,[]);
  console.log('PASS: blocked native reload leaves system, overview, history and job status navigable; sampling timestamp visible and fresh sampling resumes');
 } finally {

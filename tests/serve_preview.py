@@ -280,6 +280,13 @@ if network_delay:
             raise RuntimeError('Preview stopped')
         return network_compute(*args)
     app.network._compute = delayed_network
+if os.environ.get('NDR_PREVIEW_COMPONENT_HEALTH') == '1':
+    def malformed_events(*_args, **_kwargs):
+        error = m.sqlite3.DatabaseError('database disk image is malformed')
+        error.sqlite_errorcode = m.sqlite3.SQLITE_CORRUPT
+        raise error
+    app.analytics.summary = lambda *_args, **_kwargs: None
+    m.EventDB.compute_network_summary = staticmethod(malformed_events)
 app.network.start()
 m.Handler.app, m.Handler.config = app, cfg
 class PreviewHandler(m.Handler):
