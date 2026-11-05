@@ -57,6 +57,7 @@ try {
  await nav('hunt');await until(`!!document.querySelector('ndr-events tbody tr')`);
  assert.equal((await api('/api/actions/status')).state,'running','navigation must finish before releasing reload');
  await nav('rules');await until(`document.querySelector('.rule-summary')?.textContent.includes('规则校验与应用中')`);
+ await click('操作日志',`document.querySelector('ndr-rules .tabs')`);
  await evaluate(`fetch('/__test/release-reload',{method:'POST',headers:{'X-Requested-With':'ips-web'}}).then(r=>r.json())`);
  await until(`document.querySelector('.job-log')?.textContent.includes('规则已校验并完成热重载')`);
  await nav('system');await until(`!!document.querySelector('ndr-system .system-grid')&&!document.querySelector('ndr-system .telemetry-status')`);

@@ -11,12 +11,24 @@ import { RuleEditorComponent } from '../rule-editor.component';
 import { ModalComponent } from '../modal.component';
 import { RuleCollectionComponent, RuleSelection } from '../rule-collection.component';
 @Component({changeDetection:ChangeDetectionStrategy.Eager,selector:'ndr-rules',standalone:true,imports:[TabMotionDirective,CommonModule,FormsModule,TableComponent,PickerComponent,SourceEditorComponent,RuleEditorComponent,ModalComponent,RuleCollectionComponent],template:`
- <div class="rule-summary"><div><p class="muted">{{summary?.ruleset?.rules_loaded_source==='rule_files'?'配置文本规则':'已载入'}} {{!summary?'读取中':summary?.ruleset?.rules_loaded==null?'未提供':(summary.ruleset.rules_loaded | number)}} 失败 {{!summary?'读取中':summary?.ruleset?.rules_failed==null?'未提供':(summary.ruleset.rules_failed | number)}} {{!summary?'读取中':summary?.ruleset?.error?'引擎状态不可用':(jobBusy||summary?.reload?.state==='running')?'规则校验与应用中':summary?.reload?.ok===false?'上次应用失败，请查看任务日志':'引擎就绪'}}</p></div><div class="toolbar"><button class="quiet" (click)="refresh()" [disabled]="busy">↻ 刷新</button><button (click)="job('apply')" [disabled]="jobBusy">应用更改 →</button></div></div>
- <div ndrTabMotion class="tabs" role="tablist" aria-label="规则管理"><button *ngFor="let t of tabs;let i=index" role="tab" [attr.aria-selected]="tab===t.id" [attr.tabindex]="tab===t.id?0:-1" [class.active]="tab===t.id" (click)="change(t.id)" (keydown)="tabKey($event,i)">{{t.title}}</button></div>
+ <div class="rule-summary"><div><p class="muted">{{summary?.ruleset?.rules_loaded_source==='rule_files'?'配置文本规则':'已载入'}} {{!summary?'读取中':summary?.ruleset?.rules_loaded==null?'未提供':(summary.ruleset.rules_loaded | number)}} 失败 {{!summary?'读取中':summary?.ruleset?.rules_failed==null?'未提供':(summary.ruleset.rules_failed | number)}} {{!summary?'读取中':summary?.ruleset?.error?'引擎状态不可用':(jobBusy||summary?.reload?.state==='running')?'规则校验与应用中':summary?.reload?.ok===false?'上次应用失败，请查看操作日志':'引擎就绪'}}</p></div><div class="toolbar"><button class="quiet" (click)="refreshCurrent()" [disabled]="busy">↻ 刷新</button><button (click)="job('apply')" [disabled]="jobBusy">应用更改 →</button></div></div>
+ <div ndrTabMotion class="tabs" role="tablist" aria-label="规则管理"><button *ngFor="let t of tabs;let i=index" role="tab" [id]="'rule-tab-'+t.id" [attr.aria-selected]="tab===t.id" [attr.tabindex]="tab===t.id?0:-1" [class.active]="tab===t.id" (click)="change(t.id)" (keydown)="tabKey($event,i)">{{t.title}}</button></div>
  <div class="pending-rules warning" role="status" *ngIf="summary?.pending"><span>有待应用的更改，点击“应用更改”后生效</span><button class="quiet" [disabled]="mutating||jobBusy" (click)="discardPending()">放弃待应用更改</button></div>
  <p class="error" *ngIf="error" role="alert">{{error}}</p>
- <section class="card" *ngIf="jobStatus"><header><h2>{{jobStatus.kind==='reload'?'规则重载':jobStatus.kind==='manual-add'?'手动规则应用':jobStatus.kind==='apply'?'规则应用':'规则更新'}} {{jobStatus.state}}</h2><span class="badge">{{jobStatus.rc==null?'执行中':'退出码 '+jobStatus.rc}}</span></header><pre class="job-log">{{(jobStatus.lines || []).join('\n')}}</pre></section>
- <section class="card rules-list"><header><h2>{{title}}</h2><div class="toolbar">
+ <div *ngIf="tab==='jobs'" role="tabpanel" aria-labelledby="rule-tab-jobs">
+  <p class="error" role="alert" *ngIf="jobError">{{jobError}}</p>
+  <ng-container *ngTemplateOutlet="jobOutput; context:{$implicit:latestJob,title:jobTitle}"></ng-container>
+  <ng-container *ngTemplateOutlet="jobOutput; context:{$implicit:previousScheduledJob,title:'最近定时更新'}"></ng-container>
+  <section class="card" *ngIf="!jobError&&!latestJob&&!previousScheduledJob"><p class="muted empty">{{!jobStatus||busy?'正在读取操作日志…':'暂无规则操作日志'}}</p></section>
+ </div>
+ <ng-template #jobOutput let-status let-title="title">
+  <section class="card" *ngIf="status">
+   <header><div><h2>{{title}}</h2><small class="muted" *ngIf="status.started">{{dt(status.started)}}</small></div><span class="badge">{{status.state==='running'?'执行中':status.rc==null?'已中断':'退出码 '+status.rc}}</span></header>
+   <pre class="job-log" tabindex="0" [attr.aria-label]="title+'输出'" *ngIf="status.lines?.length;else noJobOutput">{{status.lines.join('\n')}}</pre>
+   <ng-template #noJobOutput><p class="muted">{{status.state==='running'?'等待任务输出…':'没有命令输出'}}</p></ng-template>
+  </section>
+ </ng-template>
+ <section class="card rules-list" *ngIf="tab!=='jobs'"><header><h2>{{title}}</h2><div class="toolbar">
   <button class="quiet" *ngIf="tab==='manual'" (click)="editor=true">＋ 手动规则</button><button *ngIf="['disable','action','suppress'].includes(tab)" (click)="openPicker(tab)">＋ 新建</button><button *ngIf="tab==='bans'" (click)="banModal=true">＋ 封禁</button>
   <button *ngIf="tab==='sources'" (click)="sourceEditor={source:null}">＋ 添加规则源</button><button class="quiet" *ngIf="tab==='sources'" (click)="job('update')" [disabled]="jobBusy">更新规则集 ↗</button>
  </div></header>
@@ -26,7 +38,7 @@ import { RuleCollectionComponent, RuleSelection } from '../rule-collection.compo
  <ndr-table [id]="'rules-'+tab" [columns]="columns" [rows]="rows" keyField="_key" [filterable]="true" [serverFilter]="tab==='catalog'" [(searchValue)]="query" (searchRequested)="refresh(false,0,$event)" [selectable]="true" [selected]="selected" (selectedChange)="selected=$event" [interactive]="true" (rowOpen)="openRow($event)" [total]="tab==='catalog'?total:null" [offset]="offset" [busy]="busy" (pageChange)="refresh(false,$event)"/>
  </section>
  <p class="muted" *ngIf="tab==='sources'&&summary?.sources_pending">规则源更改待应用。点击“更新规则集”下载所选来源，再点击“应用更改”启用；应用更改只处理本地规则。</p>
- <section class="card" *ngIf="tab==='sources'"><header><div><h2>定时更新</h2></div><span class="muted">路由器时区：{{schedule?.timezone}}</span></header><form (ngSubmit)="saveSchedule()" class="schedule-form" *ngIf="schedule"><fieldset [disabled]="scheduleSaving"><label class="checkbox-label"><input type="checkbox" name="enabled" [(ngModel)]="schedule.enabled">启用定时更新</label><label>频率<select name="frequency" [(ngModel)]="schedule.frequency"><option value="daily">每天</option><option value="weekly">每周</option></select></label><label *ngIf="schedule.frequency==='weekly'">星期<select name="weekday" [(ngModel)]="schedule.weekday"><option *ngFor="let day of weekdays;let i=index" [ngValue]="i">{{day}}</option></select></label><label>路由器本地时间<input name="time" type="time" required [(ngModel)]="schedule.time"></label><button type="submit">{{scheduleSaving?'保存中…':'保存计划'}}</button></fieldset></form><p class="muted">{{schedule?.enabled?'下次执行：'+schedule?.next_run_local:'定时更新已关闭'}} 最近执行：{{schedule?.last_started_local || '暂无'}}</p><pre *ngIf="schedule?.last_run?.lines?.length">{{schedule.last_run.lines.join('\n')}}</pre></section>
+ <section class="card" *ngIf="tab==='sources'"><header><div><h2>定时更新</h2></div><span class="muted">路由器时区：{{schedule?.timezone}}</span></header><form (ngSubmit)="saveSchedule()" class="schedule-form" *ngIf="schedule"><fieldset [disabled]="scheduleSaving"><label class="checkbox-label"><input type="checkbox" name="enabled" [(ngModel)]="schedule.enabled">启用定时更新</label><label>频率<select name="frequency" [(ngModel)]="schedule.frequency"><option value="daily">每天</option><option value="weekly">每周</option></select></label><label *ngIf="schedule.frequency==='weekly'">星期<select name="weekday" [(ngModel)]="schedule.weekday"><option *ngFor="let day of weekdays;let i=index" [ngValue]="i">{{day}}</option></select></label><label>路由器本地时间<input name="time" type="time" required [(ngModel)]="schedule.time"></label><button type="submit">{{scheduleSaving?'保存中…':'保存计划'}}</button></fieldset></form><p class="muted">{{schedule?.enabled?'下次执行：'+schedule?.next_run_local:'定时更新已关闭'}} 最近执行：{{lastScheduledStart || '暂无'}}</p></section>
  <details class="card telemetry" *ngIf="tab==='manual'"><summary>系统本地规则（只读）</summary><pre>{{(summary?.local_rules || []).join('\n') || '暂无本地规则'}}</pre></details>
  <ndr-picker *ngIf="picker" [mode]="picker.mode" [seeds]="picker.seeds" [editing]="picker.editing" (closed)="picker=null" (saved)="selectionSaved($event)"/>
  <ndr-source-editor *ngIf="sourceEditor" [source]="sourceEditor.source" (closed)="sourceEditor=null" (saved)="selected=newSet();refresh()"/>
@@ -35,24 +47,37 @@ import { RuleCollectionComponent, RuleSelection } from '../rule-collection.compo
  <ndr-rule-collection *ngIf="selection" [selection]="selection" (closed)="selection=null"/>
 `})
 export class RulesComponent implements OnInit,OnDestroy {
- tabs=[{id:'catalog',title:'检测签名'},{id:'groups',title:'规则分组'},{id:'manual',title:'手动规则'},{id:'disable',title:'禁用策略'},{id:'action',title:'阻断动作'},{id:'suppress',title:'告警抑制'},{id:'bans',title:'封禁对象'},{id:'sources',title:'规则源'}];
- tab='catalog';summary:any;gov:any;rows:any[]=[];selected=new Set<string>();query='';offset=0;total=0;busy=false;error='';mutating=false;picker:any;editor=false;banModal=false;banTarget='';banError='';schedule:any;scheduleSaving=false;weekdays=['星期一','星期二','星期三','星期四','星期五','星期六','星期日'];jobBusy=false;jobStatus:any;selection:RuleSelection|null=null;
+ tabs=[{id:'catalog',title:'检测签名'},{id:'groups',title:'规则分组'},{id:'manual',title:'手动规则'},{id:'disable',title:'禁用策略'},{id:'action',title:'阻断动作'},{id:'suppress',title:'告警抑制'},{id:'bans',title:'封禁对象'},{id:'sources',title:'规则源'},{id:'jobs',title:'操作日志'}];
+ tab='catalog';summary:any;gov:any;rows:any[]=[];selected=new Set<string>();query='';offset=0;total=0;busy=false;error='';mutating=false;picker:any;editor=false;banModal=false;banTarget='';banError='';schedule:any;scheduleSaving=false;weekdays=['星期一','星期二','星期三','星期四','星期五','星期六','星期日'];selection:RuleSelection|null=null;
+ jobStatus:any;jobError='';scheduledJob:any;lastScheduledStart='';dt=date;
  sourceEditor:any=null;
  get directorySelection():boolean{return this.rows.some(r=>this.selected.has(r._key)&&r.policy_managed===false&&!r.builtin);}
  get nativeSelection():boolean{return this.rows.some(r=>this.selected.has(r._key)&&(r.builtin||r.policy_managed===false));}
  editSource():void{const source=this.rows.find(r=>this.selected.has(r._key));if(source&&(source.custom||source.requires_code))this.sourceEditor={source};}
- private revision=0;private pageRequest?:AbortController;private pollTimer?:ReturnType<typeof setTimeout>;private refreshTimer?:ReturnType<typeof setInterval>;private alive=true;private polling=false;private refreshing=false;private catalogRows=new Map<string,any>();private catalogQuery='';
+ private revision=0;private pageRequest?:AbortController;private jobRequest?:AbortController;private pollTimer?:ReturnType<typeof setTimeout>;private refreshTimer?:ReturnType<typeof setInterval>;private alive=true;private startingJob=false;private refreshing=false;private catalogRows=new Map<string,any>();private catalogQuery='';
 
  constructor(private api:Api,public state:ConsoleState,public details:Details){}
  get title():string{return this.tabs.find(t=>t.id===this.tab)?.title||'';}
+ get jobBusy():boolean{return this.startingJob||this.jobStatus?.state==='running';}
+ get latestJob():any{return this.jobStatus?.state==='idle'?null:this.jobStatus;}
+ get previousScheduledJob():any{
+  const scheduled=this.scheduledJob,current=this.jobStatus;
+  if(current?.trigger==='scheduled'&&(scheduled?.started===current.started||scheduled?.state==='running'))return null;
+  return scheduled;
+ }
+ get jobTitle():string{const {kind,trigger}=this.jobStatus||{};return kind==='reload'?'规则重载':kind==='manual-add'?'手动规则应用':kind==='apply'?'规则应用':trigger==='scheduled'?'定时更新':'规则更新';}
  get columns():Column[]{switch(this.tab){case 'catalog':return [{key:'signature',label:'GID:SID',width:130},{key:'msg',label:'规则描述',width:360},{key:'group',label:'规则分组',width:210},{key:'source',label:'规则源',kind:'source',width:160},{key:'action',label:'实际动作',width:110}];case 'groups':return [{key:'name',label:'分组标识',width:240},{key:'label',label:'名称',width:230},{key:'source',label:'规则源',kind:'source',width:160},{key:'total',label:'总规则',width:110},{key:'compiled',label:'已启用',width:110},{key:'status',label:'状态',kind:'status',width:140}];case 'manual':return [{key:'sid',label:'SID',width:110},{key:'line',label:'规则原文',kind:'mono',width:740}];case 'sources':return [{key:'name',label:'规则源',kind:'source',width:220},{key:'vendor',label:'提供者',width:140},{key:'summary',label:'说明',width:380},{key:'license',label:'许可',width:120},{key:'authorization',label:'授权',width:100},{key:'status',label:'状态',kind:'status',width:100}];case 'bans':return [{key:'type',label:'类型',width:100},{key:'value',label:'封禁目标',width:280},{key:'ips',label:'解析 IP',width:370}];default:return [{key:'typeLabel',label:'类型',width:120},{key:'target',label:'匹配对象',kind:'scope',width:250},{key:'name',label:'名称',width:350},...(this.tab==='action'?[{key:'action',label:'目标动作',width:120}]:[]),...(this.tab==='suppress'?[{key:'status',label:'状态',kind:'status',width:140},{key:'memberCount',label:'成员数',width:100}]:[])];}}
- ngOnInit():void{const saved=this.state.views.get('rules');if(saved)Object.assign(this,saved);void this.refresh();void this.pollJob(false);this.refreshTimer=setInterval(()=>{if(!document.hidden&&!this.mutating&&!this.picker&&!this.editor&&!this.sourceEditor&&!this.busy&&!this.jobBusy)void this.refresh(true);},15000);}
- ngOnDestroy():void{this.state.views.set('rules',{tab:this.tab,query:this.query,catalogQuery:this.catalogQuery,offset:this.offset,selected:new Set(this.selected)});this.alive=false;this.revision++;this.pageRequest?.abort();clearTimeout(this.pollTimer);clearInterval(this.refreshTimer);}
+ ngOnInit():void{const saved=this.state.views.get('rules');if(saved)Object.assign(this,saved);void this.refresh();void this.pollJob();this.refreshTimer=setInterval(()=>{if(!document.hidden&&!this.mutating&&!this.picker&&!this.editor&&!this.sourceEditor&&!this.busy&&!this.jobBusy)this.refreshCurrent(true);},15000);}
+ ngOnDestroy():void{this.state.views.set('rules',{tab:this.tab,query:this.query,catalogQuery:this.catalogQuery,offset:this.offset,selected:new Set(this.selected)});this.alive=false;this.revision++;this.pageRequest?.abort();this.jobRequest?.abort();clearTimeout(this.pollTimer);clearInterval(this.refreshTimer);}
  newSet():Set<string>{return new Set<string>();}
- change(tab:string):void{this.tab=tab;this.offset=0;this.total=0;this.query='';this.catalogQuery='';this.selected=new Set();this.catalogRows.clear();this.rows=[];void this.refresh();}
+ change(tab:string):void{this.tab=tab;this.offset=0;this.total=0;this.query='';this.catalogQuery='';this.selected=new Set();this.catalogRows.clear();this.rows=[];this.refreshCurrent();}
+ refreshCurrent(background=false):void{void this.refresh(background);if(this.tab==='jobs')void this.pollJob();}
  tabKey(event:KeyboardEvent,index:number):void{let i=index;if(event.key==='ArrowRight')i=(i+1)%this.tabs.length;else if(event.key==='ArrowLeft')i=(i+this.tabs.length-1)%this.tabs.length;else if(event.key==='Home')i=0;else if(event.key==='End')i=this.tabs.length-1;else return;event.preventDefault();this.change(this.tabs[i].id);const buttons=(event.currentTarget as HTMLElement).parentElement?.querySelectorAll<HTMLButtonElement>('button');buttons?.[i].focus();}
  async refresh(background=false,offset=this.offset,query=this.catalogQuery):Promise<void>{if(!this.alive||background&&this.refreshing)return;const revision=++this.revision,tab=this.tab;this.pageRequest?.abort();const request=this.pageRequest=new AbortController();this.busy=!background;this.refreshing=true;try{
-  const page=await this.api.get('/api/rules/page',{tab,...(tab==='catalog'?{q:query,limit:50,offset}:{})},request.signal);const {summary,governance:gov,data}=page;if(revision!==this.revision)return;this.summary=summary;this.gov=gov;let rows:any[]=[];
+  const page=await this.api.get('/api/rules/page',{tab:tab==='jobs'?'sources':tab,...(tab==='catalog'?{q:query,limit:50,offset}:{})},request.signal);const {summary,governance:gov,data}=page;if(revision!==this.revision)return;this.summary=summary;this.gov=gov;this.error='';
+  if(page.schedule){this.scheduledJob=page.schedule.last_run;this.lastScheduledStart=page.schedule.last_started_local;}
+  if(tab==='jobs')return;
+  let rows:any[]=[];
   if(tab==='catalog'){const total=data.total||0,last=lastPageOffset(total);if(offset>last){void this.refresh(false,last,query);return;}rows=(data.rules||[]).map((r:any)=>({...r,_key:r.selector||'sid:'+r.sid,group:(r.origins||[]).map((o:any)=>o.group).join(', '),source:(r.origins||[]).map((o:any)=>o.source).join(', ')}));this.total=total;this.offset=offset;this.catalogQuery=query;this.catalogRows=new Map([...this.catalogRows].filter(([key])=>this.selected.has(key)));rows.forEach(r=>this.catalogRows.set(r._key,r));}
   if(tab==='groups')rows=(data.groups||[]).filter((r:any)=>r.source_enabled!==false).map((r:any)=>({...r,_key:r.selector||groupSelector(r.name,r.source),status:r.compiled?'可用':'无启用规则'}));
   if(tab==='manual')rows=(data.rules||[]).map((r:any)=>({...r,_key:String(r.sid),_disabled:!r.sid}));
@@ -61,7 +86,7 @@ export class RulesComponent implements OnInit,OnDestroy {
   if(tab==='disable')rows=(gov.disable||[]).map((r:any)=>this.governanceRow(r,r.value));
   if(tab==='suppress')rows=[...(gov.suppress_groups||[]).map((r:any)=>({...this.governanceRow(r,r.selector),group_policy:true,status:'整组策略',memberCount:r.total})),...(gov.suppress||[]).map((r:any)=>({...this.governanceRow(r,'sid:'+(r.gid&&r.gid!==1?r.gid+':':'')+r.sid),_key:(r.gid&&r.gid!==1?r.gid+':':'')+r.sid,memberCount:1,status:r.pending?'待规则启用':summary?.rule_manager&&summary?.reload?.state==='running'?'待应用确认':summary?.reload?.ok===false?'应用失败':'已配置'}))];
   if(tab==='action'){const seen=new Set<string>();for(const r of gov.drop||[]){seen.add(canonical(r.value));rows.push({...this.governanceRow(r,r.value),source:'drop',action:r.reject?'reject':'drop'});}for(const r of gov.action||[]){if(!seen.has(canonical(r.selector)))rows.push({...this.governanceRow(r,r.selector),source:'action'});}}
-  this.rows=rows;this.error='';if(tab==='sources'&&!this.schedule)this.schedule=page.schedule;
+  this.rows=rows;if(tab==='sources'&&!this.schedule)this.schedule=page.schedule;
  }catch(e:any){if(revision===this.revision&&e.name!=='AbortError')this.error='刷新失败，保留最近数据：'+e.message;}finally{if(revision===this.revision){this.pageRequest=undefined;this.busy=false;this.refreshing=false;this.state.viewReady('rules');}}}
  governanceRow(row:any,value:string):any{const token=canonical(value),[type,...parts]=token.split(':');return {...row,_key:token,value:token,typeLabel:({sid:'SID',group:'规则分组','group-source':'规则分组',msg:'消息',re:'正则'} as any)[type]||type,target:type==='group-source'?groupTarget(token):parts.join(':'),targetName:type==='group-source'?decodeURIComponent(parts.slice(1).join(':')):parts.join(':'),targetSource:type==='group-source'?decodeURIComponent(parts[0]):''};}
  selectionSeeds():any[]{if(this.tab==='catalog')return [...this.selected].map(k=>({value:k,label:this.catalogRows.get(k)?.msg||k,source:this.catalogRows.get(k)?.source||''}));return this.rows.filter(r=>this.selected.has(r._key)).map(r=>({value:r.selector||groupSelector(r.name,r.source),label:r.name,source:r.source}));}
@@ -102,6 +127,38 @@ export class RulesComponent implements OnInit,OnDestroy {
  async ban():Promise<void>{if(this.mutating)return;this.mutating=true;try{await this.api.post('/api/bans',{target:this.banTarget.trim()});this.banModal=false;this.banTarget='';this.banError='';this.state.toast('封禁已保存，点击“应用更改”生效');void this.refresh();}catch(e:any){this.banError=e.message;}finally{this.mutating=false;}}
  async discardPending():Promise<void>{if(this.mutating||!await this.state.confirm('放弃待应用更改','撤销所有尚未应用的规则编辑，恢复为当前生效配置？'))return;this.mutating=true;try{await this.api.post('/api/rules/pending/discard');this.state.toast('已恢复当前生效配置');void this.refresh();}catch(e:any){this.state.toast(e.message);}finally{this.mutating=false;}}
  async saveSchedule():Promise<void>{this.scheduleSaving=true;try{this.schedule=await this.api.post('/api/rules/schedule',{enabled:this.schedule.enabled,frequency:this.schedule.frequency,weekday:Number(this.schedule.weekday),time:this.schedule.time});this.state.toast('定时设置已保存');}catch(e:any){this.state.toast(e.message);}finally{this.scheduleSaving=false;}}
- async job(kind:string):Promise<void>{if(this.jobBusy)return;this.jobBusy=true;try{await this.api.post('/api/actions/'+kind);void this.pollJob(true);}catch(e:any){this.state.toast(e.message);this.jobBusy=false;}}
- async pollJob(show:boolean):Promise<void>{if(this.polling)return;this.polling=true;clearTimeout(this.pollTimer);try{const d=await this.api.get('/api/actions/status');if(!this.alive)return;if(show||d.state==='running')this.jobStatus=d;this.jobBusy=d.state==='running';if(this.jobBusy)this.pollTimer=setTimeout(()=>void this.pollJob(true),2000);else if(show){this.state.toast(d.rc===0?'规则任务完成':'规则任务失败，请查看日志');void this.refresh();}}catch(e:any){if(show&&this.alive){this.error=e.message;this.pollTimer=setTimeout(()=>void this.pollJob(true),4000);}}finally{this.polling=false;}}
+ async job(kind:string):Promise<void>{
+  if(this.jobBusy||!this.alive)return;
+  this.startingJob=true;
+  try{
+   await this.api.post('/api/actions/'+kind);
+   if(!this.alive)return;
+   this.jobStatus={kind,state:'running',lines:[]};
+   this.jobError='';
+   this.change('jobs');
+  }catch(e:any){if(this.alive)this.state.toast(e.message);}
+  finally{this.startingJob=false;}
+ }
+ async pollJob():Promise<void>{
+  if(!this.alive)return;
+  clearTimeout(this.pollTimer);
+  this.jobRequest?.abort();
+  const request=this.jobRequest=new AbortController();
+  try{
+   const status=await this.api.get('/api/actions/status',{},request.signal);
+   if(request.signal.aborted)return;
+   const wasRunning=this.jobStatus?.state==='running';
+   this.jobStatus=status;
+   this.jobError='';
+   if(status.state==='running')this.pollTimer=setTimeout(()=>void this.pollJob(),2000);
+   else if(wasRunning){
+    this.state.toast(status.rc===0?'规则任务完成':'规则任务未完成，请查看操作日志');
+    void this.refresh();
+   }
+  }catch{
+   if(request.signal.aborted)return;
+   this.jobError='操作日志更新失败，正在重试';
+   this.pollTimer=setTimeout(()=>void this.pollJob(),4000);
+  }
+ }
 }

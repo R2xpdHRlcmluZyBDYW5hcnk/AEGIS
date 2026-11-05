@@ -101,7 +101,7 @@ try {
   console.log('ok - Angular query forms, syntax errors and guided rule creation with live preview');
 
   await nav('rules');await ruleTab('检测签名');await until(`document.querySelector('ndr-rules ndr-table tbody tr')?.textContent.includes('2100622')`);
-  assert.equal(await evaluate(`document.querySelectorAll('ndr-rules .tabs button').length`),8);
+  assert.equal(await evaluate(`document.querySelectorAll('ndr-rules .tabs button').length`),9);
   assert.equal(await evaluate(`document.querySelectorAll('ndr-rules ndr-table tbody tr').length`),50);
   await evaluate(`document.querySelector('ndr-rules ndr-table tbody input').click()`);
   await clickText('下一页 →',`document.querySelector('ndr-rules ndr-table')`);await until(`document.querySelector('ndr-rules ndr-table .pager')?.textContent.includes('2 / 3')`);

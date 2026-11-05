@@ -94,6 +94,7 @@ try{
  assert.equal(await evaluate(`fetch('/api/actions/status').then(r=>r.json()).then(d=>d.state)`),'idle','editing never runs a rule job');
  await ruleTab('规则源');await click('更新规则集 ↗',`document.querySelector('ndr-rules')`);
  await until(`document.querySelector('.job-log')?.textContent.includes('完成热重载')`);
+ assert.equal(await evaluate(`document.querySelector('ndr-rules [role="tab"][aria-selected="true"]').textContent.trim()`),'操作日志');
  assert.equal(await evaluate(`fetch('/api/rules').then(r=>r.json()).then(d=>d.pending)`),true,'updates retain unconfirmed manual edits');
  await click('应用更改 →',`document.querySelector('ndr-rules')`);
  await until(`!document.querySelector('.pending-rules')`);
