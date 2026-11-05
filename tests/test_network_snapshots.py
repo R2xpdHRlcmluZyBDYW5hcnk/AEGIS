@@ -298,6 +298,8 @@ class NetworkSnapshotTests(unittest.TestCase):
             self.get(**bounds)
             self.cache.start()
             self.ready(**bounds)
+            # Advance the fake clock only after both initial snapshots are published.
+            self.ready()
             self.assertEqual(calls.count('custom'), 1)
             self.advance(self.cache.IDLE_SECONDS + 1)
             self.wait_for(lambda: calls.count('default') >= 2)

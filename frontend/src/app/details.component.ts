@@ -11,6 +11,8 @@ import { mappingFromEvent, mappingFromMetadata, mappingFromRule } from './attack
 import { generateLocal } from './local-assistant';
 function drawerGroups(record:any){const {flow_id,...visible}=record;return evidenceGroups(visible);}
 
+type AnalysisStep = {id:string; label:string; detail?:string; state:string};
+
 // Reindent the original tokens so 64-bit native identifiers retain every digit.
 export function prettyJson(raw:string):string {
  let depth=0,quoted=false,escaped=false,out='';
@@ -33,6 +35,7 @@ export class Details {
  readonly stack=signal<any[]>([]);
  private sequence=0;
  private inference?:AbortController;
+ private progressTimer?:ReturnType<typeof setTimeout>;
  private evidenceRequest?:AbortController;
  get current():any{return this.stack().at(-1);}
  constructor(private api:Api,state:ConsoleState){
@@ -40,29 +43,84 @@ export class Details {
   window.addEventListener('pagehide',()=>this.stopGeneration());
   window.addEventListener('beforeunload',()=>this.stopGeneration());
  }
- stopGeneration():void{this.inference?.abort();this.inference=undefined;this.stack.update(s=>s.map(v=>v.aiBusy?{...v,aiBusy:'',aiError:'已停止生成',aiProcessOpen:false}:v));}
+ stopGeneration():void{
+  this.inference?.abort();
+  this.inference=undefined;
+  this.stopProgressAnimation();
+  this.stack.update(s=>s.map(v=>v.aiBusy?{...v,aiBusy:'',aiError:'已停止生成',aiProcessOpen:false,aiTyping:null}:v));
+ }
  private stopEvidence():void{this.evidenceRequest?.abort();this.evidenceRequest=undefined;this.stack.update(s=>s.map(v=>v.sessionBusy?{...v,sessionBusy:false}:v));}
  close():void{this.stopGeneration();this.stopEvidence();this.stack.update(s=>s.slice(0,-1));if(this.current?.kind==='event')void this.sessionPage(0);}
  dismiss():void{this.stopGeneration();this.stopEvidence();this.stack.set([]);}
  private patch(id:number,patch:any):void{this.api.zone.run(()=>this.stack.update(s=>s.map(v=>v.id===id?{...v,...patch}:v)));}
+ private stopProgressAnimation():void{
+  if(this.progressTimer===undefined)return;
+  clearTimeout(this.progressTimer);
+  this.progressTimer=undefined;
+ }
+ private showProgress(view:any, step:AnalysisStep, signal:AbortSignal):void{
+  const steps:AnalysisStep[]=[...(view.aiSteps||[])];
+  const index=steps.findIndex(item=>item.id===step.id);
+  if(index>=0)steps[index]=step;
+  else if(steps.length<12)steps.push(step);
+  else return;
+
+  this.stopProgressAnimation();
+  if(view.aiAnalysisDone||!view.aiProcessOpen||window.matchMedia('(prefers-reduced-motion: reduce)').matches){
+   this.patch(view.id,{aiSteps:steps,aiTyping:null});
+   return;
+  }
+
+  const label=Array.from(step.label);
+  const detail=Array.from(step.detail||'');
+  let visible=0;
+  const reveal=()=>{
+   this.progressTimer=undefined;
+   if(signal.aborted||this.current?.id!==view.id)return;
+   visible++;
+   const done=visible>=label.length+detail.length;
+   const aiTyping=done?null:{
+    id:step.id,
+    label:label.slice(0,visible).join(''),
+    detail:detail.slice(0,Math.max(0,visible-label.length)).join('')
+   };
+   this.patch(view.id,{aiSteps:steps,aiTyping});
+   if(!done)this.progressTimer=setTimeout(reveal,32);
+  };
+  reveal();
+ }
  async generate(kind:'summary'|'rule'):Promise<void>{
   const view=this.current;if(!view||view.status!=='ready'||view.aiBusy)return;
   const target=view.kind==='incident'?{kind:'incident',params:view.params}:view.record?.record_id?{kind:'record',key:view.record.record_id}:view.record?.id!=null?{kind:'event',id:view.record.id}:null;
   if(!target){this.patch(view.id,{aiError:'当前证据缺少可查询标识，无法生成'});return;}
   this.stopGeneration();const controller=this.inference=new AbortController();
-  this.patch(view.id,{aiBusy:kind,aiError:'',aiDraft:'',aiSteps:[],aiProcessOpen:true,aiAnalysisDone:false,...(kind==='rule'?{aiRule:null,aiAdded:null,aiApplyError:''}:{aiSummary:null})});
+  this.patch(view.id,{aiBusy:kind,aiError:'',aiDraft:'',aiSteps:[],aiTyping:null,aiProcessOpen:true,aiAnalysisDone:false,...(kind==='rule'?{aiRule:null,aiAdded:null,aiApplyError:''}:{aiSummary:null})});
   const update=(item:any)=>{
    if(controller.signal.aborted||this.current?.id!==view.id)return;
    const active=this.current;
-   if(item.progress){const step=item.progress,steps=[...(active.aiSteps||[])],index=steps.findIndex(s=>s.id===step.id);if(index>=0)steps[index]=step;else if(steps.length<12)steps.push(step);this.patch(view.id,{aiSteps:steps});}
-   if(item.analysis_done&&!active.aiAnalysisDone)this.patch(view.id,{aiAnalysisDone:true,aiProcessOpen:false});
+   if(item.progress)this.showProgress(active,item.progress,controller.signal);
+   if(item.analysis_done&&!active.aiAnalysisDone){
+    this.stopProgressAnimation();
+    this.patch(view.id,{aiAnalysisDone:true,aiProcessOpen:false,aiTyping:null});
+   }
    if(typeof item.delta==='string')this.patch(view.id,{aiDraft:(this.current.aiDraft||'')+item.delta});
   };
   try{const result=await generateLocal(kind,target,controller.signal,view.aiRuleAction||'alert',update);if(!controller.signal.aborted&&this.current?.id===view.id)this.patch(view.id,{[kind==='rule'?'aiRule':'aiSummary']:result,aiDraft:'',aiAnalysisDone:true,aiProcessOpen:this.current.aiAnalysisDone?this.current.aiProcessOpen:false});}
   catch(e:any){if(!controller.signal.aborted&&this.current?.id===view.id)this.patch(view.id,{aiError:e.message});}
-  finally{if(this.inference===controller){this.inference=undefined;this.patch(view.id,{aiBusy:''});}}
+  finally{
+   if(this.inference===controller){
+    this.stopProgressAnimation();
+    this.inference=undefined;
+    this.patch(view.id,{aiBusy:'',aiTyping:null});
+   }
+  }
  }
- toggleProcess(event:Event):void{const view=this.current,open=(event.target as HTMLDetailsElement).open;if(view&&view.aiProcessOpen!==open)this.patch(view.id,{aiProcessOpen:open});}
+ toggleProcess(event:Event):void{
+  const view=this.current,open=(event.target as HTMLDetailsElement).open;
+  if(!view||view.aiProcessOpen===open)return;
+  if(!open)this.stopProgressAnimation();
+  this.patch(view.id,{aiProcessOpen:open,aiTyping:null});
+ }
  setRuleAction(action:string):void{const view=this.current;if(!view||view.aiBusy||view.aiApplying||view.aiAdded||!['alert','block'].includes(action))return;this.patch(view.id,{aiRuleAction:action,aiRule:null,aiError:''});}
  async addRule():Promise<void>{
   const view=this.current;if(!view?.aiRule?.proposal||view.aiApplying||view.aiAdded)return;
@@ -131,7 +189,16 @@ export class Details {
     <div class="ai-body">
     <div class="toolbar"><button class="quiet" [disabled]="!!view.aiBusy" (click)="details.generate('summary')">{{view.aiBusy==='summary'?'正在总结…':view.aiSummary?'重新生成总结':(view.record?.session_id||view.data?.incident?.session_id)?'生成会话总结':'生成事件总结'}}</button><label class="checkbox-label">规则动作 <select aria-label="规则动作" [value]="view.aiRuleAction||'alert'" [disabled]="!!view.aiBusy||view.aiApplying||!!view.aiAdded" (change)="details.setRuleAction($any($event.target).value)"><option value="alert">告警</option><option value="block">阻断匹配特征</option></select></label><button class="quiet" [disabled]="!!view.aiBusy||view.aiApplying||!!view.aiAdded" (click)="details.generate('rule')">{{view.aiBusy==='rule'?'正在生成规则…':view.aiRule?'重新生成规则建议':'生成规则建议'}}</button><button class="text-button" *ngIf="view.aiBusy" (click)="details.stopGeneration()">停止生成</button></div>
     <p class="muted" *ngIf="view.aiBusy" role="status">{{view.aiAnalysisDone?'正在输出正文':'正在深度分析当前证据'}}</p><p class="error" *ngIf="view.aiError" role="alert">{{view.aiError}}</p>
-    <details class="ai-hunts ai-process" *ngIf="view.aiSteps?.length" [open]="view.aiProcessOpen" (toggle)="details.toggleProcess($event)"><summary>分析过程摘要 <span class="muted">{{view.aiBusy?(view.aiAnalysisDone?'分析完成':'分析中'):view.aiError?'未完成':'已完成'}}</span></summary><ol><li *ngFor="let step of view.aiSteps"><div class="section-heading"><span>{{step.label}}</span><span class="badge">{{step.state==='done'?'完成':step.state==='warning'?'未完成':view.aiBusy?'进行中':'已停止'}}</span></div><p class="muted" *ngIf="step.detail">{{step.detail}}</p></li></ol></details>
+    <details class="ai-hunts ai-process" *ngIf="view.aiSteps?.length" [open]="view.aiProcessOpen" (toggle)="details.toggleProcess($event)">
+     <summary>分析过程摘要 <span class="muted">{{view.aiBusy?(view.aiAnalysisDone?'分析完成':'分析中'):view.aiError?'未完成':'已完成'}}</span></summary>
+     <ol><li *ngFor="let step of view.aiSteps">
+      <div class="section-heading">
+       <span>{{view.aiTyping?.id===step.id?view.aiTyping.label:step.label}}</span>
+       <span class="badge">{{step.state==='done'?'完成':step.state==='warning'?'未完成':view.aiBusy?'进行中':'已停止'}}</span>
+      </div>
+      <p class="muted" *ngIf="step.detail">{{view.aiTyping?.id===step.id?view.aiTyping.detail:step.detail}}</p>
+     </li></ol>
+    </details>
     <div class="ai-summary ai-draft" *ngIf="view.aiDraft&&!view.aiSummary"><div class="section-heading"><h4>{{view.aiBusy?'正在生成总结':'未完成的总结'}}</h4></div><p>{{view.aiDraft}}</p></div>
     <div *ngIf="view.aiSummary as summary" class="ai-summary"><div class="section-heading"><h4>{{summary.context?.scope==='session'?'会话总结':'事件总结'}}</h4><button class="text-button" (click)="copy(summary.text)">复制总结</button></div><p>{{summary.text}}</p><p class="muted" *ngIf="summary.context as context">已检索 {{context.total_records}} 条{{context.scope==='session'?'会话':'事件'}}记录 使用 {{context.evidence_records}} 条证据摘录<span *ngIf="context.related_evidence_records"> 附加 {{context.related_evidence_records}} 条关联日志摘录</span></p><small class="muted">依据已保留的日志分析，请结合原始证据核查</small>
      <details class="ai-hunts" *ngIf="summary.hunts?.length"><summary>关联检索</summary><section *ngFor="let hunt of summary.hunts"><div class="section-heading"><span>{{hunt.label}}</span><span class="badge">{{hunt.error_kind==='validation'?'条件无效':hunt.error?'检索失败':'命中 '+hunt.total+' 条'}}</span><button class="text-button" *ngIf="hunt.query&&!hunt.error" (click)="openSummaryHunt(hunt.query,summary.context,hunt.range)">查看命中日志 ↗</button></div><span class="badge" *ngIf="hunt.scope==='related'">关联候选线索</span><pre>{{hunt.query||hunt.predicate}}</pre><p class="muted" *ngIf="hunt.error">{{hunt.error}}</p></section></details>

@@ -79,8 +79,27 @@ try{
  }
  async function cancelCase(stage,action='close',event=false){
   await api('/__test/ai-stall',{stall:true,stage});const before=await status();
-  if(event)await openEvent();else{await evaluate(`location.hash='#alerts'`);await openIncident();}
+  if(event)await openEvent();else{await evaluate(`location.hash='#alerts'`);await openIncident(false);}
+  const checkTyping=stage==='hunt'&&action==='close'&&!event;
+  if(checkTyping){
+   await evaluate(`(()=>{
+    window.progressFrames=new Set();
+    window.progressObserver=new MutationObserver(()=>{
+     for(const label of document.querySelectorAll('.ai-process li .section-heading span:first-child')){
+      window.progressFrames.add(label.textContent);
+     }
+    });
+    window.progressObserver.observe(document.querySelector('.local-assistant'),{childList:true,subtree:true,characterData:true});
+   })()`);
+  }
+  if(!event)await summarize();
   await waitCalls(before.calls+(stage==='summary'?2:1));
+  if(checkTyping){
+   const label='深度分析关联检索条件';
+   await until(`window.progressFrames.has(${JSON.stringify(label)})`);
+   const frames=await evaluate(`(()=>{window.progressObserver.disconnect();return [...window.progressFrames];})()`);
+   assert.ok(frames.some(frame=>frame&&frame!==label&&label.startsWith(frame)),'analysis progress reveals partial text before the full step');
+  }
   if(action==='escape'){
    await cdp('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
    await cdp('Input.dispatchKeyEvent',{type:'keyUp',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
