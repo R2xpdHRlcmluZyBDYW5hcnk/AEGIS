@@ -6994,6 +6994,9 @@ button:disabled{opacity:.4;cursor:not-allowed}
         self.send_header('X-Accel-Buffering', 'no')
         self.send_header('Connection', 'close')
         self.end_headers()
+        stop = getattr(self.server, 'stop', None)
+        def cancelled():
+            return (stop is not None and stop.is_set()) or disconnected(self.connection)
         def send(value):
             try:
                 self.wfile.write(json.dumps(value, ensure_ascii=False).encode() + b'\n')
@@ -7002,8 +7005,7 @@ button:disabled{opacity:.4;cursor:not-allowed}
             except OSError:
                 return False
         try:
-            self.app.assistant.generate(self.app, self._cookie_token(), body, send,
-                                        lambda: disconnected(self.connection))
+            self.app.assistant.generate(self.app, self._cookie_token(), body, send, cancelled)
         except (ValueError, TypeError) as exc:
             send({'error': str(exc)})
         except Exception:

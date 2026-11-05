@@ -296,6 +296,7 @@ class PreviewHandler(m.Handler):
             ai_provider.stall=bool(body.get('stall'))
             ai_provider.stream_prefix=bool(body.get('prefix'))
             ai_provider.analysis_prefix=bool(body.get('analysis'))
+            ai_provider.reasoning_prefix=bool(body.get('reasoning'))
             if body.get('stage'):ai_provider.stall_stage=body['stage']
             elif hasattr(ai_provider,'stall_stage'):del ai_provider.stall_stage
             return self._json({'ok':True})

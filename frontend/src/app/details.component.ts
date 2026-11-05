@@ -54,14 +54,15 @@ export class Details {
   const target=view.kind==='incident'?{kind:'incident',params:view.params}:view.record?.record_id?{kind:'record',key:view.record.record_id}:view.record?.id!=null?{kind:'event',id:view.record.id}:null;
   if(!target){this.patch(view.id,{aiError:'当前证据缺少可查询标识，无法生成'});return;}
   this.stopGeneration();const controller=this.inference=new AbortController();
-  this.patch(view.id,{aiBusy:kind,aiError:'',aiDraft:'',aiActivity:'正在读取证据',aiNotes:[],aiNewNote:true,aiProcessOpen:true,aiAnalysisDone:false,...(kind==='rule'?{aiRule:null,aiAdded:null,aiApplyError:''}:{aiSummary:null})});
+  this.patch(view.id,{aiBusy:kind,aiError:'',aiDraft:'',aiActivity:'正在读取证据',aiReasoning:false,aiNotes:[],aiNewNote:true,aiProcessOpen:true,aiAnalysisDone:false,...(kind==='rule'?{aiRule:null,aiAdded:null,aiApplyError:''}:{aiSummary:null})});
   const update=(item:any)=>{
    if(controller.signal.aborted||this.current?.id!==view.id)return;
    const active=this.current;
    if(item.progress){
     const {label,detail}=item.progress;
-    this.patch(view.id,{aiActivity:[label,detail].filter(Boolean).join(' '),aiNewNote:true});
+    this.patch(view.id,{aiActivity:[label,detail].filter(Boolean).join(' '),aiNewNote:true,aiReasoning:false});
    }
+   if(item.phase==='reasoning')this.patch(view.id,{aiReasoning:true});
    if(typeof item.analysis_delta==='string'&&item.analysis_delta){
     const notes:string[]=[...active.aiNotes];
     if(active.aiNewNote||!notes.length)notes.push(item.analysis_delta);
@@ -152,7 +153,7 @@ export class Details {
     <div class="section-heading"><h3>本地智能研判</h3><span class="badge">Qwen3.5-2B</span></div>
     <div class="ai-body">
     <div class="toolbar"><button class="quiet" [disabled]="!!view.aiBusy" (click)="details.generate('summary')">{{view.aiBusy==='summary'?'正在总结…':view.aiSummary?'重新生成总结':(view.record?.session_id||view.data?.incident?.session_id)?'生成会话总结':'生成事件总结'}}</button><label class="checkbox-label">规则动作 <select aria-label="规则动作" [value]="view.aiRuleAction||'alert'" [disabled]="!!view.aiBusy||view.aiApplying||!!view.aiAdded" (change)="details.setRuleAction($any($event.target).value)"><option value="alert">告警</option><option value="block">阻断匹配特征</option></select></label><button class="quiet" [disabled]="!!view.aiBusy||view.aiApplying||!!view.aiAdded" (click)="details.generate('rule')">{{view.aiBusy==='rule'?'正在生成规则…':view.aiRule?'重新生成规则建议':'生成规则建议'}}</button><button class="text-button" *ngIf="view.aiBusy" (click)="details.stopGeneration()">停止生成</button></div>
-    <p class="muted ai-activity" *ngIf="view.aiBusy&&!view.aiAnalysisDone&&view.aiNewNote" role="status">{{view.aiActivity}}</p>
+    <p class="muted ai-activity" *ngIf="view.aiBusy&&!view.aiAnalysisDone&&view.aiNewNote" role="status">{{view.aiReasoning?'模型正在思考':view.aiActivity}}</p>
     <p class="error" *ngIf="view.aiError" role="alert">{{view.aiError}}</p>
     <details class="ai-hunts ai-process" *ngIf="view.aiNotes?.length" [open]="view.aiProcessOpen" (toggle)="details.toggleProcess($event)">
      <summary>分析说明</summary>

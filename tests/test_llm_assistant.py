@@ -61,8 +61,8 @@ class Provider(BaseHTTPRequestHandler):
             chunk={'choices':[{'delta':delta,'finish_reason':finish if index==len(deltas)-1 else None}]}
             self.wfile.write(b'data: ' + (json.dumps(chunk).encode() if isinstance(chunk, dict) else chunk.encode()) + b'\n\n')
             self.wfile.flush()
-            if stage=='summary' and index in (2,3):
-                flag='analysis_prefix' if index==2 else 'stream_prefix'
+            if stage=='summary' and index in (0,2,3):
+                flag={0:'reasoning_prefix',2:'analysis_prefix',3:'stream_prefix'}[index]
                 while getattr(self.server,flag,False) and not self.server.stop.is_set():
                     if select.select([self.connection],[],[],.05)[0] and not self.connection.recv(1):
                         self.server.cancelled.set();self.server.cancellations=getattr(self.server,'cancellations',0)+1;return
@@ -117,6 +117,16 @@ class AssistantTests(unittest.TestCase):
         self.server.stall = True
         disconnected = threading.Event()
         output, errors = [], []
+        receiving = threading.Event()
+        timeouts = []
+
+        class ObservedConnection(http.client.HTTPConnection):
+            def getresponse(self):
+                timeouts.append(self.sock.gettimeout())
+                receiving.set()
+                return super().getresponse()
+
+        self.assistant.connection = lambda: ObservedConnection('127.0.0.1', self.server.server_port, timeout=2)
         def run():
             try:
                 self.assistant.generate(self.app, 'owner', self.body, lambda v:output.append(v) or True, disconnected.is_set)
@@ -125,6 +135,8 @@ class AssistantTests(unittest.TestCase):
         thread = threading.Thread(target=run)
         thread.start()
         self.assertTrue(self.server.entered.wait(2))
+        self.assertTrue(receiving.wait(1))
+        self.assertEqual(timeouts, [None], 'the dial timeout does not limit inference reads')
         with self.assertRaisesRegex(ValueError, '正在生成'):
             self.generate()
         disconnected.set()
@@ -156,6 +168,7 @@ class AssistantTests(unittest.TestCase):
         self.assertEqual(public,'通信概览：公开正文。');self.assertEqual(output[-1]['result']['text'],public)
         notes=[item['analysis_delta'] for item in output if 'analysis_delta' in item]
         self.assertEqual(notes,['先核对相似连接。','现有证据有限','。'])
+        self.assertEqual([item['phase'] for item in output if 'phase' in item], ['reasoning'])
         self.assertNotIn('private',json.dumps(output));self.assertNotIn('queries',public)
         first=next(index for index,item in enumerate(output) if 'delta' in item)
         self.assertTrue(output[first-1]['analysis_done'])

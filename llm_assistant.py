@@ -434,7 +434,6 @@ class LocalAssistant:
         lifecycle = threading.Lock()
         released = False
         active_done = None
-        deadline = time.monotonic()+180
         def release():
             nonlocal released
             with lifecycle:
@@ -458,7 +457,9 @@ class LocalAssistant:
                 try:
                     if stopped.is_set():return
                     connection.connect();transport['socket']=connection.sock
-                    connection.sock.settimeout(max(1,deadline-time.monotonic()))
+                    # Keep the connection timeout for dialing only. Inference can
+                    # wait for output until the provider or client ends the stream.
+                    connection.sock.settimeout(None)
                     if stopped.is_set():return
                     connection.request('POST','/v1/chat/completions',json.dumps(payload).encode(),{'Content-Type':'application/json'})
                     response=connection.getresponse()
@@ -466,6 +467,7 @@ class LocalAssistant:
                     if 'text/event-stream' not in response.getheader('Content-Type',''):raise ValueError('本地模型未提供流式响应')
                     text='';finish=None;complete=False;received=0;filtering=VisibleText()
                     analysis = PublicAnalysis()
+                    reasoning_started = False
                     def accept(value, final=False):
                         nonlocal text
                         note, value = analysis.feed(value, final=final)
@@ -493,6 +495,9 @@ class LocalAssistant:
                             # Private reasoning is neither retained nor sent to the client.
                             received+=len(content)+len(reasoning)
                             if received>32768:raise ValueError('本地模型响应超过上限')
+                            if reasoning and not reasoning_started:
+                                if not publish({'phase': 'reasoning'}):return
+                                reasoning_started = True
                             if not accept(filtering.feed(content)):return
                             finish=choice.get('finish_reason') or finish
                     if not stopped.is_set():
@@ -512,7 +517,7 @@ class LocalAssistant:
             try:thread.start()
             except BaseException:done.set();raise
             started=False;last_heartbeat=0
-            while time.monotonic()<deadline:
+            while True:
                 if disconnected():return None
                 try:value=updates.get(timeout=.05)
                 except queue.Empty:
@@ -529,7 +534,6 @@ class LocalAssistant:
                     if not send({'analysis_done':True}):return None
                     started=True
                 if not send(value):return None
-            raise ValueError('本地模型生成超时')
         def json_output(value):
             return json.loads(value.removeprefix('```json').removeprefix('```').removesuffix('```').strip())
         try:

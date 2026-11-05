@@ -58,7 +58,10 @@ try{
  assert.equal(await evaluate(`!!document.querySelector('.ai-summary:not(.ai-draft) .ai-hunts')`),false,'invalid planner output never executes a fixed fallback search');
  await close();await api('/__test/ai-plan',{mode:'default'});
  // The provider pauses after a partial public note, then after the first body chunk.
- await api('/__test/ai-stall',{analysis:true,prefix:true});await openIncident();
+ await api('/__test/ai-stall',{reasoning:true,analysis:true,prefix:true});await openIncident();
+ await until(`document.querySelector('.ai-activity')?.textContent==='模型正在思考'`);
+ assert.equal(await evaluate(`document.querySelector('.local-assistant').textContent.includes('private test reasoning')`),false);
+ await api('/__test/ai-stall',{analysis:true,prefix:true});
  await until(`document.querySelector('.ai-process p')?.textContent==='先比对目标端口'`);
  assert.equal(await evaluate(`document.querySelector('.ai-process').open`),true,'public analysis appears while the provider is still sending it');
  assert.equal(await evaluate(`!!document.querySelector('.ai-process ol, .ai-process .badge, .ai-draft')`),false,'the live note appears as plain text before the body');
