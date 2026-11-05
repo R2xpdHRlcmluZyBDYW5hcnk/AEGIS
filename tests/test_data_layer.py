@@ -341,10 +341,12 @@ class DataLayerCase(unittest.TestCase):
         self.assertEqual(len(self.service.queue),16)
         self.service.queue.clear()
         def producer(reader,params):
-            return {'total':1000,'events':[]}
-        self.service.query(producer,{'offset':'0','limit':'50'},pages=True)
+            return {'total':1000,'events':[],'range':[100.0,200.125]}
+        params = {'offset':'0','limit':'50','window':'60'}
+        self.service.query(producer,params,pages=True)
         self.assertEqual(len(self.service.queue),1)
-        _,task = self.service.queue.popitem()
+        key,task = self.service.queue.popitem()
+        self.assertEqual(key,self.service.key('producer',{**params,'offset':'50','from':'100','to':'200.125'}))
         task[1]()
         self.assertFalse(self.service.queue,'prefetch must not walk all pages')
 

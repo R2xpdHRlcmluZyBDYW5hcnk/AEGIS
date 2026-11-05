@@ -72,7 +72,7 @@ for(const choice of ['today','yesterday']){
  page.removeFilter('src');assert.equal(requests.at(-1).params.src,undefined);assert.equal(requests.at(-1).params.sid,'498');
  assert.equal(investigations.length,0,'numeric and chart filters stay in overview');
  page.clearFilters();assert.equal(page.filters.length,0);assert.equal(requests.at(-1).params.detection,undefined);
- page.filterNetwork({title:'应用',field:'app',type:'flow'},{name:'未识别'});assert.equal(requests.at(-1).params.app,'');assert.equal(requests.at(-1).params.type,undefined,'application filters retain the complete connection cohort');
+ page.filterNetwork({title:'应用',field:'app',type:'flow'},{name:'未识别'});assert.equal(requests.at(-1).params.missing_app,'1');assert.equal(requests.at(-1).params.type,undefined,'application filters retain the complete connection cohort');
  page.investigateNetwork({field:'app',type:'flow'},{name:'tls'});assert.equal(investigations.at(-1),'type: flow AND app: "tls"','text table keeps investigation navigation');
  page.clearFilters();page.data={bucket:1};const t=Math.floor(Date.now()/1000)-120;
  page.filterTrend({point:{t},kind:'drops'});assert.equal(requests.at(-1).params.from,String(t));assert.equal(requests.at(-1).params.to,String(t+60-.001));

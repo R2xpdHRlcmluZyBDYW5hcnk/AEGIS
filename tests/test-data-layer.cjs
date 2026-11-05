@@ -8,6 +8,8 @@ let timer,interval,fetches=0;
 class EventSource{static OPEN=1;readyState=1;constructor(){this.closed=false;}close(){this.closed=true;}}
 const core={};
 vm.runInNewContext(compile('frontend/src/app/core.ts'),{exports:core,require:name=>name==='@angular/core'?angular:{},URLSearchParams,AbortController,EventSource,document:{hidden:false,title:'',querySelector:()=>null},location:{hash:'#hunt'},history:{pushState(){}},window:{scrollY:0},setTimeout:fn=>(timer=fn,1),clearTimeout:()=>timer=undefined,setInterval:fn=>(interval=fn,2),clearInterval:()=>interval=undefined});
+const table={};
+vm.runInNewContext(compile('frontend/src/app/table.component.ts'),{exports:table,require:name=>name==='@angular/core'?{...angular,HostListener:noop}:{}});
 const state=new core.ConsoleState();
 state.investigate('community_id: "1:test+/="',1000);
 assert.equal(state.huntCommunity(),'1:test+/=');assert.equal(state.huntTime(),null);
@@ -44,14 +46,14 @@ delayed.start('/api/hunt',{});const cancelled=delayedSignals.at(-1);delayed.stop
 assert.equal(cancelled.aborted,true,'leaving a query cancels its HTTP request');
 complete({total:99});await new Promise(resolve=>setImmediate(resolve));assert.equal(delayedFrames.length,1);
 const rulesExports={};
-vm.runInNewContext(compile('frontend/src/app/pages/rules.component.ts'),{exports:rulesExports,require:name=>name==='@angular/core'?angular:name==='../core'?core:{},AbortController,Set,Map,document:{hidden:false},clearTimeout(){},clearInterval(){}});
+vm.runInNewContext(compile('frontend/src/app/pages/rules.component.ts'),{exports:rulesExports,require:name=>name==='@angular/core'?angular:name==='../core'?core:name==='../table.component'?table:{},AbortController,Set,Map,document:{hidden:false},clearTimeout(){},clearInterval(){}});
 const ruleState={views:new Map(),viewReady(){}};
 const ruleApi={get:async(_path,params)=>({summary:{},governance:{},data:{total:500,rules:Array.from({length:50},(_,i)=>({sid:params.offset+i+1,selector:'sid:'+(params.offset+i+1)}))}})};
 const rules=new rulesExports.RulesComponent(ruleApi,ruleState,{});
-await rules.refresh();rules.selected.add('sid:1');rules.offset=50;await rules.refresh();
+await rules.refresh();rules.selected.add('sid:1');await rules.refresh(false,50);
 assert.equal(rules.catalogRows.size,51,'retain only the current page and selected rule labels');
 assert.ok(rules.catalogRows.has('sid:1'),'cross-page selection keeps its label');
-rules.selected.clear();rules.offset=100;await rules.refresh();assert.equal(rules.catalogRows.size,50,'unused page text is released');
+rules.selected.clear();await rules.refresh(false,100);assert.equal(rules.catalogRows.size,50,'unused page text is released');
 let pageSignal;
 ruleApi.get=(_path,_params,signal)=>{pageSignal=signal;return new Promise((resolve,reject)=>signal.addEventListener('abort',()=>reject({name:'AbortError'})));};
 const pendingPage=rules.refresh();rules.ngOnDestroy();await pendingPage;

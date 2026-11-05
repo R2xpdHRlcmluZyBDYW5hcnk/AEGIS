@@ -544,6 +544,10 @@ class DataService:
             offset, limit = int(params.get('offset') or 0), int(params.get('limit') or 50)
             if result.get('total', 0) > offset+limit:
                 following = dict(params, offset=offset+limit)
+                if result.get('range'):
+                    following.pop('all', None)
+                    low, high = (int(value) if float(value).is_integer() else value for value in result['range'])
+                    following.update({'from':str(low), 'to':str(high)})
                 next_key = self.key(function.__name__, following)
                 self.schedule(next_key, lambda: self.query(function, following, ttl, False, True))
         # Read connections and cached pages can remain readable after the writer
@@ -5431,8 +5435,9 @@ class App:
         fields = {'src':'src', 'dst':'dst', 'sig':'sig', 'app':'app',
                   'proto':'proto', 'dns':'dnsname', 'sni':'sni', 'type':'type'}
         for key, column in fields.items():
-            if key in params:
-                value = params[key]
+            missing = key in ('app','proto','dns','sni') and params.get('missing_'+key) == '1'
+            if key in params or missing:
+                value = params.get(key, '')
                 if not isinstance(value, str) or len(value) > 1024:
                     raise ValueError('概览筛选值无效')
                 if key == 'type' and value not in (*BASE_EVENT_TYPES, *APP_EVENT_TYPES):
@@ -5929,9 +5934,11 @@ class App:
         explicit_range = bool(raw_from or raw_to)
         # 显式时间区间：只用事件库，避免回落到"以现在为终点"的内存缓冲
         if explicit_range and source != "memory":
+            # A pinned rolling page keeps the scan budget of its first page.
+            max_scan = 300000 if params.get('window') and params.get('all') != '1' else 120000
             total, rows = self.db.search_range(low_ts, high_ts, matcher=db_matcher,
                                                      limit=limit, offset=offset,
-                                                     need_raw=need_raw, max_scan=float('inf') if exact_cpu_scan else 120000,
+                                                     need_raw=need_raw, max_scan=float('inf') if exact_cpu_scan else max_scan,
                                                      fields=used,
                                                      list_view=params.get('view')=='list',
                                                      push=(push_sql, push_args) if push_sql else None,matcher_spec=matcher_spec)
@@ -5946,7 +5953,7 @@ class App:
                                                      push=(push_sql, push_args) if push_sql else None,matcher_spec=matcher_spec)
             if total or source == "db" or params.get('view')=='list':
                 return {"total": total, "events": rows, "query": query, "source": "db",
-                        "truncated": self.db.last_truncated}
+                        "range": [low_ts, high_ts], "truncated": self.db.last_truncated}
         # 显式勾选"检索日志"时才扫文件（扫 200MB 要几秒，不默认做）
         extra = dict(matcher_spec=query_spec,cancelled=getattr(self.db,'cpu_cancelled',None)) if getattr(self.store,'cpu',None) is not None else {}
         total, rows = self.store.query(window=window,offset=offset,limit=limit,matcher=matcher,**extra)

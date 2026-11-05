@@ -234,6 +234,15 @@ if os.environ.get('NDR_PREVIEW_PAGING') == '1':
         events.append(dict(timestamp=m.iso(m.now()-3600-index),event_type='http',flow_id=10000+index,
             src_ip='192.0.2.100',src_port=45000+index,dest_ip='198.51.100.100',dest_port=80,proto='TCP',
             app_proto='http',http=dict(hostname='paging.example.test',url='/fixture/'+str(index),http_method='GET',status=200)))
+if os.environ.get('NDR_PREVIEW_PAGING_EVIDENCE') == '1':
+    for index in range(60):
+        events.append(dict(timestamp=m.iso(m.now()-6000-index),event_type='drop',flow_id=30000+index,
+            src_ip='192.0.2.61',src_port=46000+index,dest_ip='198.51.100.61',dest_port=53,proto='UDP',
+            alert=dict(signature='Paging fixture',signature_id=9900600,severity=2,action='blocked')))
+    for index in range(60):
+        events.append(dict(timestamp=m.iso(m.now()-6500-index),event_type='dns',flow_id=30000,
+            src_ip='192.0.2.61',src_port=46000,dest_ip='198.51.100.61',dest_port=53,proto='UDP',
+            dns=dict(rrname='evidence-'+str(index)+'.example.test',rrtype='A')))
 if os.environ.get('NDR_PREVIEW_OVERVIEW') == '1':
     for kind in ('dns','flow'):
         events.append(dict(timestamp=m.iso(m.now()-100),event_type=kind,flow_id=3003,src_ip='192.0.2.53',src_port=45000,

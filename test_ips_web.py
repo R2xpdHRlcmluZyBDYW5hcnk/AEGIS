@@ -109,6 +109,15 @@ class ServerCase(unittest.TestCase):
     def auth_headers(self):
         return {"Cookie": "ipsweb_session=test-token"}
 
+    def test_log_page_and_stream_filters_still_require_a_session(self):
+        for path in ('/api/overview?missing_app=1', '/api/hunt?from=100&to=200&offset=50',
+                     '/api/stream?topic=overview&missing_app=1'):
+            for headers in ({}, {'Cookie':'ipsweb_session=invalid-token'}):
+                with self.subTest(path=path, headers=headers):
+                    status, _, data = self.request('GET', path, headers=headers)
+                    self.assertEqual(status, 401)
+                    self.assertIn('error', json.loads(data))
+
     def test_create_actions_reject_duplicates_but_explicit_edit_updates_once(self):
         with tempfile.TemporaryDirectory() as directory:
             paths = {key: str(Path(directory) / key) for key in
@@ -555,6 +564,11 @@ class NDRRegressionCase(unittest.TestCase):
         empty = self.app.overview({'window':'15','sig':"' OR 1=1 --"})
         self.assertEqual(empty['security']['total'],0)
         self.assertEqual(empty['recent'],[])
+        stamp = ips_web.now()
+        for index in range(14):
+            self.add('flow', ts=stamp-60+index, sport=43000+index, proto='UDP', app='')
+        recent = self.app.overview({'window':'15','proto':'UDP','missing_app':'1'})['recent']
+        self.assertEqual([row['sport'] for row in recent], list(range(43013,43003,-1)))
         for invalid in ({'detection':'anything'},{'sid':'nan'},{'sid':'-1'},{'sid':'4294967296'},
                         {'type':'nonsense'},{'src':[]},{'sig':'x'*1025}):
             with self.assertRaises(ValueError):self.app.overview(invalid)
@@ -751,6 +765,20 @@ class NDRRegressionCase(unittest.TestCase):
         self.add(sig='Example MIXED alert')
         data = self.app.hunt({'q': 'sig:*mixed*', 'window': '60', 'icase': '1', 'source': 'db'})
         self.assertEqual(data['total'], 1)
+
+    def test_hunt_paging_can_freeze_the_resolved_rolling_window(self):
+        stamp = ips_web.now()
+        self.add(ts=stamp-2, sig='Older record')
+        self.add(ts=stamp-1, sig='First page record')
+        query = {'window':'60','limit':'1','view':'list'}
+        with mock.patch.object(ips_web, 'now', return_value=stamp):
+            first = self.app.hunt(query)
+        self.assertEqual(first['range'], [stamp-3600, stamp])
+        self.add(ts=stamp+1, sig='New record after paging started')
+        low, high = first['range']
+        second = self.app.hunt({**query, 'from':str(low), 'to':str(high), 'offset':'1'})
+        self.assertEqual(second['total'], first['total'])
+        self.assertEqual(second['events'][0]['sig'], 'Older record')
 
     def test_sid_queries_do_not_get_lost_behind_protocol_scan_limits(self):
         stamp = ips_web.now()

@@ -2,7 +2,7 @@ import { TabMotionDirective } from './tab-motion.directive';
 import { Component, Injectable, signal, effect, untracked, ChangeDetectionStrategy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { Api, ConsoleState, action, date, severity, localDate } from './core';
-import { TableComponent, Column } from './table.component';
+import { TableComponent, Column, lastPageOffset } from './table.component';
 import { ModalComponent } from './modal.component';
 import { evidenceGroups, eventType } from './event-fields';
 import { ConnectionSummaryComponent } from './connection-summary.component';
@@ -47,7 +47,7 @@ export class Details {
   this.stack.update(s=>s.map(v=>v.aiBusy?{...v,aiBusy:'',aiError:'已停止生成',aiProcessOpen:false}:v));
  }
  private stopEvidence():void{this.evidenceRequest?.abort();this.evidenceRequest=undefined;this.stack.update(s=>s.map(v=>v.sessionBusy?{...v,sessionBusy:false}:v));}
- close():void{this.stopGeneration();this.stopEvidence();this.stack.update(s=>s.slice(0,-1));if(this.current?.kind==='event')void this.sessionPage(0);}
+ close():void{this.stopGeneration();this.stopEvidence();this.stack.update(s=>s.slice(0,-1));if(this.current?.kind==='event')void this.sessionPage(this.current.session?.offset||0);}
  dismiss():void{this.stopGeneration();this.stopEvidence();this.stack.set([]);}
  private patch(id:number,patch:any):void{this.api.zone.run(()=>this.stack.update(s=>s.map(v=>v.id===id?{...v,...patch}:v)));}
  async generate(kind:'summary'|'rule'):Promise<void>{
@@ -130,12 +130,27 @@ export class Details {
   const view=this.current;if(!view||view.networkBusy)return;
   const update=(patch:any)=>this.api.zone.run(()=>this.stack.update(s=>s.map(v=>v.id===view.id?{...v,...patch}:v)));
   update({networkBusy:true,networkError:''});
-  try{const data=await this.api.get('/api/incident',{...view.params,network_offset:offset});update({data:this.incidentData(data)});}catch(e:any){update({networkError:e.message});}finally{update({networkBusy:false});}
+  try{
+   while(this.current?.id===view.id){
+    const data=await this.api.get('/api/incident',{...view.params,network_offset:offset});
+    const last=lastPageOffset(data.incident.network_count,data.network_limit||50);
+    if(offset<=last){update({data:this.incidentData(data)});break;}
+    offset=last;
+   }
+  }catch(e:any){update({networkError:e.message});}finally{update({networkBusy:false});}
  }
  async sessionPage(offset:number):Promise<void>{
   const view=this.current;if(view?.kind!=='event'||view.showSession===false||!view.record?.session_id||view.sessionBusy)return;
   this.stopEvidence();const request=this.evidenceRequest=new AbortController();this.patch(view.id,{sessionBusy:true,sessionError:''});
-  try{const result=await this.api.get('/api/session',{session_id:view.record.session_id,offset,limit:50},request.signal);if(!request.signal.aborted&&this.current?.id===view.id)this.patch(view.id,{session:{...result,events:(result.events||[]).map((r:any)=>({...r,summary:r.sig||r.sni||r.dns||r.host||r.type}))}});}
+  try{
+   while(!request.signal.aborted&&this.current?.id===view.id){
+    const result=await this.api.get('/api/session',{session_id:view.record.session_id,offset,limit:50},request.signal);
+    const last=lastPageOffset(result.total);
+    if(offset>last){offset=last;continue;}
+    if(!request.signal.aborted&&this.current?.id===view.id)this.patch(view.id,{session:{...result,events:(result.events||[]).map((r:any)=>({...r,summary:r.sig||r.sni||r.dns||r.host||r.type}))}});
+    break;
+   }
+  }
   catch(e:any){if(!request.signal.aborted)this.patch(view.id,{sessionError:e.message});}
   finally{if(this.evidenceRequest===request){this.evidenceRequest=undefined;this.patch(view.id,{sessionBusy:false});}}
  }
@@ -193,7 +208,7 @@ export class Details {
    <ng-container *ngIf="view.kind==='rule'"><div class="detail-actions"><button (click)="investigateRule(view.data.sid,view.data.gid)">调查相关事件 ↗</button></div><section class="evidence-group"><h3>规则信息</h3><dl class="evidence-fields"><div class="wide"><dt>规则描述</dt><dd>{{view.data.msg || '手动规则'}}</dd></div><div><dt>规则编号（GID:SID）</dt><dd>{{view.data.gid||1}}:{{view.data.sid}}</dd></div><div><dt>实际动作</dt><dd>{{view.data.action || '—'}}</dd></div><div *ngIf="view.data.classtype"><dt>威胁分类</dt><dd>{{view.data.classtype}}</dd></div><div class="wide" *ngIf="view.data.origins?.length"><dt>规则来源</dt><dd><span *ngFor="let o of view.data.origins"><strong class="rule-source">{{o.source}}</strong> {{o.group}} </span></dd></div></dl></section><ndr-attack-mapping [mapping]="view.attackMapping" source="当前规则元数据"/><p class="muted" *ngIf="view.data.builtin"><strong class="rule-source">Snort 内置</strong> 检测签名，支持按签名或分组抑制告警。</p><section class="evidence-group" *ngIf="view.data.line"><div class="section-heading"><h3>规则原文</h3><button class="text-button" (click)="copy(view.data.line)">复制原文</button></div><pre>{{view.data.line}}</pre></section></ng-container>
    <ng-container *ngIf="view.kind==='event'"><div class="detail-actions"><div class="toolbar"><button [disabled]="investigating || !canInvestigate(view.record)" (click)="investigate(view.record)">{{investigating?'正在准备调查…':'调查关联事件 ↗'}}</button><button class="quiet" *ngIf="view.record.sig_id" (click)="details.rule(view.record)">检测规则</button></div><button class="quiet danger" [disabled]="!view.record.src || banning" (click)="ban(view.record.src)">封禁源地址</button></div>
     <div class="evidence-heading"><div class="detail-tags"><span class="badge">{{eventName(view.record.type)}}</span><span class="badge" *ngIf="view.record.action" [class.danger]="view.record.action==='blocked'">{{act(view.record.action)}}</span></div><h3><ndr-connection-summary *ngIf="['flow','session'].includes(view.record.type);else eventHeading" [record]="view.record" [wrap]="true"/><ng-template #eventHeading>{{view.record.sig || view.record.host || view.record.sni || view.record.dns || eventName(view.record.type)}}</ng-template></h3><p class="muted">{{dt(view.record.ts)}}</p></div>
-    <section class="evidence-group session-evidence" *ngIf="view.showSession!==false&&view.record.session_id"><header class="section-heading"><h3>会话</h3><button class="quiet" [disabled]="view.sessionBusy" (click)="details.sessionPage(0)">刷新</button></header><p class="error" role="alert" *ngIf="view.sessionError">{{view.sessionError}}</p><ndr-table id="session-evidence" [columns]="networkColumns" [rows]="view.session?.events || []" [total]="view.session?.total || 0" [offset]="view.session?.offset || 0" [busy]="view.sessionBusy" [interactive]="true" (pageChange)="details.sessionPage($event)" (rowOpen)="details.event($event,false)"/></section>
+    <section class="evidence-group session-evidence" *ngIf="view.showSession!==false&&view.record.session_id"><header class="section-heading"><h3>会话</h3><button class="quiet" [disabled]="view.sessionBusy" (click)="details.sessionPage(view.session?.offset || 0)">刷新</button></header><p class="error" role="alert" *ngIf="view.sessionError">{{view.sessionError}}</p><ndr-table id="session-evidence" [columns]="networkColumns" [rows]="view.session?.events || []" [total]="view.session?.total || 0" [offset]="view.session?.offset || 0" [busy]="view.sessionBusy" [interactive]="true" (pageChange)="details.sessionPage($event)" (rowOpen)="details.event($event,false)"/></section>
     <ndr-attack-mapping [mapping]="view.attackMapping"/>
     <section class="evidence-group" *ngFor="let group of view.groups"><h3>{{group.title}}</h3><dl class="evidence-fields"><div *ngFor="let field of group.fields" [class.wide]="['sig','url','ua','answers','community'].includes(field.key)"><dt>{{field.label}}</dt><dd><ndr-connection-summary *ngIf="field.key==='sig'&&['flow','session'].includes(view.record.type);else evidenceFieldValue" [record]="view.record" [wrap]="true"/><ng-template #evidenceFieldValue><span [class.badge]="field.key==='state'&&['flow','session'].includes(view.record.type)" [class.flow-state]="field.key==='state'&&['flow','session'].includes(view.record.type)">{{field.value}}</span></ng-template></dd></div></dl></section>
     <details class="raw-evidence"><summary>原始 JSON</summary><div class="raw-actions"><button class="text-button" (click)="copyJson(view.data,view.rawText)">复制 JSON</button></div><pre>{{view.rawText || (view.data | json)}}</pre></details>

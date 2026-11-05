@@ -32,7 +32,7 @@ def main():
                 (static/name).write_bytes(data)
         (static/'frontend-build.json').write_text(json.dumps(manifest))
         node,_=toolchain(root);env=environment(node,root);stop=root/'stop'
-        env.update(NDR_PREVIEW_STATIC_DIR=str(static),NDR_PREVIEW_AI='1',NDR_PREVIEW_SESSION='1',NDR_PREVIEW_PAGING='1',
+        env.update(NDR_PREVIEW_STATIC_DIR=str(static),NDR_PREVIEW_AI='1',NDR_PREVIEW_SESSION='1',NDR_PREVIEW_PAGING='1',NDR_PREVIEW_PAGING_EVIDENCE='1',
                    NDR_PREVIEW_STOP_FILE=str(stop),NDR_TEST_OUTPUT=str(root/'screenshots'))
         with (root/'preview.log').open('w') as log:
             server=subprocess.Popen([sys.executable,'-B',str(ROOT/'tests/serve_preview.py')],cwd=ROOT,env=env,stdout=log,stderr=subprocess.STDOUT)
@@ -43,7 +43,7 @@ def main():
                         urllib.request.urlopen('http://127.0.0.1:19090/login',timeout=.5).close();break
                     except OSError:time.sleep(.1)
                 else:raise RuntimeError('Synthetic preview did not start')
-                scripts=('angular-hunt-suggestions.mjs',) if args.search_only else ('angular-local-llm.mjs','angular-hunt-suggestions.mjs')
+                scripts=('angular-hunt-suggestions.mjs',) if args.search_only else ('angular-local-llm.mjs','angular-hunt-suggestions.mjs','angular-pagination.mjs')
                 for script in scripts:
                     print('RUN '+script,flush=True)
                     subprocess.run([str(node),str(ROOT/'tests'/script)],cwd=ROOT,env=env,check=True,timeout=180)

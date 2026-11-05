@@ -34,7 +34,7 @@ import { eventType } from '../event-fields';
    <div class="visibility-grid"><section class="card"><header><h2>高频连接源</h2></header><ndr-table id="network-sources" [columns]="sourceColumns" [rows]="n.sources || []" [pagination]="false" [fit]="true" [interactive]="true" (rowOpen)="filterConnectionSource($event)"/></section><section class="card"><header><h2>采集记录分布</h2><span class="muted">{{n.records | number}} 条记录</span></header><ndr-table id="network-types" [columns]="typeColumns" [rows]="n.event_types || []" [pagination]="false" [fit]="true" [interactive]="true" (rowOpen)="filterRecordType($event)"/><div class="capture-directions"><span>双向连接记录 <strong>{{n.bidirectional | number}}</strong></span><span>单向连接记录 <strong>{{n.one_way | number}}</strong></span></div></section></div>
    </ng-container><ng-template #networkPreparing><div class="empty card network-preparing" role="status">{{networkStatus(n)}}</div></ng-template>
    </ng-container>
-  <section class="card"><header><h2>最新日志</h2></header><ndr-table id="recent" [columns]="recentColumns" [rows]="d.recent || []" [interactive]="true" (rowOpen)="details.event($event)"/></section>
+  <section class="card"><header><h2>最新日志</h2></header><ndr-table id="recent" [columns]="recentColumns" [rows]="(d.recent || []).slice(0,10)" [pagination]="false" [interactive]="true" (rowOpen)="details.event($event)"/></section>
   <details class="card telemetry engine-counters"><summary>累计引擎计数</summary><dl class="counter-grid"><div><dt>放行包</dt><dd>{{d.ips?.accepted | number}}</dd></div><div><dt>阻断包</dt><dd>{{d.ips?.blocked | number}}</dd></div><div><dt>规则丢包</dt><dd>{{d.ips?.rule_drops | number}}</dd></div><div><dt>引擎丢包</dt><dd>{{d.ips?.engine_drops | number}}</dd></div></dl></details>
  <ndr-modal *ngIf="expandedChart" title="告警与阻断趋势" [wide]="true" (closed)="expandedChart=false"><div class="chart-expanded"><ndr-chart [points]="d.series || []" [viewport]="chartViewport" (pointOpen)="filterTrend($event)"/></div></ndr-modal>
  </ng-container><ng-template #loading><div class="empty card">正在连接检测引擎…</div></ng-template>
@@ -91,7 +91,8 @@ export class OverviewComponent implements OnInit,OnDestroy {
   }else if(row.ip)this.applyFilter(top.field,(top.field==='src'?'源地址 ':'目的地址 ')+row.ip,{[top.field]:row.ip});
  }
  filterNetwork(top:any,row:any):void{
-  this.applyFilter(top.field,top.title+' '+row.name,{[top.field]:row.name==='未识别'?'':row.name});
+  const params=row.name==='未识别'?{['missing_'+top.field]:'1'}:{[top.field]:row.name};
+  this.applyFilter(top.field,top.title+' '+row.name,params);
  }
  filterConnectionSource(row:any):void{this.applyFilter('src','连接源 '+row.ip,{src:row.ip,connection:'1'});}
  filterRecordType(row:any):void{this.filterKind(row.name,eventType(row.name)+' 相关会话');}

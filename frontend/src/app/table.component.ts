@@ -6,6 +6,7 @@ import { engineAction, eventType } from './event-fields';
 import { ConnectionSummaryComponent } from './connection-summary.component';
 import { RuleTargetComponent } from './rule-target.component';
 export interface Column {key:string;label:string;kind?:string;width?:number;}
+export function lastPageOffset(total:number,size=50):number{return Math.floor(Math.max(0,total-1)/size)*size;}
 @Component({changeDetection:ChangeDetectionStrategy.Eager,selector:'ndr-table',standalone:true,imports:[CommonModule,FormsModule,ConnectionSummaryComponent,RuleTargetComponent],template:`
   <form class="table-tools" *ngIf="filterable" (ngSubmit)="submitFilter()"><label class="search"><span>⌕</span><input type="search" name="filter" autocomplete="off" data-1p-ignore="true" [attr.aria-label]="serverFilter?'搜索规则签名':label+'搜索'" [placeholder]="serverFilter?'搜索规则全文 / 分组 / 源 / sid:编号':'搜索完整列表…'" [ngModel]="query" (ngModelChange)="updateFilter($event)"></label><button type="submit" [disabled]="busy">搜索</button></form>
   <div class="table-data"><div class="table-progress" *ngIf="busy" role="progressbar" aria-label="正在加载表格"><span></span></div>
@@ -18,7 +19,7 @@ export interface Column {key:string;label:string;kind?:string;width?:number;}
       <td *ngFor="let c of columns;trackBy:trackColumn" [class.mono]="c.kind==='mono'" [attr.title]="c.kind==='eventSummary'&&['flow','session'].includes(row.type)?null:format(row[c.key],c.kind)"><ndr-connection-summary *ngIf="c.kind==='eventSummary'&&['flow','session'].includes(row.type);else plainCell" [record]="row"/><ng-template #plainCell><ng-container [ngSwitch]="c.kind"><strong *ngSwitchCase="'source'" class="rule-source">{{format(row[c.key])}}</strong><ndr-rule-target *ngSwitchCase="'scope'" [name]="row.targetName || row[c.key]" [source]="row.targetSource || ''"/><ng-container *ngSwitchCase="'origins'"><ndr-rule-target *ngFor="let origin of row.origins" [name]="origin.group" [source]="origin.source"/> </ng-container><span *ngSwitchDefault [class.badge]="c.kind==='severity'||c.kind==='action'||c.kind==='status'" [class.danger]="c.kind==='severity'&&row[c.key]===1 || c.kind==='action'&&format(row[c.key],c.kind)==='已阻断'">{{format(row[c.key],c.kind)}}</span></ng-container></ng-template></td><td *ngIf="interactive && showDetails" class="row-command"><button class="text-button" aria-label="查看详情" (click)="$event.stopPropagation();activate($event,row)">查看 ↗</button></td></tr>
       <tr *ngIf="!visible.length"><td [attr.colspan]="columns.length+(selectable?1:0)+(interactive&&showDetails?1:0)" class="empty">{{busy?'正在加载…':empty}}</td></tr></tbody>
   </table></div></div>
-  <div class="pager" *ngIf="pagination"><span>{{count | number}} 条 每页 {{size}} 条</span><div><button class="quiet" [disabled]="current===0 || busy" (click)="move(-1)">← 上一页</button><span>{{current+1}} / {{pageCount}}</span><button class="quiet" [disabled]="current+1>=pageCount || busy" (click)="move(1)">下一页 →</button></div></div>
+  <div class="pager" *ngIf="pagination"><span>{{busy&&!count?'正在加载…':(count | number)+' 条 每页 '+size+' 条'}}</span><div><button class="quiet" [disabled]="current===0 || busy" (click)="move(-1)">← 上一页</button><span>{{busy&&!count?'—':(current+1)+' / '+pageCount}}</span><button class="quiet" [disabled]="current+1>=pageCount || busy" (click)="move(1)">下一页 →</button></div></div>
 `})
 export class TableComponent implements OnChanges,OnDestroy {
   @Input() serverFilter=false;@Input() searchValue='';@Output() searchValueChange=new EventEmitter<string>();@Output() searchRequested=new EventEmitter<string>();@Input() fit=false;@Input() id='table';@Input() label='表格';@Input() columns:Column[]=[];@Input() rows:any[]=[];
@@ -30,9 +31,10 @@ export class TableComponent implements OnChanges,OnDestroy {
   private pageAnchor:number|null=null;
   constructor(private host:ElementRef<HTMLElement>){afterEveryRender(()=>this.positionPage());}
   private positionPage():void{
-    if(this.pageAnchor===null||this.busy||(this.total!==null&&this.offset!==this.pageAnchor))return;
-    const row=this.host.nativeElement.querySelector<HTMLElement>('tbody tr');if(!row)return;
+    if(this.pageAnchor===null||this.busy)return;
+    const moved=this.total===null||this.offset!==this.pageAnchor;
     this.pageAnchor=null;
+    const row=moved?this.host.nativeElement.querySelector<HTMLElement>('tbody tr'):null;if(!row)return;
     const heading=this.host.nativeElement.querySelector('thead')?.getBoundingClientRect().height||0;
     let scroll:HTMLElement|null=row.parentElement,positioned=false;
     while(scroll){
@@ -62,13 +64,13 @@ export class TableComponent implements OnChanges,OnDestroy {
   get count():number{return this.total??this.filtered.length;}
   get current():number{return this.total!==null?Math.floor(this.offset/this.size):Math.min(this.page,this.pageCount-1);}
   get pageCount():number{return Math.max(1,Math.ceil(this.count/this.size));}
-  get visible():any[]{return this.total!==null?this.rows:this.filtered.slice(this.current*this.size,(this.current+1)*this.size);}
+  get visible():any[]{return this.total!==null?this.rows:!this.pagination?this.filtered:this.filtered.slice(this.current*this.size,(this.current+1)*this.size);}
   get allSelected():boolean {const rows=this.visible.filter(r=>!r._disabled);return !!rows.length&&rows.every(r=>this.selected.has(this.key(r)));}
   get someSelected():boolean{return !this.allSelected&&this.visible.some(r=>this.selected.has(this.key(r)));}
   get minimumWidth():number{if(this.fit&&!this.widths.length)return 0;return this.columns.reduce((n,c,i)=>n+(this.widths[i]||c.width||150),(this.selectable?44:0)+(this.interactive&&this.showDetails?86:0));}
   toggle(row:any,event:Event):void {const input=event.target as HTMLInputElement,checked=input.checked;const next=new Set(this.selected),key=this.key(row);checked?next.add(key):next.delete(key);this.selected=next;this.selectedChange.emit(next);}
   selectPage(event:Event):void {const input=event.target as HTMLInputElement,checked=input.checked;const next=new Set(this.selected);for(const row of this.visible.filter(r=>!r._disabled)){const k=this.key(row);checked?next.add(k):next.delete(k);}this.selected=next;this.selectedChange.emit(next);}
-  move(delta:number):void {const next=Math.max(0,Math.min(this.pageCount-1,this.current+delta));if(next===this.current||this.busy)return;this.pageAnchor=next*this.size;if(this.total!==null)this.pageChange.emit(this.pageAnchor);else this.page=next;}
+  move(delta:number):void {const next=Math.max(0,Math.min(this.pageCount-1,this.current+delta));if(next===this.current||this.busy)return;this.pageAnchor=this.offset;if(this.total!==null)this.pageChange.emit(next*this.size);else this.page=next;}
   format(v:any,kind?:string):string {if(v===null||v===undefined||v==='')return '—';if(kind==='eventType')return eventType(v);if(kind==='engineAction')return engineAction(v);if(kind==='time')return date(v);if(kind==='bytes')return bytes(v);if(kind==='severity')return severity(v);if(kind==='action')return action(v);if(Array.isArray(v))return v.join(', ');return String(v);}
   begin(event:PointerEvent,index:number):void {if(event.button!==0)return;event.preventDefault();(event.target as HTMLElement).setPointerCapture(event.pointerId);this.dragging={index,x:event.clientX,width:this.widths[index]||this.columns[index].width||150};}
   @HostListener('window:pointermove',['$event']) drag(event:PointerEvent):void {if(!this.dragging)return;this.widths[this.dragging.index]=Math.min(2400,Math.max(64,this.dragging.width+event.clientX-this.dragging.x));}

@@ -82,7 +82,7 @@ export class LiveQuery {
   constructor(private api:Api,private receive:(data:any)=>void,private error:(message:string)=>void){}
   start(path:string,params:Record<string,any>,topic?:string):void {
     this.stop();const revision=this.revision;
-    const accept=(data:any)=>this.api.zone.run(()=>{this.receive(data);if(data.read_state?.status==='stale')this.error('更新延迟，显示上次结果'+(data.read_state.as_of?'（'+date(data.read_state.as_of)+'）':'')+(data.read_state.error?'：'+data.read_state.error:''));});
+    const accept=(data:any)=>this.api.zone.run(()=>{this.receive(data);if(revision===this.revision&&data.read_state?.status==='stale')this.error('更新延迟，显示上次结果'+(data.read_state.as_of?'（'+date(data.read_state.as_of)+'）':'')+(data.read_state.error?'：'+data.read_state.error:''));});
     const interrupted=(message:string)=>{if(this.interruption)return;this.interruption=setTimeout(()=>{this.interruption=undefined;if(revision===this.revision&&this.source?.readyState!==EventSource.OPEN)this.api.zone.run(()=>this.error(message));},6000);};
     const fetch=()=>{if(this.request)return;const request=this.request=new AbortController();return this.api.get(path,params,request.signal).then(data=>{if(revision===this.revision&&!request.signal.aborted){clearTimeout(this.interruption);this.interruption=undefined;accept(data);}}).catch(e=>{if(revision===this.revision&&!request.signal.aborted){if(topic)interrupted(e.message);else this.api.zone.run(()=>this.error(e.message));}}).finally(()=>{if(this.request===request)this.request=undefined;});};
     if(topic){
