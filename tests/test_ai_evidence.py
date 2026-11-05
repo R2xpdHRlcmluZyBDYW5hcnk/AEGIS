@@ -31,15 +31,34 @@ class EvidenceTests(unittest.TestCase):
         data=json.loads(payload['messages'][1]['content']);self.assertEqual(data['dns_hint']['name'],'normal.example.test')
         self.assertEqual(context['total_records'],1)
 
-    def test_model_authored_ioc_query_cannot_leave_observed_indicators_or_nearby_period(self):
+    def test_behavior_search_can_find_unalerted_traffic_with_different_indicators(self):
         self.add('tls',0,tls=dict(sni='observed.example.test'))
-        self.add('alert',20,fixture.SECOND,alert=dict(signature='related',signature_id=77,severity=1))
-        self.add('alert',30,fixture.RESTART,src_ip='192.0.2.99',dest_ip='198.51.100.99',alert=dict(signature='unrelated',signature_id=77,severity=1))
-        self.add('alert',10000,fixture.RESTART,alert=dict(signature='too late',signature_id=77,severity=1))
-        result=self.app.summary_hunt(dict(session_id=fixture.FIRST,scope='ioc',query='type:alert AND sid:77'))
-        self.assertEqual(result['total'],1);self.assertEqual(result['records'][0]['sig'],'related')
-        self.assertEqual(result['scope'],'ioc');self.assertIsNotNone(m.hunt_parse(result['query']))
-        with self.assertRaises(ValueError):self.app.summary_hunt(dict(session_id=fixture.FIRST,scope='ioc',query='payload:secret'))
+        for offset in (20,21,22):
+            self.add('flow',offset,fixture.SECOND,src_ip='192.0.2.99',dest_ip='198.51.100.99',
+                     flow=dict(state='closed',bytes_toserver=12000,bytes_toclient=0,pkts_toserver=10,pkts_toclient=0))
+        self.add('flow',10000,fixture.RESTART,flow=dict(bytes_toserver=12000,bytes_toclient=0))
+        query='type:flow AND bytes_toserver:>10000 AND bytes_toclient:0'
+        result=self.app.summary_hunt(dict(target=self.target(),query=query))
+        self.assertEqual(result['total'],3);self.assertEqual(len(result['records']),1)
+        row=result['records'][0];self.assertEqual(row['src'],'192.0.2.99');self.assertEqual(row['dst'],'198.51.100.99')
+        self.assertEqual(result['scope'],'related');self.assertIsNotNone(m.hunt_parse(result['query']))
+        self.assertFalse(row.get('sig_id'));self.assertTrue(result['excluded_current_session'])
+        self.assertEqual(row['_retained_detections'],0)
+        context=self.app.summary_context(self.target());payload,_=summary_payload(context,[result])
+        data=json.loads(payload['messages'][1]['content'])
+        self.assertTrue(any(row.get('relation')=='candidate_related' and row.get('bytes_toserver')==12000 for row in data['records']))
+        self.assertEqual(context['total_records'],1)
+        with self.assertRaises(ValueError):self.app.summary_hunt(dict(target=self.target(),query='time:[0 TO *]'))
+
+    def test_anonymous_event_can_search_nearby_metadata_without_merging_identity(self):
+        self.add('tls',0,None,tls=dict(sni='anonymous.example.test'))
+        _,rows=self.db.search_range(self.stamp-1,self.stamp+1,types=['tls'],list_view=True)
+        target=dict(kind='record',key=rows[0]['record_id'])
+        self.add('http',10,fixture.SECOND,http=dict(status=503))
+        context=self.app.summary_context(target);self.assertEqual(context['total_records'],1)
+        result=self.app.summary_hunt(dict(target=target,query='status:>499'))
+        self.assertEqual(result['total'],1);self.assertFalse(result['excluded_current_session'])
+        self.assertNotIn('session_id:',result['query'])
 
     def test_csv_includes_blocked_native_detections_and_excludes_ruleless_drops(self):
         self.add('drop',0,alert=dict(signature='blocked detection',signature_id=77,severity=1,action='blocked'))

@@ -47,8 +47,7 @@ class Provider(BaseHTTPRequestHandler):
         if text is None:
             system=self.server.payload['messages'][0]['content']
             if '狩猎助手' in system:
-                data=json.loads(self.server.payload['messages'][1]['content'])
-                text=json.dumps(data['reply_example'])
+                text=json.dumps({'queries':[{'query':'proto:TCP AND dport:443','reason':'比较附近的加密连接'}]})
             elif '四段' in system:
                 text='通信概览：当前会话存在通信记录。\n行为与处置：结合检索结果核查。\n研判依据：尚不能确认入侵成功。\n建议核查：查看命中日志。'
             else:

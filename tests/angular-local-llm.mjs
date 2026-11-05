@@ -24,7 +24,8 @@ try{
  async function click(text,scope='document'){const selector=`[...${scope}.querySelectorAll('button')].find(b=>b.textContent.trim()===${JSON.stringify(text)}&&!b.disabled)`;await until(`!!(${selector})`);await evaluate(`(${selector}).click()`);}
  async function api(url,body){return evaluate(`fetch(${JSON.stringify(url)},${body===undefined?'{}':JSON.stringify({method:'POST',headers:{'Content-Type':'application/json','X-Requested-With':'ips-web'},body:JSON.stringify(body)})}).then(r=>r.json())`);}
  const status=()=>api('/__test/ai-status');
- async function openIncident(){await until(`document.querySelector('ndr-events ndr-table tbody tr')?.textContent.includes('Suspicious')`);await evaluate(`document.querySelector('ndr-events ndr-table tbody tr').click()`);await until(`!!document.querySelector('.incident-heading')`);}
+ async function summarize(){await until(`!!document.querySelector('.local-assistant .ai-body>.toolbar>button:not(:disabled)')`);await evaluate(`document.querySelector('.local-assistant .ai-body>.toolbar>button').click()`);}
+ async function openIncident(generate=true){await until(`document.querySelector('ndr-events ndr-table tbody tr')?.textContent.includes('Suspicious')`);await evaluate(`document.querySelector('ndr-events ndr-table tbody tr').click()`);await until(`!!document.querySelector('.incident-heading')`);if(generate)await summarize();}
  async function close(){await evaluate(`document.querySelector('ndr-details [aria-label="关闭"]').click()`);await until(`!document.querySelector('ndr-details dialog')`);}
  async function waitCalls(count){for(let i=0;i<50;i++){if((await status()).calls>=count)return;await pause(100);}throw Error('Expected model request '+count);}
  async function waitCancelled(count){for(let i=0;i<30;i++){if((await status()).cancellations>=count)return;await pause(100);}throw Error('Upstream inference did not stop');}
@@ -33,14 +34,15 @@ try{
  await evaluate(`document.querySelector('#password').value='preview-only';document.querySelector('form').submit()`);
  await until(`!!document.querySelector('[data-page="alerts"]')`);
  assert.equal((await status()).calls,0,'opening the dashboard does not invoke the model');
- await evaluate(`document.querySelector('[data-page="alerts"]').click()`);await openIncident();
+ await evaluate(`document.querySelector('[data-page="alerts"]').click()`);await openIncident(false);
+ await pause(350);assert.equal((await status()).calls,0,'opening incident does not invoke inference');await summarize();
  await until(`document.querySelector('.ai-summary')?.textContent.includes('尚不能确认')`);
- assert.deepEqual((await status()).stages,['hunt','summary'],'opening incident plans searches and generates a summary');
+ assert.deepEqual((await status()).stages,['hunt','summary'],'the summary button plans searches and generates a summary');
  assert.equal(await evaluate(`!!document.querySelector('.ai-rule pre')`),false,'opening incident does not generate a rule');
  assert.equal((await api('/api/hunt/rules')).rules.length,0,'generation does not save rules');
  assert.ok(await evaluate(`document.querySelector('.ai-summary').textContent.includes('7 条会话记录')`));
  await evaluate(`document.querySelector('.ai-hunts').open=true`);await until(`!!document.querySelector('.ai-hunts pre')`);
- assert.ok(await evaluate(`document.querySelector('.ai-hunts pre').textContent.startsWith('session_id:')`));
+ assert.ok(await evaluate(`document.querySelector('.ai-hunts pre').textContent.startsWith('(proto:TCP AND dport:443)')`));
  if(process.env.NDR_TEST_SCREENSHOT){const shot=await cdp('Page.captureScreenshot',{format:'png'});await writeFile(process.env.NDR_TEST_SCREENSHOT,Buffer.from(shot.data,'base64'));}
  await click('生成规则建议');await until(`!!document.querySelector('.ai-rule pre')`);
  assert.equal((await status()).stages.at(-1),'rule','rule generation requires its own click');
@@ -48,20 +50,19 @@ try{
  assert.equal((await api('/api/hunt/rules')).rules.length,1);
  await click('查看命中日志 ↗',`document.querySelector('.ai-hunts')`);await until(`location.hash==='#hunt'&&!document.querySelector('ndr-details dialog')`);
  await until(`document.querySelector('ndr-hunt-query input')?.value.includes('session_id:')`);
- assert.ok(await evaluate(`document.querySelector('ndr-hunt-query input').value.includes('type:alert')`));
+ assert.ok(await evaluate(`document.querySelector('ndr-hunt-query input').value.includes('NOT session_id:')`));
+ await until(`document.querySelector('ndr-events tbody')?.textContent.includes('unalerted.example.test')`);
  await evaluate(`location.hash='#alerts'`);await openIncident();await until(`!!document.querySelector('.ai-summary')`);
- assert.equal(await evaluate(`!!document.querySelector('.ai-rule pre')`),false,'reopening only refreshes summary');await close();
- await api('/__test/ai-plan',{mode:'natural'});await openIncident();await until(`document.querySelector('.ai-summary')?.textContent.includes('已使用基础核查条件')`);
- await evaluate(`document.querySelector('.ai-hunts').open=true`);
- assert.equal(await evaluate(`[...document.querySelectorAll('.ai-hunts pre')].some(e=>e.textContent.includes('检查'))`),false,'natural-language model replies are never rendered as executable searches');
- assert.equal(await evaluate(`document.querySelector('.ai-hunts').textContent.includes('校验失败')||document.querySelector('.ai-hunts').textContent.includes('检索未完成')`),false,'fallback checks execute successfully');
+ assert.equal(await evaluate(`!!document.querySelector('.ai-rule pre')`),false,'the summary action does not generate a rule');await close();
+ await api('/__test/ai-plan',{mode:'natural'});await openIncident();await until(`document.querySelector('.ai-summary')?.textContent.includes('本次总结依据当前证据')`);
+ assert.equal(await evaluate(`!!document.querySelector('.ai-hunts')`),false,'invalid planner output never executes a fixed fallback search');
  await close();await api('/__test/ai-plan',{mode:'default'});
- // All detail entry points auto-summarize; rules still require an explicit click.
- async function openEvent(){
+ // All detail entry points require an explicit summary or rule action.
+ async function openEvent(generate=true){
   await evaluate(`location.hash='#hunt'`);await until(`!!document.querySelector('ndr-hunt-query input')`);
   await evaluate(`(()=>{const e=document.querySelector('ndr-hunt-query input');e.value='';e.dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('ndr-events form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));})()`);
   await until(`document.querySelector('ndr-events ndr-table tbody tr')?.textContent.includes('Suspicious')&&document.querySelector('ndr-events .table-scroll')?.getAttribute('aria-busy')==='false'`);
-  await evaluate(`document.querySelector('ndr-events ndr-table tbody tr').click()`);await until(`!!document.querySelector('.evidence-heading')`);
+  await evaluate(`document.querySelector('ndr-events ndr-table tbody tr').click()`);await until(`!!document.querySelector('.evidence-heading')`);if(generate)await summarize();
  }
  async function cancelCase(stage,action='close',event=false){
   await api('/__test/ai-stall',{stall:true,stage});const before=await status();
@@ -77,16 +78,16 @@ try{
   await waitCancelled(before.cancellations+1);
  }
  await cancelCase('hunt');await cancelCase('summary','escape');await cancelCase('hunt','navigate');await cancelCase('hunt','close',true);
- await api('/__test/ai-stall',{stall:false});let before=await status();await openEvent();
- await until(`document.querySelector('.ai-summary')?.textContent.includes('尚不能确认')`);assert.ok((await status()).calls>=before.calls+2,'hunting detail auto-generates a summary');
+ await api('/__test/ai-stall',{stall:false});let before=await status();await openEvent(false);await pause(350);assert.equal((await status()).calls,before.calls,'hunting detail does not invoke inference');await summarize();
+ await until(`document.querySelector('.ai-summary')?.textContent.includes('尚不能确认')`);assert.ok((await status()).calls>=before.calls+2,'the hunting detail summary button invokes inference');
  assert.ok(await evaluate(`[...document.querySelectorAll('.local-assistant button')].some(b=>b.textContent.trim()==='生成规则建议'&&!b.disabled)`),'ordinary logs also expose rule generation');
  await until(`document.querySelectorAll('#session-evidence tbody tr').length>=2`);
  assert.equal(await evaluate(`document.querySelector('.session-evidence h3').textContent.trim()`),'会话');
  assert.ok(await evaluate(`(()=>{const card=document.querySelector('.local-assistant'),header=card.querySelector(':scope>.section-heading'),reference=document.querySelector('.session-evidence'),other=reference.querySelector('.section-heading'),style=getComputedStyle(header),standard=getComputedStyle(other);return Math.abs(header.getBoundingClientRect().width-card.clientWidth)<1&&style.backgroundColor===standard.backgroundColor&&style.paddingTop===standard.paddingTop&&getComputedStyle(card).borderColor===getComputedStyle(reference).borderColor&&Math.abs(header.getBoundingClientRect().height-other.getBoundingClientRect().height)<1;})()`),'assistant header uses the evidence card style');
  assert.ok(await evaluate(`(()=>{const card=document.querySelector('.session-evidence'),next=[...document.querySelectorAll('.evidence-group')].find(e=>e!==card&&e.getBoundingClientRect().top>=card.getBoundingClientRect().bottom);return next&&next.getBoundingClientRect().top-card.getBoundingClientRect().bottom>=16;})()`),'evidence cards keep their spacing');
  await click('刷新',`document.querySelector('.session-evidence')`);await until(`!document.querySelector('.session-evidence button').disabled`);
- await evaluate(`document.querySelector('#session-evidence tbody tr').click()`);await until(`!!document.querySelector('.evidence-heading')&&!document.querySelector('#session-evidence')`);
- await until(`!!document.querySelector('.ai-summary')`);await click('← 返回上一层');await until(`document.querySelectorAll('#session-evidence tbody tr').length>=2&&!!document.querySelector('.ai-summary')`);
+ const nestedBefore=await status();await evaluate(`document.querySelector('#session-evidence tbody tr').click()`);await until(`!!document.querySelector('.evidence-heading')&&!document.querySelector('#session-evidence')`);
+ await pause(250);assert.equal((await status()).calls,nestedBefore.calls,'nested logs do not start inference');await summarize();await until(`!!document.querySelector('.ai-summary')`);const backBefore=await status();await click('← 返回上一层');await until(`document.querySelectorAll('#session-evidence tbody tr').length>=2&&!!document.querySelector('.ai-summary')`);await pause(250);assert.equal((await status()).calls,backBefore.calls,'returning to previous details does not restart inference');
  await click('生成规则建议');await until(`!!document.querySelector('.ai-rule pre')`);
  assert.ok(await evaluate(`document.querySelector('.ai-rule pre').textContent.includes('any any -> any')`),'rule generation uses content rather than fixed endpoint pairs');
  await evaluate(`(()=>{const select=document.querySelector('select[aria-label="规则动作"]');select.value='block';select.dispatchEvent(new Event('change',{bubbles:true}));})()`);
@@ -103,7 +104,7 @@ try{
  assert.equal((await api('/api/hunt/rules')).rules.length,1,'cancelled requests never write manual rules');
  assert.deepEqual(exceptions,[]);
  await api('/__test/ai-stall',{stall:false});
- console.log('PASS: unified automatic detail summaries and feature-based rule suggestions; explicit writes; cancellation on close/navigation/unload and continuation on blur; consistent card headers');
+ console.log('PASS: manual detail summaries and autonomous related-event searches and feature-based rule suggestions; explicit writes; cancellation on close/navigation/unload and continuation on blur; consistent card headers');
 }finally{
  if(ws)ws.close();chrome.kill();await pause(500);
  const resolved=path.resolve(profile);assert.ok(path.dirname(resolved)===path.resolve(tmpdir())&&path.basename(resolved).startsWith('ndr-chrome-'));

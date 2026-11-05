@@ -20,7 +20,7 @@ MCP 无法读取若干源码目录，补充使用官方 GitHub contents API 定�
 
 ## 当前实现
 
-事件搜索采用 Lucene 查询语法，由 Luqum 解析，SQLite 执行。服务端验证字段、值类型、AST 节点与复杂度，再编译为固定表达式和绑定参数。没有 OpenSearch、JavaScript 后端、任意 SQL、脚本或命令执行入口。LLM 可以拟定查询，后端再次校验并强制限定当前会话，或已观察指标及附近时间范围；失败时回退到已知核查项，不能执行自然语言说明。
+事件搜索采用 Lucene 查询语法，由 Luqum 解析，SQLite 执行。服务端验证字段、值类型、AST 节点与复杂度，再编译为固定表达式和绑定参数。没有 OpenSearch、JavaScript 后端、任意 SQL、脚本或命令执行入口。LLM 自主拟定元数据查询，后端校验语法、字段、复杂度与参数化执行，限制附近时间和运行时长，默认查找其他会话；不强制命中当前 IOC 或告警。无效计划不执行，也不替换为固定查询。
 
 ```text
 type:(http OR tls) AND NOT action:blocked

@@ -9,7 +9,7 @@ from unittest import mock
 
 from tests import test_data_layer as fixture
 from tests.test_llm_assistant import Provider
-from llm_assistant import LocalAssistant, summary_payload, SUMMARY_PROMPT, hunt_options, hunt_plan_payload, select_hunts
+from llm_assistant import LocalAssistant, summary_payload, SUMMARY_PROMPT, hunt_plan_payload, select_hunts
 
 m = fixture.m
 FIRST = 'a'*32+':0000000000000001'
@@ -64,19 +64,19 @@ class SessionContextTests(unittest.TestCase):
         context=self.app.summary_context(dict(kind='record',key=rows[0]['record_id']))
         self.assertEqual(context['scope'],'event');self.assertEqual(context['total_records'],1)
 
-    def test_hunt_queries_execute_same_dsl_but_cannot_escape_session_or_read_payloads(self):
+    def test_hunt_queries_search_other_sessions_without_reading_payloads(self):
         for offset in range(8):self.add('http',offset,app_proto='http',http=dict(status=403))
         self.add('http',9,SECOND,app_proto='http',http=dict(status=500))
         with mock.patch.object(m.zlib,'decompress',side_effect=AssertionError('raw')):
-            result=self.app.summary_hunt(dict(session_id=FIRST,query='type:http AND status:>=400'))
-        self.assertEqual(result['total'],8);self.assertEqual(len(result['records']),4)
-        self.assertTrue(all(r['session_id']==FIRST for r in result['records']))
-        self.assertIn('session_id: '+json.dumps(FIRST),result['query'])
+            result=self.app.summary_hunt(dict(target=self.target('http'),query='type:http AND status:>=400'))
+        self.assertEqual(result['total'],1);self.assertEqual(len(result['records']),1)
+        self.assertEqual(result['records'][0]['session_id'],SECOND)
+        self.assertIn('NOT session_id:'+json.dumps(FIRST),result['query'])
         self.assertIsNotNone(m.hunt_parse(result['query']))
         for query in ('session_id:"'+SECOND+'"','payload:secret','type:http OR session_id:*','free text',
-                      'status:not-a-number','type:http '*40,'type:http OR "x OR 1=1"'):
+                      'status:not-a-number','type:http '*40,'type:http OR "x OR 1=1"','type:*'):
             with self.subTest(query=query),self.assertRaises(ValueError):
-                self.app.summary_hunt(dict(session_id=FIRST,query=query))
+                self.app.summary_hunt(dict(target=self.target('http'),query=query))
 
     def test_signed_incident_summary_uses_same_full_session_as_record_summary(self):
         self.add('alert',0,alert=dict(signature='Observed command',signature_id=15,severity=2,action='allowed'))
@@ -111,17 +111,18 @@ class SummaryPipelineTests(unittest.TestCase):
         self.add('http',1,app_proto='http',http=dict(hostname='observed.example.test',status=403))
         self.add('http',3,app_proto='http',http=dict(hostname='observed.example.test',status=200))
         self.add('tls',2,tls=dict(sni='observed.example.test',version='TLS 1.3'))
+        self.add('http',4,SECOND,src_ip='192.0.2.99',dest_ip='198.51.100.99',http=dict(status=403))
         assistant,server=self.provider()
         def respond(payload):
-            return json.dumps({'checks':['http_errors']}) if '狩猎助手' in payload['messages'][0]['content'] else '通信概览：HTTP 返回403。研判依据：尚未证实攻击。'
+            return json.dumps({'queries':[{'query':'status:[400 TO *]','reason':'比较其他连接的响应'}]}) if '狩猎助手' in payload['messages'][0]['content'] else '通信概览：HTTP 返回403。研判依据：尚未证实攻击。'
         server.response_for=respond
         output=[]
         assistant.generate(self.app,'owner',dict(kind='summary',target=self.target()),lambda v:output.append(v) or True,lambda:False)
         result=output[-1]['result']
         self.assertEqual(server.calls,2)
-        self.assertEqual([h['total'] for h in result['hunts']],[0,1])
+        self.assertEqual([h['total'] for h in result['hunts']],[1])
         final=json.loads(server.payloads[-1]['messages'][1]['content'])
-        self.assertEqual([h['hits'] for h in final['hunt']],[0,1])
+        self.assertEqual([h['hits'] for h in final['hunt']],[1])
         self.assertEqual(final['flow']['bytes_toserver'],1200)
         self.assertTrue(any(r.get('status')==403 for r in final['records']))
         self.assertEqual(result['context']['total_records'],4)
@@ -142,7 +143,7 @@ class SummaryPipelineTests(unittest.TestCase):
         self.assertFalse(thread.is_alive());self.assertTrue(server.cancelled.wait(1))
         self.assertFalse(errors);self.assertFalse(any('result' in v for v in output))
 
-    def test_natural_language_and_malformed_plans_execute_only_valid_fallback_checks(self):
+    def test_malformed_plans_do_not_execute_fixed_or_natural_language_searches(self):
         self.add('tls',0,tls=dict(sni='alpha.example.test'))
         self.add('alert',1,alert=dict(signature='Observed',signature_id=15,severity=2))
         assistant,server=self.provider()
@@ -153,12 +154,8 @@ class SummaryPipelineTests(unittest.TestCase):
                 output=[]
                 assistant.generate(self.app,'owner',dict(kind='summary',target=self.target()),lambda v:output.append(v) or True,lambda:False)
                 result=output[-1]['result']
-                self.assertEqual(result['hunt_status'],'fallback')
-                self.assertEqual(result['hunts'][0]['total'],1)
-                self.assertFalse(any(h.get('error') for h in result['hunts']))
-                for hunt in result['hunts']:
-                    self.assertIsNotNone(m.hunt_parse(hunt['query']))
-                    self.assertNotIn('检查',hunt['query'])
+                self.assertEqual(result['hunt_status'],'invalid')
+                self.assertEqual(result['hunts'],[])
 
     def test_partial_model_plan_falls_back_without_failing_final_summary(self):
         self.add('tls',0,tls=dict(sni='alpha.example.test'))
@@ -167,7 +164,26 @@ class SummaryPipelineTests(unittest.TestCase):
         server.finish_for=lambda payload:'length' if '狩猎助手' in payload['messages'][0]['content'] else 'stop'
         output=[]
         assistant.generate(self.app,'owner',dict(kind='summary',target=self.target()),lambda v:output.append(v) or True,lambda:False)
-        self.assertEqual(output[-1]['result']['hunt_status'],'fallback')
+        self.assertEqual(output[-1]['result']['hunt_status'],'invalid')
+
+    def test_two_model_hypotheses_are_independent_and_invalid_one_is_not_replaced(self):
+        self.add('tls',0)
+        self.add('http',1,SECOND,http=dict(status=502))
+        assistant,server=self.provider()
+        queries=[dict(query='status:>499',reason='比较响应异常'),dict(query='payload:secret',reason='无效字段')]
+        server.response_for=lambda payload:json.dumps(dict(queries=queries)) if '狩猎助手' in payload['messages'][0]['content'] else '通信概览：需进一步核查。'
+        output=[];assistant.generate(self.app,'owner',dict(kind='summary',target=self.target()),lambda v:output.append(v) or True,lambda:False)
+        result=output[-1]['result'];self.assertEqual(server.calls,2)
+        self.assertEqual(result['hunts'][0]['total'],1);self.assertEqual(result['hunts'][1]['error_kind'],'validation')
+        self.assertEqual(result['hunt_status'],'partial')
+        self.assertEqual([row['predicate'] for row in result['hunts']],[item['query'] for item in queries])
+
+    def test_empty_model_plan_does_not_run_a_baseline_search(self):
+        self.add('tls',0);assistant,server=self.provider()
+        server.response_for=lambda payload:'{"queries":[]}' if '狩猎助手' in payload['messages'][0]['content'] else '通信概览：普通连接。'
+        with mock.patch.object(self.app,'summary_hunt',side_effect=AssertionError('No query was proposed')):
+            output=[];assistant.generate(self.app,'owner',dict(kind='summary',target=self.target()),lambda v:output.append(v) or True,lambda:False)
+        self.assertEqual(output[-1]['result']['hunts'],[]);self.assertEqual(output[-1]['result']['hunt_status'],'not_needed')
 
     def test_validation_and_execution_errors_have_distinct_reasons(self):
         self.add('tls',0)
@@ -178,23 +194,34 @@ class SummaryPipelineTests(unittest.TestCase):
                 assistant.generate(self.app,'owner',dict(kind='summary',target=self.target()),lambda v:output.append(v) or True,lambda:False)
             self.assertEqual(output[-1]['result']['hunts'][0]['error_kind'],kind)
 
-    def test_all_prepared_checks_compile_and_fit_planner_budget(self):
+    def test_planner_gets_metadata_and_types_but_no_prescribed_query(self):
         self.add('tls',0,tls=dict(sni='alpha.example.test'))
         self.add('http',1,app_proto='http',http=dict(status=403,hostname='beta.example.test'))
-        self.add('dns',2,dns=dict(rrname='gamma.example.test',rcode='NXDOMAIN'))
-        self.add('flow',3)
+        self.add('flow',3,flow=dict(bytes_toserver=1234,bytes_toclient=0))
         context=self.app.summary_context(self.target())
-        options=hunt_options(context)
-        for option in options:
-            self.assertLessEqual(len(option['query']),160)
-            self.assertFalse(self.app.summary_hunt(dict(session_id=FIRST,query=option['query'])).get('error'))
-        payload=hunt_plan_payload(context,options)
+        payload=hunt_plan_payload(context)
         self.assertLessEqual(sum(len(p['content'].encode()) for p in payload['messages']),1500)
-        example=json.loads(payload['messages'][1]['content'])['reply_example']
-        if example['query'] is not None:self.assertIsNotNone(m.hunt_parse(example['query']))
-        self.assertIn(example['scope'],('session','ioc'))
-        planned,source=select_hunts('{"checks":["names"]}',options)
-        self.assertEqual(source,'model');self.assertEqual(planned[-1]['id'],'names')
+        data=json.loads(payload['messages'][1]['content'])
+        self.assertNotIn('checks',data);self.assertNotIn('reply_example',data)
+        self.assertIn('bytes_toserver#',data['fields']);self.assertIn('dport#',data['fields'])
+        self.assertTrue(any(row.get('bytes_toserver')==1234 for row in data['facts']))
+        planned,source=select_hunts('{"queries":[{"query":"dport:443 AND pkts_toclient:0","reason":"核查单向连接"}]}')
+        self.assertEqual(source,'model');self.assertEqual(len(planned),1)
+        self.assertNotIn('session_id',planned[0]['query'])
+        self.assertEqual(select_hunts('{"queries":[]}'),([],'model'))
+        from llm_hunting import FIELDS,NUMBERS
+        self.assertTrue(set(FIELDS)<=m.HUNT_FIELDS.keys())
+        self.assertTrue({m.HUNT_FIELDS[field] for field in NUMBERS}<=m.HUNT_NUMBER_FIELDS)
+
+    def test_long_observed_domain_is_not_truncated_into_a_different_indicator(self):
+        name='a'*60+'.'+'b'*60+'.example.test'
+        self.add('tls',0,tls=dict(sni=name));self.add('tls',1,SECOND,tls=dict(sni=name))
+        context=self.app.summary_context(self.target());payload=hunt_plan_payload(context)
+        data=json.loads(payload['messages'][1]['content'])
+        self.assertTrue(any(row.get('sni')==name for row in data['facts']))
+        result=self.app.summary_hunt(dict(target=self.target(),query='sni:'+json.dumps(name)))
+        self.assertEqual(result['total'],1)
+
 
 
 if __name__=='__main__':unittest.main()

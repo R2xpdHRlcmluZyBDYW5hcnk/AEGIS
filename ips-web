@@ -344,7 +344,7 @@ class BoundedRecords(deque):
         self.bytes = 0
 
 
-def data_query(ttl=2, pages=False, cache=True):
+def data_query(ttl=2, pages=False, cache=True, seconds=20):
     def decorate(function):
         @wraps(function)
         def call(app, params=None):
@@ -353,7 +353,7 @@ def data_query(ttl=2, pages=False, cache=True):
             if service is None or getattr(app, '_data_reader', False):
                 return function(app, params)
             if not cache or params.get('format') == 'csv' or params.get('source') in ('file', 'memory'):
-                return service.execute(lambda reader: function(reader, params))
+                return service.execute(lambda reader: function(reader, params),seconds=seconds,cancelled=params.get('_cancelled'))
             if pages and params.get('view') != 'list':
                 return service.execute(lambda reader: function(reader, params))
             return service.query(function, params, ttl, pages)
@@ -389,15 +389,16 @@ class DataService:
         return json.dumps(['page', self.generation, self.revision, name, self.normalized(params)],
                           sort_keys=True, separators=(',', ':'))
 
-    def execute(self, producer, lane='log', background=False):
+    def execute(self, producer, lane='log', background=False, seconds=20, cancelled=None):
         gate=self.background_slots if background else self.panel_slots if lane=='panel' else self.log_slots
         gates=[gate] if background else [gate,self.slots]
         acquired=[];conn = None
+        def is_cancelled():return self.stop.is_set() or (callable(cancelled) and cancelled())
         try:
             deadline=time.monotonic()+5
             for slot in gates:
                 while True:
-                    if self.stop.is_set():raise RuntimeError('查询服务正在关闭')
+                    if is_cancelled():raise RuntimeError('查询服务正在关闭' if self.stop.is_set() else '查询已取消')
                     remaining=deadline-time.monotonic()
                     if remaining<=0:raise RuntimeError('查询繁忙，请稍后重试')
                     if slot.acquire(timeout=min(.1,remaining)):
@@ -410,8 +411,8 @@ class DataService:
             conn.execute('PRAGMA query_only=ON')
             conn.execute('PRAGMA cache_size=-2048')
             generation = source.network_generation
-            deadline = time.monotonic()+20
-            conn.set_progress_handler(lambda: self.stop.is_set() or time.monotonic()>deadline
+            deadline = time.monotonic()+min(20,max(.01,seconds))
+            conn.set_progress_handler(lambda: is_cancelled() or time.monotonic()>deadline
                                       or generation != source.network_generation, 10000)
             with self.lock:
                 self.readers.add(conn)
@@ -438,14 +439,14 @@ class DataService:
             if analytics is not None:
                 locks.append(analytics.lock)
             with self.sql.snapshot(source,conn,setup=setup,
-                    cancelled=lambda:self.stop.is_set() or generation!=source.network_generation,
+                    cancelled=lambda:is_cancelled() or generation!=source.network_generation,
                     locks=locks) as snapshot:
                 db.parallel = snapshot
                 if attached_summary:
                     state=dict(conn.execute('SELECT k,v FROM summaries.meta'))
                     if state.get('ready')=='1' and now()-float(state.get('as_of',0))<=30:
                         db.summary_cursor=int(state.get('cursor',0))
-                db.cpu_cancelled = lambda:self.stop.is_set() or generation!=source.network_generation or time.monotonic()>deadline
+                db.cpu_cancelled = lambda:is_cancelled() or generation!=source.network_generation or time.monotonic()>deadline
                 return producer(reader)
         finally:
             if conn is not None:
@@ -5733,59 +5734,64 @@ class App:
         from dns_context import candidates
         return candidates(self.db,context)
 
-    @data_query(cache=False)
+    @data_query(cache=False,seconds=3)
     def summary_hunt(self, params):
-        """Bounded model-authored DSL, always intersected with the trusted session."""
-        session, query = params.get('session_id'), params.get('query')
-        if not isinstance(session,str) or not re.fullmatch(r'[0-9a-f]{32}:[0-9a-f]{16}',session):
-            raise ValueError('狩猎检索需要引擎会话 ID')
-        if not isinstance(query,str) or not query.strip() or len(query)>160:
+        """Model-selected metadata predicates across nearby, independent sessions."""
+        query=params.get('query')
+        if not isinstance(query,str) or not 0<len(query.strip())<=240:
             raise ValueError('狩猎搜索词为空或过长')
-        try:
-            node = hunt_parse(query)
-        except HuntError as exc:
-            raise ValueError('狩猎语法无效：'+str(exc)) from None
-        allowed = {'type','action','level','app','state','rcode','status','method','sig','sig_id',
-                   'reason','sni','host','dns','validation_status','ips_action','bytes_toserver',
-                   'bytes_toclient','pkts_toserver','pkts_toclient'}
-        scope=params.get('scope','session')
-        if scope not in ('session','ioc'):raise ValueError('检索范围无效')
-        if scope=='ioc':allowed.update(('src','dst','proto','sha256','gid','rrtype'))
-        def validate(term, depth=0):
-            if depth>12:
-                raise ValueError('狩猎条件过于复杂')
+        try:node=hunt_parse(query)
+        except HuntError as exc:raise ValueError('狩猎语法无效：'+str(exc)) from None
+        from llm_hunting import FIELDS
+        allowed={HUNT_FIELDS[field] for field in FIELDS if field in HUNT_FIELDS}
+        nodes=0;concrete=False
+        def validate(term,depth=0):
+            nonlocal nodes,concrete
+            nodes+=1
+            if depth>12 or nodes>48:raise ValueError('狩猎条件过于复杂')
             if term[0] in ('and','or'):
                 validate(term[1],depth+1);validate(term[2],depth+1)
-            elif term[0]=='not':
-                validate(term[1],depth+1)
-            elif term[0]!='cmp' or term[1] not in allowed or len(term[2])>100:
+            elif term[0]=='not':validate(term[1],depth+1)
+            elif term[0]!='cmp' or term[1] not in allowed or len(term[2])>240:
                 raise ValueError('狩猎搜索词包含不支持的字段或条件')
+            elif term[2].strip('*?'):concrete=True
         validate(node)
-        where, args, complete = hunt_sql_pushdown(node,True)
-        if not complete:
-            raise ValueError('狩猎条件不能执行有界结构化查询')
-        condition = 'session_id=? AND ('+' AND '.join(where)+')';bound=[session,*args]
-        display='session_id: '+json.dumps(session)+' AND ('+query+')';period=None
-        if scope=='ioc':
-            context=self.db.session_context(session)
-            if not context:raise ValueError('会话已不在保留范围内')
-            from llm_hunting import scope_query
-            guard_query=scope_query(context)
-            guards,values,full=hunt_sql_pushdown(hunt_parse(guard_query),True)
-            if not full:raise ValueError('IOC 范围不能执行结构化查询')
-            guard='('+' AND '.join(guards)+')'
-            low=max(context['first_ts']-900,context['last_ts']-1800);high=context['last_ts']+900
-            condition='ts>=? AND ts<=? AND '+guard+' AND ('+' AND '.join(where)+')'
-            bound=[low*1000,high*1000,*values,*args];period=[low,high];display=guard_query+' AND ('+query+') AND time:['+str(low)+' TO '+str(high)+']'
+        if not concrete:raise ValueError('狩猎条件需要具体的元数据条件')
+        where,args,complete=hunt_sql_pushdown(node,True)
+        if not complete:raise ValueError('狩猎条件不能执行有界结构化查询')
+        try:context=self.summary_context(params.get('target'))
+        except sqlite3.Error:raise RuntimeError('关联检索上下文读取未完成') from None
+        first,last=context['first_ts'],context['last_ts']
+        if not all(isinstance(stamp,(int,float)) and math.isfinite(stamp) for stamp in (first,last)):
+            raise ValueError('事件缺少有效时间')
+        low=max(first-900,last-1800);high=last+900
+        conditions=['ts>=?','ts<=?',*where];bound=[low*1000,high*1000,*args]
+        display='('+query+') AND time:['+str(low)+' TO '+str(high)+']'
+        session=context.get('session_id')
+        if session:
+            conditions.append("COALESCE(session_id,'')<>?");bound.append(session)
+            display+=' AND NOT session_id:'+json.dumps(session)
+        condition=' AND '.join(conditions)
         with self.db.lock:
             self.db._hunt_functions()
             try:
-                total = self.db.conn.execute('SELECT COUNT(*) FROM events WHERE '+condition,bound).fetchone()[0]
-                records = self.db.context_records(condition,bound,limit=4)
-            except sqlite3.Error:
-                raise RuntimeError('狩猎检索中断或未完成') from None
-        return dict(query=display,predicate=query, total=total, records=records,scope=scope,range=period,
-                    session_id=session if scope=='session' else '',observed_scope=scope=='ioc')
+                total=self.db.conn.execute('SELECT COUNT(*) FROM events WHERE '+condition,bound).fetchone()[0]
+                ids=[row[0] for row in self.db.conn.execute("""WITH matched AS (
+                    SELECT id,ts,type,session_id FROM events WHERE """+condition+"""), ranked AS (
+                    SELECT id,ts,ROW_NUMBER() OVER (PARTITION BY
+                      CASE WHEN COALESCE(session_id,'')!='' THEN session_id ELSE 'row:'||id END
+                      ORDER BY (type NOT IN ('session','flow')) DESC,ts DESC,id DESC) position FROM matched)
+                    SELECT id FROM ranked WHERE position=1 ORDER BY ts DESC,id DESC LIMIT 4""",bound)]
+                records=self.db.context_records('id IN ('+','.join('?' for _ in ids)+')',ids,len(ids)) if ids else []
+                sessions=list(dict.fromkeys(row['session_id'] for row in records if row.get('session_id')))
+                if sessions:
+                    known=dict(self.db.conn.execute('SELECT session_id,COUNT(*) FROM events WHERE session_id IN ('+
+                        ','.join('?' for _ in sessions)+') AND '+EventDB.DETECTION_SQL+' GROUP BY session_id',sessions))
+                    for row in records:
+                        if row.get('session_id'):row['_retained_detections']=known.get(row['session_id'],0)
+            except sqlite3.Error:raise RuntimeError('关联检索超时、中断或未完成') from None
+        return dict(query=display,predicate=query,total=total,records=records,scope='related',range=[low,high],
+                    excluded_current_session=bool(session),sampled=total>len(records))
 
     def cache_stats(self):
         try:

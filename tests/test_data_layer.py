@@ -23,6 +23,19 @@ loader.exec_module(m)
 
 
 class DataLayerCase(unittest.TestCase):
+    def test_read_budget_and_caller_cancellation_interrupt_sql_and_release_slots(self):
+        query='WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000000) SELECT SUM(x) FROM n'
+        with self.assertRaises(sqlite3.OperationalError):
+            self.service.execute(lambda reader:reader.db.conn.execute(query).fetchone(),seconds=.01)
+        started=threading.Event();cancelled=threading.Event()
+        def run(reader):started.set();return reader.db.conn.execute(query).fetchone()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            pending=pool.submit(self.service.execute,run,cancelled=cancelled.is_set)
+            self.assertTrue(started.wait(2));cancelled.set()
+            with self.assertRaises(sqlite3.OperationalError):pending.result(2)
+        self.assertFalse(self.service.readers)
+        self.assertEqual(self.service.execute(lambda reader:reader.db.conn.execute('SELECT 1').fetchone()[0]),1)
+
     def test_slow_log_and_prefetch_leave_a_panel_slot_available(self):
         entered=threading.Event();background=threading.Event();release=threading.Event()
         connections=[]

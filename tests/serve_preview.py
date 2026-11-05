@@ -186,6 +186,10 @@ for index, app_proto in enumerate(('tls', 'http')):
     events.append(dict(timestamp=m.iso(end),event_type='flow',flow_id=1001+index,community_id='1:preview' if not index else '1:preview-other',
         src_ip='192.0.2.'+str(10+index),src_port=51000+index,dest_ip='198.51.100.4',dest_port=443 if not index else 80,proto='TCP',app_proto=app_proto,
         flow=dict(start=m.iso(end-80),end=m.iso(end),age=80,state='closed',reason='timeout',bytes_toserver=32768,bytes_toclient=16384 if not index else 0,pkts_toserver=20,pkts_toclient=10 if not index else 0)))
+if os.environ.get('NDR_PREVIEW_AI')=='1':
+    events.append(dict(timestamp=m.iso(m.now()-40),event_type='tls',flow_id=9099,
+        src_ip='192.0.2.90',src_port=51990,dest_ip='198.51.100.90',dest_port=443,proto='TCP',
+        app_proto='tls',tls=dict(sni='unalerted.example.test',version='TLS 1.3')))
 for etype in ('alert', 'drop'):
     events.append(dict(timestamp=m.iso(m.now() - 5), event_type=etype,
         flow_id=2002, tx_id=4, community_id='1:preview-pair', src_ip='192.0.2.20', src_port=51020,
