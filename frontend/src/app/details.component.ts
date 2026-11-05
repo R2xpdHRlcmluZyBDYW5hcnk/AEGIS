@@ -153,6 +153,7 @@ export class Details {
     <div class="section-heading"><h3>本地智能研判</h3><span class="badge">Qwen3.5-2B</span></div>
     <div class="ai-body">
     <div class="toolbar"><button class="quiet" [disabled]="!!view.aiBusy" (click)="details.generate('summary')">{{view.aiBusy==='summary'?'正在总结…':view.aiSummary?'重新生成总结':(view.record?.session_id||view.data?.incident?.session_id)?'生成会话总结':'生成事件总结'}}</button><label class="checkbox-label">规则动作 <select aria-label="规则动作" [value]="view.aiRuleAction||'alert'" [disabled]="!!view.aiBusy||view.aiApplying||!!view.aiAdded" (change)="details.setRuleAction($any($event.target).value)"><option value="alert">告警</option><option value="block">阻断匹配特征</option></select></label><button class="quiet" [disabled]="!!view.aiBusy||view.aiApplying||!!view.aiAdded" (click)="details.generate('rule')">{{view.aiBusy==='rule'?'正在生成规则…':view.aiRule?'重新生成规则建议':'生成规则建议'}}</button><button class="text-button" *ngIf="view.aiBusy" (click)="details.stopGeneration()">停止生成</button></div>
+    <div class="ai-output" *ngIf="view.aiBusy||view.aiError||view.aiNotes?.length||view.aiDraft||view.aiSummary||view.aiRule">
     <p class="muted ai-activity" *ngIf="view.aiBusy&&!view.aiAnalysisDone&&view.aiNewNote" role="status">{{view.aiReasoning?'模型正在思考':view.aiActivity}}</p>
     <p class="error" *ngIf="view.aiError" role="alert">{{view.aiError}}</p>
     <details class="ai-hunts ai-process" *ngIf="view.aiNotes?.length" [open]="view.aiProcessOpen" (toggle)="details.toggleProcess($event)">
@@ -166,6 +167,7 @@ export class Details {
      <p class="muted" *ngIf="summary.hunt_status==='invalid'">模型未提供可执行的关联条件，本次总结依据当前证据</p><p class="muted" *ngIf="summary.hunt_status==='not_needed'">模型未提出需要扩展检索的线索</p>
     </div>
     <div *ngIf="view.aiRule as rule" class="ai-rule"><h4>Snort 3 规则建议</h4><p *ngIf="rule.unavailable">{{rule.reason}}</p><ng-container *ngIf="rule.rule"><p>{{rule.scope}}</p><pre>{{rule.rule}}</pre><p>{{rule.reason}}</p><p>{{rule.limitations}}</p><p class="muted">{{rule.notice}}</p><div class="toolbar"><strong class="rule-source">手动规则</strong><button [disabled]="view.aiApplying||!!view.aiAdded" (click)="details.addRule()">{{view.aiApplying?'正在校验并应用…':view.aiAdded?'已提交应用':'添加并应用规则'}}</button></div><p class="muted">SID 在添加时分配，仅保存到独立手动规则文件</p><p role="status" *ngIf="view.aiApplyStatus?.rc===0">手动规则 {{view.aiAdded.sid}} 已通过校验并应用</p><p class="error" role="alert" *ngIf="view.aiApplyError">{{view.aiApplyError}}</p></ng-container></div>
+    </div>
     </div>
    </section>
    <ng-container *ngIf="view.kind==='incident'">

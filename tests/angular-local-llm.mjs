@@ -60,6 +60,12 @@ try{
  // The provider pauses after a partial public note, then after the first body chunk.
  await api('/__test/ai-stall',{reasoning:true,analysis:true,prefix:true});await openIncident();
  await until(`document.querySelector('.ai-activity')?.textContent==='模型正在思考'`);
+ assert.ok(await evaluate(`(()=>{
+  const output=document.querySelector('.ai-output'),toolbar=output?.previousElementSibling;
+  return output?.contains(document.querySelector('.ai-activity'))&&toolbar?.matches('.toolbar')
+   &&getComputedStyle(output).borderTopStyle==='solid'
+   &&output.getBoundingClientRect().top-toolbar.getBoundingClientRect().bottom>=12;
+ })()`),'the live output has a border and space below the controls');
  assert.equal(await evaluate(`document.querySelector('.local-assistant').textContent.includes('private test reasoning')`),false);
  await api('/__test/ai-stall',{analysis:true,prefix:true});
  await until(`document.querySelector('.ai-process p')?.textContent==='先比对目标端口'`);
@@ -67,6 +73,7 @@ try{
  assert.equal(await evaluate(`!!document.querySelector('.ai-process ol, .ai-process .badge, .ai-draft')`),false,'the live note appears as plain text before the body');
  await api('/__test/ai-stall',{prefix:true});
  await until(`!!document.querySelector('.ai-draft p')?.textContent`);
+ assert.ok(await evaluate(`!!document.querySelector('.ai-output .ai-process')&&!!document.querySelector('.ai-output .ai-draft')`),'analysis and streamed text share the output panel');
  assert.equal(await evaluate(`document.querySelector('.ai-process p').textContent`),'先比对目标端口与附近会话。');
  assert.equal(await evaluate(`document.querySelector('.ai-process').open`),false,'process folds when public text starts');
  assert.equal(await evaluate(`!!document.querySelector('.ai-summary:not(.ai-draft)')`),false,'partial text appears before completion');

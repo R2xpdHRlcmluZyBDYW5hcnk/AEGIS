@@ -172,6 +172,9 @@ ndr-rule-collection .query-line{margin-bottom:18px}ndr-rule-collection ndr-table
 
 .local-assistant>.section-heading{position:relative;padding-right:150px}.local-assistant>.section-heading>.badge{position:absolute;right:18px;top:50%;transform:translateY(-50%)}.ai-body{padding:18px}.local-assistant .ai-summary,.local-assistant .ai-rule{border-top:1px solid var(--line);margin-top:18px;padding-top:4px}.ai-summary>p{white-space:pre-wrap;line-height:1.8}.local-assistant pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:240px}.local-assistant p{font-size:13px;line-height:1.7}.local-assistant h4{margin:14px 0}.local-assistant .toolbar{flex-wrap:wrap}
 .ai-body>.toolbar>.checkbox-label{padding-bottom:0;font-size:12px}.ai-body>.toolbar>button,.ai-body>.toolbar>.checkbox-label select{height:38px;padding-top:0;padding-bottom:0;font-size:12px;line-height:18px}
+.ai-output{margin-top:16px;padding:12px 14px;border:1px solid var(--line);border-radius:8px}
+.ai-output>:first-child{margin-top:0}.ai-output>:last-child{margin-bottom:0}
+.ai-output>:is(.ai-summary,.ai-rule):first-child{border-top:0;padding-top:0}
 .ai-hunts{margin-top:16px}.ai-hunts>summary{cursor:pointer;font-size:13px}.ai-hunts>section{margin-top:14px;border-top:1px solid var(--line);padding-top:12px}.ai-summary>.section-heading{padding:0}.ai-hunts .section-heading{padding:0}
 .ai-process p{white-space:pre-wrap;overflow-wrap:anywhere}
 
