@@ -1,4 +1,4 @@
-# Snort NDR Console
+# AEGIS
 
 Angular 与 Python 实现的 Snort 3 网络检测控制台，提供安全概览、事件调查、协议日志、规则源、规则草稿、封禁与告警抑制管理。前端针对桌面浏览器，静态资源本地打包，不依赖 CDN。
 

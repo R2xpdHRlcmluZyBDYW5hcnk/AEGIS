@@ -1,4 +1,4 @@
-# Snort NDR 控制台
+# AEGIS 控制台
 
 ## 事件与查询
 
