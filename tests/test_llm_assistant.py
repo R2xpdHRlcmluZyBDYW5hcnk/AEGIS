@@ -49,13 +49,15 @@ class Provider(BaseHTTPRequestHandler):
             if '狩猎助手' in system:
                 text=json.dumps({'queries':[{'query':'proto:TCP AND dport:443','reason':'比较附近的加密连接'}]})
             elif '四段' in system:
-                text='通信概览：当前会话存在通信记录。\n行为与处置：结合检索结果核查。\n研判依据：尚不能确认入侵成功。\n建议核查：查看命中日志。'
+                text='**通信概览**：当前会话存在通信记录。\n行为与处置：结合检索结果核查。\n研判依据：尚不能确认入侵成功。\n建议核查：查看命中日志。'
             else:
                 text=json.dumps(dict(candidate=0,message='Observed communication',reason='当前事件的通信端点',limitations='可能匹配正常访问'))
         finish=self.server.finish_for(self.server.payload) if hasattr(self.server,'finish_for') else self.server.finish
         deltas=self.server.deltas_for(self.server.payload) if hasattr(self.server,'deltas_for') else [{'content':text}]
         if stage=='summary' and (getattr(self.server,'stream_prefix',False) or getattr(self.server,'analysis_prefix',False)):
-            deltas=[{'reasoning_content':'先观察连接方向'}, {'reasoning_content':'并核对 <i>参考连接</i>。'}, {'content':'分析说'},
+            details = ('并核对 <i>参考连接</i>。\n\n**核查重点**\n\n```text\nproto:TCP\n```\n\n'
+                       + '\n'.join(f'- 线索 {i}' for i in range(30)))
+            deltas=[{'reasoning_content':'先观察连接方向'}, {'reasoning_content':details}, {'content':'分析说'},
                     {'content':'明：先比对目标端口'}, {'content':'与附近会话。\n'+text[:16]}, {'content':text[16:]}]
         for index,delta in enumerate(deltas):
             chunk={'choices':[{'delta':delta,'finish_reason':finish if index==len(deltas)-1 else None}]}

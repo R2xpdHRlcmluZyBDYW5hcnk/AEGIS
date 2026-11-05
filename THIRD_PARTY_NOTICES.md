@@ -12,7 +12,9 @@ Snort、LibDAQ、OpenAppID 及外部库不提交到源码仓库。可选构建�
 
 ## 前端依赖
 
-Angular、RxJS、Zone.js、tslib、Apache ECharts、ZRender 与构建工具通过 npm 锁文件获取，依赖目录不提交。版本、来源、完整性值和各包声明的许可见 `frontend/package-lock.json`。生产构建提取许可到 `frontend-licenses.txt`，分发静态资源时一并保留。
+Angular、RxJS、Zone.js、tslib、Apache ECharts、ZRender、Marked 与构建工具通过 npm 锁文件获取，依赖目录不提交。版本、来源、完整性值和各包声明的许可见 `frontend/package-lock.json`。生产构建提取许可到 `frontend-licenses.txt`，分发静态资源时一并保留。
+
+可选 ARM64 控制台发布包包含按固定官方源码构建的 SQLite 动态库。SQLite 交付代码的公共领域声明与构建方法见 [SQLite 运行库](docs/sqlite-recovery.md#控制台运行库与写入保护)。
 
 ## Python 查询解析
 

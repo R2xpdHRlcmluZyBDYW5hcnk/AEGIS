@@ -37,6 +37,7 @@ try{
  await evaluate(`document.querySelector('[data-page="alerts"]').click()`);await openIncident(false);
  await pause(350);assert.equal((await status()).calls,0,'opening incident does not invoke inference');await summarize();
  await until(`document.querySelector('.ai-summary:not(.ai-draft)')?.textContent.includes('尚不能确认')`);
+ assert.equal(await evaluate(`document.querySelector('.ai-summary .ai-markdown strong')?.textContent`),'通信概览');
  assert.deepEqual((await status()).stages,['hunt','summary'],'the summary button plans searches and generates a summary');
  assert.equal(await evaluate(`!!document.querySelector('.ai-rule pre')`),false,'opening incident does not generate a rule');
  assert.equal((await api('/api/hunt/rules')).rules.length,0,'generation does not save rules');
@@ -59,7 +60,7 @@ try{
  await close();await api('/__test/ai-plan',{mode:'default'});
  // Pause separately during reasoning, analysis notes and the summary body.
  await api('/__test/ai-stall',{reasoning:true,analysis:true,prefix:true});await openIncident();
- await until(`document.querySelector('.ai-thought')?.textContent==='先观察连接方向'`);
+ await until(`document.querySelector('.ai-thought')?.textContent.trim()==='先观察连接方向'`);
  assert.ok(await evaluate(`(()=>{
   const output=document.querySelector('.ai-output'),toolbar=output?.previousElementSibling;
   return output?.contains(document.querySelector('.ai-thought'))&&toolbar?.matches('.toolbar')
@@ -68,15 +69,18 @@ try{
  })()`),'the live output has a border and space below the controls');
  assert.equal(await evaluate(`!!document.querySelector('.ai-note, .ai-draft')`),false,'reasoning reaches the browser before the other channels');
  await api('/__test/ai-stall',{analysis:true,prefix:true});
- await until(`document.querySelector('.ai-note')?.textContent==='先比对目标端口'`);
- assert.equal(await evaluate(`document.querySelector('.ai-thought').textContent`),'先观察连接方向并核对 <i>参考连接</i>。');
- assert.equal(await evaluate(`!!document.querySelector('.ai-thought i')`),false,'model text is rendered without interpreting markup');
+ await until(`document.querySelector('.ai-note')?.textContent.trim()==='先比对目标端口'`);
+ assert.ok(await evaluate(`document.querySelector('.ai-thought').textContent.includes('先观察连接方向并核对 <i>参考连接</i>。')`));
+ assert.equal(await evaluate(`!!document.querySelector('.ai-thought i')`),false,'raw HTML stays text');
+ assert.equal(await evaluate(`document.querySelector('.ai-thought strong').textContent`),'核查重点');
+ assert.equal(await evaluate(`document.querySelector('.ai-thought pre code').textContent.trim()`),'proto:TCP');
+ assert.ok(await evaluate(`(()=>{const output=document.querySelector('.ai-output');return getComputedStyle(output).overflowY==='auto'&&output.scrollHeight>output.clientHeight;})()`),'long reasoning scrolls inside the output panel');
  assert.equal(await evaluate(`document.querySelector('.ai-process').open`),true,'public analysis appears while the provider is still sending it');
- assert.equal(await evaluate(`!!document.querySelector('.ai-process ol, .ai-process .badge, .ai-draft')`),false,'the live note appears as plain text before the body');
+ assert.equal(await evaluate(`!!document.querySelector('.ai-process .badge, .ai-draft')`),false,'the live note appears before the body');
  await api('/__test/ai-stall',{prefix:true});
  await until(`!!document.querySelector('.ai-draft p')?.textContent`);
  assert.ok(await evaluate(`!!document.querySelector('.ai-output .ai-process')&&!!document.querySelector('.ai-output .ai-draft')`),'analysis and streamed text share the output panel');
- assert.equal(await evaluate(`document.querySelector('.ai-note').textContent`),'先比对目标端口与附近会话。');
+ assert.equal(await evaluate(`document.querySelector('.ai-note').textContent.trim()`),'先比对目标端口与附近会话。');
  assert.equal(await evaluate(`document.querySelector('.ai-process').open`),false,'process folds when public text starts');
  assert.equal(await evaluate(`!!document.querySelector('.ai-summary:not(.ai-draft)')`),false,'partial text appears before completion');
  assert.equal(await evaluate(`document.querySelector('.ai-draft').textContent.includes('先观察连接方向')`),false,'reasoning stays separate from the summary');

@@ -50,3 +50,7 @@ parse5 升级后引入其所需的 entities 9.0.0。锁文件通过核定工具�
 ## Python 搜索依赖（2026-11-04）
 
 根据 [Luqum 官方发行信息](https://pypi.org/project/luqum/)与 [PLY 官方发行信息](https://pypi.org/project/ply/)，核定 Luqum 1.0.0 和其依赖 PLY 3.11；两者没有 LTS 发行线。查询方法、时间和解析器选择见 [事件搜索](event-search.md)。`build_tools/python-sources.json` 固定官方 wheel URL、SHA-256 和许可；构建器预生成匹配的 PLY 表并打包为只读 ZIP。后端发布、前端回归、预览与 `tests/run_backend.py` 自动准备临时依赖，不修改全局 Python 安装。生产运行不访问包仓库。
+
+## 研判 Markdown 依赖（2026-11-05）
+
+Australia/Perth，MCP Search Service 查询 [Marked 的 npm 发布信息](https://www.npmjs.com/package/marked)、[渲染器扩展接口](https://marked.js.org/using_pro#renderer)及 [Angular HTML 安全绑定](https://angular.dev/best-practices/security)。核定 Marked 18.1.3 为稳定发行版，MIT，锁文件确认 Node.js >= 20，兼容项目工具链。解析器只在浏览器处理研判文本。原始 HTML 转义为文本，图片与链接渲染标签，HTML 输出通过 Angular 常规绑定净化。

@@ -9,6 +9,7 @@ import { ConnectionSummaryComponent } from './connection-summary.component';
 import { AttackMappingComponent } from './attack-mapping.component';
 import { mappingFromEvent, mappingFromMetadata, mappingFromRule } from './attack-mapping';
 import { generateLocal } from './local-assistant';
+import { AssistantMarkdownPipe } from './assistant-markdown.pipe';
 function drawerGroups(record:any){const {flow_id,...visible}=record;return evidenceGroups(visible);}
 
 // Reindent the original tokens so 64-bit native identifiers retain every digit.
@@ -149,7 +150,7 @@ export class Details {
   return {showSession,data:raw,rawText:rawText?prettyJson(rawText):undefined,record:row,groups:drawerGroups(row),attackMapping:mappingFromEvent(row,raw)};
  });}
 }
-@Component({changeDetection:ChangeDetectionStrategy.Eager,selector:'ndr-details',standalone:true,imports:[TabMotionDirective,CommonModule,TableComponent,ModalComponent,AttackMappingComponent,ConnectionSummaryComponent],template:`
+@Component({changeDetection:ChangeDetectionStrategy.Eager,selector:'ndr-details',standalone:true,imports:[TabMotionDirective,CommonModule,TableComponent,ModalComponent,AttackMappingComponent,ConnectionSummaryComponent,AssistantMarkdownPipe],template:`
  <ndr-modal *ngIf="details.current as view" [title]="view.title" [busy]="banning" [drawer]="true" [canBack]="details.stack().length>1" [viewKey]="view.id" [restoreScroll]="view.scrollTop" (back)="details.close()" (closed)="details.dismiss()">
   <div class="detail-loading" role="status" *ngIf="view.status==='loading'"><span class="loading-dot"></span>正在加载{{view.kind==='rule'?'规则详情':'事件详情'}}…</div>
   <div class="detail-error" role="alert" *ngIf="view.status==='error'"><h3>暂时无法加载</h3><p>{{view.error}}</p><button class="quiet" (click)="details.retry()">重新加载</button></div>
@@ -158,17 +159,17 @@ export class Details {
     <div class="section-heading"><h3>本地智能研判</h3><span class="badge">Qwen3.5-2B</span></div>
     <div class="ai-body">
     <div class="toolbar"><button class="quiet" [disabled]="!!view.aiBusy" (click)="details.generate('summary')">{{view.aiBusy==='summary'?'正在总结…':view.aiSummary?'重新生成总结':(view.record?.session_id||view.data?.incident?.session_id)?'生成会话总结':'生成事件总结'}}</button><label class="checkbox-label">规则动作 <select aria-label="规则动作" [value]="view.aiRuleAction||'alert'" [disabled]="!!view.aiBusy||view.aiApplying||!!view.aiAdded" (change)="details.setRuleAction($any($event.target).value)"><option value="alert">告警</option><option value="block">阻断匹配特征</option></select></label><button class="quiet" [disabled]="!!view.aiBusy||view.aiApplying||!!view.aiAdded" (click)="details.generate('rule')">{{view.aiBusy==='rule'?'正在生成规则…':view.aiRule?'重新生成规则建议':'生成规则建议'}}</button><button class="text-button" *ngIf="view.aiBusy" (click)="details.stopGeneration()">停止生成</button></div>
-    <div class="ai-output" *ngIf="view.aiBusy||view.aiError||view.aiThoughts?.length||view.aiNotes?.length||view.aiDraft||view.aiSummary||view.aiRule">
+    <div class="ai-output" role="region" aria-label="研判输出" tabindex="0" *ngIf="view.aiBusy||view.aiError||view.aiThoughts?.length||view.aiNotes?.length||view.aiDraft||view.aiSummary||view.aiRule">
     <p class="muted ai-activity" *ngIf="view.aiBusy&&!view.aiAnalysisDone&&view.aiNewNote&&!view.aiReasoning" role="status">{{view.aiActivity}}</p>
     <p class="error" *ngIf="view.aiError" role="alert">{{view.aiError}}</p>
     <details class="ai-hunts ai-process" *ngIf="view.aiThoughts?.length||view.aiNotes?.length" [open]="view.aiProcessOpen" (toggle)="details.toggleProcess($event)">
      <summary>{{view.aiThoughts?.length?'思考过程':'分析说明'}}</summary>
-     @for (thought of view.aiThoughts; track $index) {<p class="muted ai-thought">{{thought}}</p>}
+     @for (thought of view.aiThoughts; track $index) {<div class="muted ai-thought ai-markdown" [innerHTML]="thought | assistantMarkdown"></div>}
      <h4 *ngIf="view.aiThoughts?.length&&view.aiNotes?.length">分析说明</h4>
-     @for (note of view.aiNotes; track $index) {<p class="muted ai-note">{{note}}</p>}
+     @for (note of view.aiNotes; track $index) {<div class="muted ai-note ai-markdown" [innerHTML]="note | assistantMarkdown"></div>}
     </details>
-    <div class="ai-summary ai-draft" *ngIf="view.aiDraft&&!view.aiSummary"><div class="section-heading"><h4>{{view.aiBusy?'正在生成总结':'未完成的总结'}}</h4></div><p>{{view.aiDraft}}</p></div>
-    <div *ngIf="view.aiSummary as summary" class="ai-summary"><div class="section-heading"><h4>{{summary.context?.scope==='session'?'会话总结':'事件总结'}}</h4><button class="text-button" (click)="copy(summary.text)">复制总结</button></div><p>{{summary.text}}</p><p class="muted" *ngIf="summary.context as context">已检索 {{context.total_records}} 条{{context.scope==='session'?'会话':'事件'}}记录 使用 {{context.evidence_records}} 条证据摘录<span *ngIf="context.related_evidence_records"> 附加 {{context.related_evidence_records}} 条关联日志摘录</span></p><small class="muted">依据已保留的日志分析，请结合原始证据核查</small>
+    <div class="ai-summary ai-draft" *ngIf="view.aiDraft&&!view.aiSummary"><div class="section-heading"><h4>{{view.aiBusy?'正在生成总结':'未完成的总结'}}</h4></div><div class="ai-markdown" [innerHTML]="view.aiDraft | assistantMarkdown"></div></div>
+    <div *ngIf="view.aiSummary as summary" class="ai-summary"><div class="section-heading"><h4>{{summary.context?.scope==='session'?'会话总结':'事件总结'}}</h4><button class="text-button" (click)="copy(summary.text)">复制总结</button></div><div class="ai-markdown" [innerHTML]="summary.text | assistantMarkdown"></div><p class="muted" *ngIf="summary.context as context">已检索 {{context.total_records}} 条{{context.scope==='session'?'会话':'事件'}}记录 使用 {{context.evidence_records}} 条证据摘录<span *ngIf="context.related_evidence_records"> 附加 {{context.related_evidence_records}} 条关联日志摘录</span></p><small class="muted">依据已保留的日志分析，请结合原始证据核查</small>
      <details class="ai-hunts" *ngIf="summary.hunts?.length"><summary>关联检索</summary><section *ngFor="let hunt of summary.hunts"><div class="section-heading"><span>{{hunt.label}}</span><span class="badge">{{hunt.error_kind==='validation'?'条件无效':hunt.error?'检索失败':'命中 '+hunt.total+' 条'}}</span><button class="text-button" *ngIf="hunt.query&&!hunt.error" (click)="openSummaryHunt(hunt.query,summary.context,hunt.range)">查看命中日志 ↗</button></div><span class="badge" *ngIf="hunt.scope==='related'">关联候选线索</span><pre>{{hunt.query||hunt.predicate}}</pre><p class="muted" *ngIf="hunt.error">{{hunt.error}}</p></section></details>
      <details class="ai-hunts" *ngIf="summary.dns_clues?.records?.length"><summary>DNS 候选关联</summary><p class="muted">同客户端曾解析到目标 IP，属于可能相关的独立 DNS 会话，不能据此确认连接使用了该域名。</p><section *ngFor="let clue of summary.dns_clues.records"><strong>{{clue.name}}</strong><p>{{clue.answer}} {{dt(clue.ts)}}</p><p class="muted">最小应答 TTL {{clue.ttl_seconds??'未知'}}<span *ngIf="clue.ttl_seconds!=null"> 秒</span> {{clue.name_matches?'与当前域名线索一致':'域名线索尚待核查'}}</p></section></details>
      <p class="muted" *ngIf="summary.hunt_status==='invalid'">模型未提供可执行的关联条件，本次总结依据当前证据</p><p class="muted" *ngIf="summary.hunt_status==='not_needed'">模型未提出需要扩展检索的线索</p>
