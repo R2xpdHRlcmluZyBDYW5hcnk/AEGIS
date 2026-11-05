@@ -97,8 +97,9 @@ def wait_ready(cfg):
     for _ in range(60):
         try:
             with opener.open(url, timeout=2) as response:
-                if json.load(response).get('ok'):
-                    return
+                health = json.load(response)
+                if health.get('ok'):
+                    return health
         except (OSError, ValueError):
             pass
         time.sleep(1)
@@ -135,6 +136,8 @@ def upgrade(release,helper,overrides):
         isolation = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(isolation)
         return isolation.apply(release, wait_ready, overrides, helper.snapshot)
+    if (release/'libsqlite3-ndr.so').is_file():
+        raise RuntimeError('The private SQLite runtime requires the isolated Web service layout')
     original_config = CONFIG.read_bytes()
     cfg = json.loads(original_config)
     updated_cfg = dict(cfg,**overrides)

@@ -19,6 +19,16 @@
 - 2026-11-03 MCP Search Service 再次打开同一官方下载页核对恢复工具，版本仍为 3.54.1，Windows x64 工具包及 SHA3-256 与上述记录一致。
 - 同日追加 MCP 查询：[SQLite 文件格式](https://sqlite.org/fileformat.html)的 B 树、varint、record 与索引章节，以及 [SQLITE_DBPAGE](https://sqlite.org/dbpage.html)。索引记录包含索引列及 rowid；DBPAGE 通过 pager 读取页。页级候选只能在离线工作副本上读取，并结合可信事件 ID、时间戳及 统一事件 JSON 原文摘要核对，不能仅凭残留索引页重新引入历史记录。
 
+2026-11-05 Australia/Perth，MCP Search Service 查询 SQLite WAL-reset 的触发条件、[Debian SQLite 3.46.1-7+deb13u2 补丁清单](https://sources.debian.org/patches/sqlite3/3.46.1-7%2Bdeb13u2/)和[官方下载页](https://sqlite.org/download.html)。官方说明此缺陷需要同时写入或检查点的多个连接，SQLite 3.51.3 及更新版本包含修复。Debian 补丁清单未确认这个回移。稳定源码包仍为 3.54.1，散列与上述记录相同。结构损坏报错只能确认库无法完整读取，不能据此确定 WAL 缺陷或物理存储故障。
+
+## 控制台运行库与写入保护
+
+ARM64 发布包可使用 `deploy.ps1 -WslBuild -BuildOnly -WithSqliteRuntime -OutputDirectory <源码外目录>`，复用 `README-deploy.md` 中的 Debian ARM64 交叉构建环境，自动获取并核对固定 SQLite 源码。`deploy.ps1 -UpdateBackend -ReleasePackage <发布包> -Target <SSH 目标>` 在独立服务布局安装专用 SQLite 动态库。发布前校验库能由 Python 载入，启动后从 `/healthz` 核对版本。控制台单独加载此库，其他服务和系统 SQLite 继续使用系统包。源码树只保留构建逻辑。SQLite 交付代码采用公共领域授权，见[上游声明](https://www.sqlite.org/copyright.html)。
+
+原始事件库采用 WAL 和 `synchronous=FULL`，提交时同步 WAL。写入失败先保留待提交批次，回滚失败时停止继续写入。容量回收按已用页计算，空闲页和 WAL 暂时占用不作为删除现有记录的依据。回收使用有界增量清理与 PASSIVE 检查点。新空库在建表前启用增量回收。
+
+历史管理的「仅清空事件库」操作将已停止的控制台数据库、WAL、SHM 与派生统计库作为一个文件组封存，启动空库并核对事件库就绪状态。原始事件流和检测保持运行，新库从切换边界开始收集。备份保留供离线核查。
+
 ## 保护边界
 
 先区分检测引擎和控制台事件库。原始数据库、WAL 和可用备份均保留，不在损坏原件上直接执行 REINDEX、VACUUM、恢复导入或删除 WAL。快照必须来自停止写入的完整文件组，或 SQLite 一致性备份接口；不能把运行中文件的随意副本当作一致备份。

@@ -34,13 +34,20 @@ def existing(root):
 def downloader(data):
     def fetch(url,target=None,maximum=None):
         if url==u.PAGE:return b'<a href="/downloads/openappid/12345">OpenAppID</a>'
-        if url==u.CHECKSUM:return (hashlib.md5(data).hexdigest()+' snort-openappid.tar.gz\n').encode()
+        if url==u.CHECKSUM:
+            return ('  '+hashlib.md5(data).hexdigest()+' snort-openappid.tar.gz\n  '+'a'*32+' OpenDetectorDeveloperGuide.pdf\n').encode()
         if target:target.write(data);return b''
         raise AssertionError('Unexpected download')
     return fetch
 
 
 class ArchiveTests(unittest.TestCase):
+    def test_checksum_rejects_missing_ambiguous_or_malformed_detector_records(self):
+        line=('  '+'a'*32+' snort-openappid.tar.gz').encode()
+        for value in (b'\xff',line+b'.old',line+b'\n'+line,b'a'*31+b' snort-openappid.tar.gz'):
+            with self.subTest(value=value),self.assertRaisesRegex(ValueError,'格式无效'):
+                u.detector_md5(value)
+
     def test_rejects_traversal_links_devices_duplicates_and_oversized_members(self):
         for members in ([('../escaped',b'',None)], [('/absolute',b'',None)],
                         [('odp/back\\slash',b'',None)], [('odp/link',b'',tarfile.SYMTYPE)],

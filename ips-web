@@ -28,7 +28,6 @@ from tarfile import TarError
 import glob
 import gzip
 import io
-import sqlite3
 import zlib
 import json
 import os
@@ -48,6 +47,19 @@ from ipaddress import ip_address, ip_network
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote, urlencode
+
+_sqlite_runtime = Path(__file__).resolve().with_name('libsqlite3-ndr.so')
+_sqlite_version = None
+if __name__ == '__main__' and _sqlite_runtime.is_file():
+    import ctypes
+    _sqlite_library = ctypes.CDLL(str(_sqlite_runtime), mode=ctypes.RTLD_GLOBAL)
+    _sqlite_library.sqlite3_libversion.restype = ctypes.c_char_p
+    _sqlite_version = _sqlite_library.sqlite3_libversion().decode('ascii')
+
+import sqlite3
+
+if _sqlite_version is not None and sqlite3.sqlite_version != _sqlite_version:
+    raise RuntimeError('The console SQLite runtime was not selected')
 
 if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -782,6 +794,7 @@ class EventDB:
 
     def __init__(self, path, cap=None, retention_days=None):
         self.path = path
+        self.conn = None
         self.cap = cap or self.CAP_BYTES
         self.retention_days = retention_days or self.RETENTION_DAYS
         self.lock = threading.RLock()
@@ -812,8 +825,9 @@ class EventDB:
         try:
             self.conn = sqlite3.connect(path, check_same_thread=False, timeout=10)
             self.conn.execute("PRAGMA journal_mode=WAL")
-            self.conn.execute("PRAGMA synchronous=NORMAL")
+            self.conn.execute("PRAGMA synchronous=FULL")
             self.conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
+            self.conn.execute("PRAGMA journal_size_limit=67108864")
             defs = []
             for column, _ in self.COLUMNS:
                 if column == "id":
@@ -865,6 +879,14 @@ class EventDB:
             # Structural corruption requires offline repair. Preserve the
             # pending batch and stop further writes and retention on the source.
             self.write_blocked = True
+
+    def _rollback_write(self, exc):
+        try:
+            self.conn.rollback()
+        except sqlite3.Error as rollback_error:
+            self._write_failure(rollback_error)
+            self.write_blocked = True
+        self._write_failure(exc)
 
     def _values(self, rec, raw):
         values = []
@@ -923,6 +945,8 @@ class EventDB:
         if self.conn is None or self.write_blocked or not self.buf:
             return
         with self.lock:
+            if self.write_blocked or not self.buf:
+                return
             rows, self.buf = self.buf, []
             try:
                 self.conn.executemany(self.insert_sql, rows)
@@ -930,9 +954,8 @@ class EventDB:
                 self.last_error = ""
                 self.write_error = ""
             except sqlite3.Error as exc:  # noqa: BLE001
-                self.conn.rollback()
                 self.buf = rows + self.buf
-                self._write_failure(exc)
+                self._rollback_write(exc)
         self.last_flush = now()
 
     # -- 回收 ---------------------------------------------------------
@@ -945,6 +968,12 @@ class EventDB:
                 pass
         return total
 
+    def _used_pages_bytes(self):
+        pages = self.conn.execute('PRAGMA page_count').fetchone()[0]
+        free = self.conn.execute('PRAGMA freelist_count').fetchone()[0]
+        page_size = self.conn.execute('PRAGMA page_size').fetchone()[0]
+        return (pages - free) * page_size
+
     def maintain(self, force=False):
         """分层回收：小批量删除，避免长时间持锁把查询卡住"""
         if self.conn is None or self.write_blocked:
@@ -953,7 +982,7 @@ class EventDB:
             return
         self.last_maint = now()
         self.flush()
-        if self.write_error:
+        if self.write_blocked or (self.write_error and self.buf):
             return
         now_ms = int(now() * 1000)
         t1_cut = now_ms - DB_TIER1_DAYS * 86400 * 1000
@@ -982,7 +1011,7 @@ class EventDB:
                         break
                     deleted += cur.rowcount
                 # 容量到顶：优先删上下文层
-                size = self._size()
+                size = self._used_pages_bytes()
                 guard = 0
                 while size > self.cap and guard < 20:
                     guard += 1
@@ -1001,13 +1030,14 @@ class EventDB:
                             self.network_generation += 1
                         if cur.rowcount <= 0:
                             break
-                    size = self._size()
-                if deleted or size > self.cap:
-                    self.conn.execute("PRAGMA incremental_vacuum(2000)")
+                    size = self._used_pages_bytes()
+                if deleted or self._size() > self.cap:
+                    self.conn.execute("PRAGMA incremental_vacuum(2000)").fetchall()
                     self.conn.commit()
-                    self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    self.conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+                self.last_error = self.write_error = ''
             except sqlite3.Error as exc:  # noqa: BLE001
-                self._write_failure(exc)
+                self._rollback_write(exc)
 
     # -- 行转换 -------------------------------------------------------
     def _row_lite(self, row, keys):
@@ -1778,9 +1808,9 @@ class EventDB:
                 for slot in range(start, end + 1, span)]
 
     def clear(self, stream_cutoff=None):
-        if self.conn is None:
-            return False
         with self.lock:
+            if self.conn is None or self.write_blocked:
+                return False
             try:
                 self.summary_cache.clear()
                 self.visibility_cache.clear()
@@ -1795,8 +1825,7 @@ class EventDB:
                 self.last_error = ''
                 return True
             except sqlite3.Error as exc:  # noqa: BLE001
-                self.conn.rollback()
-                self.last_error = str(exc)
+                self._rollback_write(exc)
                 return False
 
 
@@ -6711,7 +6740,10 @@ button:disabled{opacity:.4;cursor:not-allowed}
             if path == "/healthz":
                 try:lag=max(0,os.stat(self.app.store.path).st_size-self.app.store.offset)
                 except OSError:lag=None
-                return self._json({"ok": True, "uptime": int(now() - self.app.started),"ingest_lag_bytes":lag})
+                db = self.app.db
+                return self._json({"ok": True, "uptime": int(now() - self.app.started),"ingest_lag_bytes":lag,
+                                   "event_db_ready": db.conn is not None and not db.write_error,
+                                   "sqlite_version": sqlite3.sqlite_version})
             if path == "/login" and self.command == "GET":
                 return self._login_page(params)
             if path.startswith("/fonts/"):

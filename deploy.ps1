@@ -6,6 +6,7 @@ param(
     [switch]$NativeResponse,
     [string]$NativeResponsePackage = '',
     [switch]$WslBuild,
+    [switch]$WithSqliteRuntime,
     [switch]$InstallSnort3,
     [switch]$UpdateEngine,
     [switch]$MigrateLogs,
@@ -32,6 +33,7 @@ if ($NativeResponse -and ($UpdateBackend -or $UpdateNftRules -or $InstallSnort3 
 if ($NativeResponsePackage -and -not $NativeResponse) { throw '-NativeResponsePackage requires -NativeResponse' }
 if ($NativeResponse -and -not $BuildOnly -and -not (Test-Path -LiteralPath $NativeResponsePackage)) { throw '-NativeResponse activation requires an existing -NativeResponsePackage' }
 if ($BuildOnly -and -not $OutputDirectory) { throw '-BuildOnly requires -OutputDirectory outside the source directory' }
+if ($WithSqliteRuntime -and (-not $WslBuild -or -not $BuildOnly -or $NativeResponse)) { throw '-WithSqliteRuntime requires -WslBuild -BuildOnly for a console release' }
 if ($InstallSnort3 -and (-not $UpdateBackend -or $BuildOnly -or -not $EnginePackage)) { throw '-InstallSnort3 requires -UpdateBackend and -EnginePackage and cannot be used with -BuildOnly' }
 if ($InstallSnort3 -and -not (Test-Path -LiteralPath $EnginePackage)) { throw 'Engine package is missing' }
 if ($UpdateEngine -and ($InstallSnort3 -or -not $UpdateBackend -or $BuildOnly -or -not (Test-Path -LiteralPath $EnginePackage))) { throw '-UpdateEngine requires -UpdateBackend and an existing -EnginePackage, and cannot be combined with initial activation or BuildOnly' }
@@ -136,7 +138,8 @@ try {
             if ($LASTEXITCODE -ne 0) { throw 'Reusable UI path conversion failed' }
             $reuseArguments = @('--reuse-ui-package',$linuxUiPackage)
         }
-        $result = & wsl -d Debian --cd $PSScriptRoot -- python3 -B package.py --output $linuxDestination @reuseArguments
+        $sqliteArguments = @(if ($WithSqliteRuntime) { '--with-sqlite-runtime' })
+        $result = & wsl -d Debian --cd $PSScriptRoot -- python3 -B package.py --output $linuxDestination @reuseArguments @sqliteArguments
         $buildExit = $LASTEXITCODE
         if ($buildExit -eq 0) { $result[0] = (& wsl -d Debian -- wslpath -w $result[0]).Trim() }
     } else {

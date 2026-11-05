@@ -32,14 +32,14 @@ build_tools/build-snort3-arm64.sh tests/snort_pcap.py tests/test_snort_engine.py
 EXECUTABLE = {'ips-event-bridge','ips-snort-rules','snort-home-net','ips-web', 'ips-supervisor', 'ips-log-maintenance', 'ips-rule-manager','deploy.sh'}
 
 
-def build(output,reuse_ui=None):
+def build(output,reuse_ui=None,with_sqlite_runtime=False):
     from build_tools.python_dependencies import environment
     if not os.environ.get('NDR_PYTHON_DEPS'):
-        with environment():return _build(output,reuse_ui)
-    return _build(output,reuse_ui)
+        with environment():return _build(output,reuse_ui,with_sqlite_runtime)
+    return _build(output,reuse_ui,with_sqlite_runtime)
 
 
-def _build(output,reuse_ui=None):
+def _build(output,reuse_ui=None,with_sqlite_runtime=False):
     from build_frontend import build as build_ui, source_files
     output = Path(output).resolve()
     if output.is_relative_to(ROOT):
@@ -65,6 +65,9 @@ def _build(output,reuse_ui=None):
                 raise ValueError('Reusable UI source manifest differs; run a production frontend build')
         else:
             build_ui(Path(generated))
+        if with_sqlite_runtime:
+            from build_tools.build_sqlite_runtime import build as build_sqlite
+            build_sqlite(Path(generated))
         shutil.copy2(os.environ['NDR_PYTHON_DEPS'],Path(generated)/'python-dependencies.zip')
         return archive_release(output, Path(generated), source_files())
 
@@ -72,14 +75,17 @@ def _build(output,reuse_ui=None):
 def archive_release(output, generated, sources):
     frontend = [p.relative_to(ROOT).as_posix() for p in sources]
     chunks = sorted(path.name for path in generated.glob('chunk-*.js'))
-    names = sorted(set(FILES + frontend + chunks + ['python-dependencies.zip','index.html','app.js','ui.js','app.css','build_frontend.py', 'frontend-build.json', 'tests/test-data-layer.cjs', 'tests/test-connection-summary.cjs', 'tests/check_data_layer.py',
+    binary_files = ['python-dependencies.zip']
+    if (generated/'libsqlite3-ndr.so').is_file():
+        binary_files.append('libsqlite3-ndr.so')
+    names = sorted(set(FILES + frontend + chunks + binary_files + ['index.html','app.js','ui.js','app.css','build_frontend.py', 'frontend-build.json', 'tests/test-data-layer.cjs', 'tests/test-connection-summary.cjs', 'tests/check_data_layer.py',
                        'deploy-angular.py', 'deploy-backend.py', 'tests/angular-smoke.mjs', 'tests/angular-pointer.mjs', 'tests/angular-ux.mjs', 'tests/angular-hunt-suggestions.mjs', 'tests/angular-system-capacity.mjs', 'tests/angular-reset.mjs', 'tests/angular-chart-tooltip.mjs', 'tests/test_hunt_suggestions.py', 'tests/test_mitre_attack.py', 'tests/test-attack-mapping.cjs', 'tests/test-console-scroll.cjs', 'frontend-licenses.txt'] +
                        ['tests/test-output.mjs', 'tests/test-overview-range.cjs', 'tests/test-modal-backdrop.cjs', 'tests/test-range-context.cjs', 'tests/test-chart-zoom.cjs', 'tests/test_network_visibility.py', 'tests/test_network_snapshots.py', 'tests/test_static_modules.py', 'tests/test_deploy_backend.py', 'tests/audit_hunt_queries.py', 'tests/test_hunt_query_matrix.py', 'tests/test_data_layer.py']))
     payloads = {}
-    generated_names = {'python-dependencies.zip','index.html', 'app.js', 'ui.js', 'app.css', 'frontend-build.json', 'frontend-licenses.txt', *chunks}
+    generated_names = {'index.html', 'app.js', 'ui.js', 'app.css', 'frontend-build.json', 'frontend-licenses.txt', *chunks, *binary_files}
     for name in names:
         data = ((generated if name in generated_names else ROOT) / name).read_bytes()
-        payloads[name] = data if name in frontend or name=='python-dependencies.zip' else data.removeprefix(b'\xef\xbb\xbf').replace(b'\r\n', b'\n')
+        payloads[name] = data if name in frontend or name in binary_files else data.removeprefix(b'\xef\xbb\xbf').replace(b'\r\n', b'\n')
     manifest=json.loads(payloads['frontend-build.json'])
     for name,digest in {**manifest['sources'],**manifest['files']}.items():
         if name not in payloads or hashlib.sha256(payloads[name]).hexdigest()!=digest:
@@ -110,5 +116,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--reuse-ui-package',type=Path)
+    parser.add_argument('--with-sqlite-runtime',action='store_true')
     args=parser.parse_args()
-    build(args.output,args.reuse_ui_package)
+    build(args.output,args.reuse_ui_package,args.with_sqlite_runtime)

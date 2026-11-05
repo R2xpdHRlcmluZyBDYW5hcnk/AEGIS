@@ -312,6 +312,29 @@ class DataLayerCase(unittest.TestCase):
         finally:
             self.db.conn = real
 
+    def test_failed_rollback_does_not_drop_the_pending_batch(self):
+        real = self.db.conn
+        failing = mock.Mock(wraps=real)
+        failing.executemany.side_effect = sqlite3.OperationalError('write failed')
+        failing.rollback.side_effect = sqlite3.OperationalError('rollback failed')
+        self.db.add({'ts':self.stamp,'type':'dns'},'{}')
+        self.db.conn = failing
+        try:
+            self.db.flush()
+            self.assertEqual(len(self.db.buf),1)
+            self.assertTrue(self.db.write_blocked)
+            self.assertFalse(self.db.clear())
+        finally:
+            self.db.conn = real
+
+    def test_retention_does_not_delete_live_rows_due_to_allocated_wal_space(self):
+        self.add('flow',ts=m.now())
+        self.db.cap = self.db._used_pages_bytes() + 4096
+        with mock.patch.object(self.db,'_size',return_value=self.db.cap*4):
+            self.db.maintain(force=True)
+        self.assertEqual(self.db.conn.execute('SELECT COUNT(*) FROM events').fetchone()[0],1)
+        self.assertEqual(self.db.conn.execute('PRAGMA synchronous').fetchone()[0],2)
+
     def test_bounded_prefetch_and_no_recursive_page_chain(self):
         for index in range(100):
             self.service.schedule(str(index),lambda:None)

@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import time
 from ips_control import Client
 from deployment_layout import layout
@@ -16,7 +17,8 @@ BIN=Path(layout()['program_dir'])
 BACKUPS=Path('/var/backups/ips-console')
 SERVICES=('ips-web','ips-rule-manager','ips-event-bridge')
 WEB_PROGRAMS=frozenset(('ips-web','llm_assistant.py','dns_context.py','llm_hunting.py',
-                       'overview_metrics.py','hunt_query.py','python_dependencies.py','python-dependencies.zip'))
+                       'overview_metrics.py','hunt_query.py','python_dependencies.py','python-dependencies.zip','libsqlite3-ndr.so'))
+MANAGER_PROGRAMS=frozenset(('openappid_update.py','history_reset.py'))
 PIDFILE=Path('/run/snort/snort.pid')
 RESOURCE_ROOT=Path('/etc/systemd/system')
 RESOURCE_OVERRIDES={
@@ -35,8 +37,23 @@ def wait_manager():
     raise RuntimeError('Rule manager control socket did not become ready')
 
 
+def validate_sqlite_runtime(path):
+    code = '''import ctypes, sys
+library = ctypes.CDLL(sys.argv[1], mode=ctypes.RTLD_GLOBAL)
+library.sqlite3_libversion.restype = ctypes.c_char_p
+import sqlite3
+if sqlite3.sqlite_version != library.sqlite3_libversion().decode() or sqlite3.sqlite_version_info < (3, 51, 3):
+    raise SystemExit('Console SQLite runtime is incompatible or lacks the WAL fix')
+print(sqlite3.sqlite_version)
+'''
+    return subprocess.check_output([sys.executable, '-B', '-c', code, str(path.resolve())], text=True).strip()
+
+
 def apply(release,wait_ready,overrides,snapshot=None):
     release=Path(release)
+    runtime = release/'libsqlite3-ndr.so'
+    sqlite_version = validate_sqlite_runtime(runtime) if runtime.is_file() else None
+    programs = PROGRAMS + ((runtime.name,) if sqlite_version else ())
     for name in PROGRAMS:
         if name.endswith('.zip'):
             import zipfile
@@ -45,13 +62,19 @@ def apply(release,wait_ready,overrides,snapshot=None):
         else:compile((release/name).read_bytes(),name,'exec')
     original=CONFIG.read_bytes();config=json.loads(original)
     updated=dict(config,**overrides)
-    changed=[name for name in PROGRAMS if not (BIN/name).exists() or (BIN/name).read_bytes()!=(release/name).read_bytes()]
+    changed=[name for name in programs if not (BIN/name).exists() or (BIN/name).read_bytes()!=(release/name).read_bytes()]
     resources={RESOURCE_ROOT/(name+'.d')/'50-ips-parallel.conf':data for name,data in RESOURCE_OVERRIDES.items()}
     resource_before={path:path.read_bytes() if path.exists() else None for path in resources}
     resources_changed=any(resource_before[path]!=data for path,data in resources.items())
     if not changed and updated==config and not resources_changed:
         print(json.dumps({'backend_unchanged':True}));return
-    services=('ips-web',) if set(changed)<=WEB_PROGRAMS and not resources_changed else SERVICES
+    changed_set = set(changed)
+    if changed_set <= WEB_PROGRAMS | MANAGER_PROGRAMS and not resources_changed:
+        services = tuple(name for name,needed in (
+            ('ips-web', updated!=config or bool(changed_set & WEB_PROGRAMS)),
+            ('ips-rule-manager', bool(changed_set & MANAGER_PROGRAMS))) if needed)
+    else:
+        services = SERVICES
     start_services=[name for name in reversed(SERVICES) if name in services]
     engine_pid=PIDFILE.read_text() if PIDFILE.exists() else None
     client=Client()
@@ -62,7 +85,7 @@ def apply(release,wait_ready,overrides,snapshot=None):
         before=snapshot(config) if snapshot else None
         token=datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
         backup=BACKUPS/token;backup.mkdir(parents=True,mode=0o700)
-        for name in PROGRAMS:
+        for name in programs:
             if (BIN/name).exists(): shutil.copy2(BIN/name,backup/name)
         (backup/'ips-web.conf').write_bytes(original)
         os.chmod(backup/'ips-web.conf',0o600)
@@ -81,7 +104,7 @@ def apply(release,wait_ready,overrides,snapshot=None):
             if CONFIG.read_bytes()!=original:
                 raise RuntimeError('Configuration changed during update')
             for name in changed:
-                install(release/name,BIN/name,0o644 if name.endswith(('.py','.zip')) else 0o755)
+                install(release/name,BIN/name,0o644 if name.endswith(('.py','.zip','.so')) else 0o755)
             if resources_changed:
                 for index,(path,data) in enumerate(resources.items()):
                     path.parent.mkdir(parents=True,exist_ok=True)
@@ -94,11 +117,13 @@ def apply(release,wait_ready,overrides,snapshot=None):
                 install(candidate,CONFIG,0o600)
                 candidate.unlink()
             subprocess.run(['systemctl','start',*start_services],check=True)
-            wait_ready(updated)
+            health = wait_ready(updated)
+            if sqlite_version and health.get('sqlite_version') != sqlite_version:
+                raise RuntimeError('The restarted console did not select the installed SQLite runtime')
             wait_manager()
             if (PIDFILE.read_text() if PIDFILE.exists() else None)!=engine_pid:
                 raise RuntimeError('Detection process changed during console update')
-            for name in PROGRAMS:
+            for name in programs:
                 if (BIN/name).read_bytes()!=(release/name).read_bytes():
                     raise RuntimeError('Console module verification failed')
             if any(path.read_bytes()!=data for path,data in resources.items()):raise RuntimeError('Parallel resource limits differ')
@@ -115,7 +140,7 @@ def apply(release,wait_ready,overrides,snapshot=None):
         except BaseException:
             subprocess.run(['systemctl','stop',*services],check=False)
             for name in changed:
-                if (backup/name).exists(): install(backup/name,BIN/name,0o644 if name.endswith(('.py','.zip')) else 0o755)
+                if (backup/name).exists(): install(backup/name,BIN/name,0o644 if name.endswith(('.py','.zip','.so')) else 0o755)
                 elif (BIN/name).exists(): (BIN/name).unlink()
             if updated!=config:install(backup/'ips-web.conf',CONFIG,0o600)
             if resources_changed:

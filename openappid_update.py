@@ -125,6 +125,21 @@ def extract(archive, destination):
         raise ValueError('OpenAppID 检测器目录不完整')
 
 
+def detector_md5(data):
+    try:
+        lines = data.decode('ascii').splitlines()
+    except UnicodeDecodeError:
+        raise ValueError('OpenAppID 官方校验文件格式无效') from None
+    hashes = []
+    for line in lines:
+        match = re.fullmatch(r'[ \t]*([a-fA-F0-9]{32})[ \t]+\*?snort-openappid\.tar\.gz[ \t]*', line)
+        if match:
+            hashes.append(match[1].lower())
+    if len(hashes) != 1:
+        raise ValueError('OpenAppID 官方校验文件格式无效')
+    return hashes[0]
+
+
 def update(lines, root=ROOT):
     root = Path(root)
     previous = snapshot(root)
@@ -133,10 +148,8 @@ def update(lines, root=ROOT):
     page = fetch(PAGE).decode('utf-8')
     links = re.findall(r'href=[\"\'](/downloads/openappid/[0-9]+)[\"\']', page)
     if not links: raise ValueError('OpenAppID 官方下载页面未提供检测器包')
-    checksum = fetch(CHECKSUM, maximum=65536).decode('ascii')
-    match = re.search(r'^([a-fA-F0-9]{32})\s+\*?snort-openappid\.tar\.gz\s*$', checksum, re.M)
-    if not match: raise ValueError('OpenAppID 官方校验文件格式无效')
-    expected = match[1].lower(); old = previous['receipt'] or {}
+    expected = detector_md5(fetch(CHECKSUM, maximum=65536))
+    old = previous['receipt'] or {}
     if old.get('md5') == expected:
         atomic_json(root / 'update.json', dict(old, checked=int(time.time())))
         lines.append('OpenAppID 检测器已是当前版本'); return False

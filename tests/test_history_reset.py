@@ -134,6 +134,7 @@ class HistoryResetTests(unittest.TestCase):
         self.assertEqual({path.name:path.read_bytes() for path in backup.iterdir()},old)
         with closing(sqlite3.connect(self.database)) as conn:
             state=dict(conn.execute('SELECT key,value FROM event_state'))
+            self.assertEqual(conn.execute('PRAGMA auto_vacuum').fetchone()[0],2)
         info=self.stream.stat()
         self.assertEqual(json.loads(state['stream_cutoff']),dict(device=info.st_dev,inode=info.st_ino,offset=info.st_size))
         self.assertEqual(self.stream.read_text(),'preserve-or-clear')

@@ -76,7 +76,8 @@ def web_ready():
     if ':' in host:host='['+host+']'
     opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
     with opener.open('http://'+host+':'+str(config.get('port',9000))+'/healthz',timeout=2) as response:
-        return response.status==200 and json.load(response).get('ok') is True
+        state = json.load(response)
+        return response.status==200 and state.get('ok') is True and state.get('event_db_ready',True) is True
 
 
 def remove_history_files(database):
@@ -133,6 +134,7 @@ def reset_database(database):
         creating=True
         with closing(sqlite3.connect(database)) as conn:
             with conn:
+                conn.execute('PRAGMA auto_vacuum=INCREMENTAL')
                 conn.execute('CREATE TABLE event_state(key TEXT PRIMARY KEY,value TEXT NOT NULL)')
                 conn.executemany('INSERT INTO event_state VALUES(?,?)',[
                     ('clear_epoch',secrets.token_hex(16)),('stream_cutoff',json.dumps(cutoff))])
