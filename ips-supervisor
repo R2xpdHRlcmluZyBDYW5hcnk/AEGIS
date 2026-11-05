@@ -4,9 +4,10 @@
 职责
   1. 独占维护 `table inet ips`（NFQUEUE 分发规则）：启动时应用，停止时删除；
   2. 拉起并守护 Snort（NFQ 模式，前台运行）；
-  3. 每 5 秒用 libnftables 读一次队列表：如果被 `systemctl restart nftables`
+  3. 检查队列监听，持续缺失时在规则事务完成后恢复 Snort；
+  4. 定期用 libnftables 读队列表：如果被 `systemctl restart nftables`
      之类的操作冲掉了，自动重建（并写日志）；
-  4. 收到 SIGTERM 时停止检测进程并删表。
+  5. 收到 SIGTERM 时停止检测进程并删表。
 
 Web 控制台和事件库由独立的 ips-web.service 管理。
 
@@ -15,7 +16,9 @@ Web 控制台和事件库由独立的 ips-web.service 管理。
   ips-supervisor --status   # 只读检查：队列表 + 进程 + 端口
 """
 
+from contextlib import ExitStack
 import json
+from pathlib import Path
 import secrets
 import os
 import signal
@@ -29,6 +32,7 @@ NFT_FAMILY = "inet"
 NFT_TABLE = "ips"
 NFT_FILE = None                      # 规则内嵌，见 nft_rules()
 QUEUES = "0-3"
+QUEUE_IDS = frozenset(('0', '1', '2', '3'))
 
 SNORT_PREFIX = os.environ.get('SNORT_ENGINE_PREFIX', '/opt/ips-snort3/3.12.4.0')
 SNORT = SNORT_PREFIX + "/bin/snort"
@@ -42,6 +46,13 @@ NFQ_PROC = "/proc/net/netfilter/nfnetlink_queue"
 ENGINE_SOCKET = "/run/snort/control.sock"
 CHECK_INTERVAL = 1.0
 RESTART_DELAY = 3.0
+STARTUP_TIMEOUT = 120.0
+MISSING_GRACE = 15.0
+RECOVERY_RECHECK = 5.0
+RECOVERY_COOLDOWN = 180.0
+BRIDGE_CHECKPOINT = Path('/var/lib/ips-event-bridge/offsets.json')
+RULE_MAINTENANCE = Path('/var/lib') / ('ips-snort-rule-manager' if
+    os.environ.get('IPS_PROGRAM_DIRECTORY') == '/opt/ips-console/bin' else 'ips-rule-manager') / 'maintenance'
 
 
 def log(message):
@@ -167,14 +178,6 @@ class Child:
     def returncode(self):
         return None if self.proc is None else self.proc.poll()
 
-    def kill(self):
-        if self.alive():
-            try:
-                self.proc.kill()
-                self.proc.wait(timeout=5)
-            except (OSError, subprocess.TimeoutExpired):
-                pass
-
     def stop(self, timeout=20.0):
         if not self.alive():
             return
@@ -210,36 +213,65 @@ def clean_stale_pidfile():
         pass
 
 
-def queues_busy():
-    """返回仍被其它进程监听的 NFQ 队列号（peer_portid != 0 表示有监听者）"""
-    busy = set()
+def queue_listeners():
+    """Return bound queue IDs, or None when the kernel snapshot is unavailable."""
+    bound = set()
     try:
         with open(NFQ_PROC, encoding="utf-8") as handle:
             for line in handle:
                 cols = line.split()
-                if len(cols) >= 2 and cols[0] in ("0", "1", "2", "3") and cols[1] != "0":
-                    busy.add(cols[0])
-    except OSError:
-        pass
-    return busy
+                if len(cols) < 2 or not cols[0].isdecimal() or not cols[1].isdecimal():
+                    return None
+                if cols[0] in QUEUE_IDS and int(cols[1]):
+                    bound.add(cols[0])
+    except (OSError, UnicodeError):
+        return None
+    return bound
 
 
-def wait_queues_free(timeout=20.0):
+def wait_queues_free(stop, timeout):
     """旧实例退出后内核释放队列可能有延迟，先等一会儿再启动，避免 create_queue 失败"""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        busy = queues_busy()
+    deadline = time.monotonic() + timeout
+    while not stop.is_set():
+        busy = queue_listeners()
         if not busy:
             return True
-        time.sleep(0.5)
-    log("警告: 队列 %s 仍被占用，稍后重试" % ",".join(sorted(queues_busy())))
+        if time.monotonic() >= deadline:
+            log("队列 %s 仍被占用，稍后重试" % ",".join(sorted(busy)))
+            break
+        stop.wait(0.5)
     return False
+
+
+class QueueHealth:
+    def __init__(self, started):
+        self.started = started
+        self.ready = False
+        self.missing_since = {}
+
+    def overdue(self, listeners, now):
+        if listeners is None:
+            self.missing_since.clear()
+            return set()
+        missing = QUEUE_IDS - listeners
+        if not missing:
+            self.ready = True
+        if not self.ready and now - self.started < STARTUP_TIMEOUT:
+            return set()
+        self.missing_since = {queue: self.missing_since.get(queue, now) for queue in missing}
+        return {queue for queue, since in self.missing_since.items() if now - since >= MISSING_GRACE}
 
 
 def status():
     nft = Nft()
     ok = nft.has_queue()
     print("nft table %s %s: %s" % (NFT_FAMILY, NFT_TABLE, "OK" if ok else "MISSING"))
+    listeners = queue_listeners()
+    if listeners is None:
+        print("NFQUEUE 监听状态不可用")
+    else:
+        print("NFQUEUE 已监听 %s 缺失 %s" % (','.join(sorted(listeners)) or '无',
+                                              ','.join(sorted(QUEUE_IDS - listeners)) or '无'))
     for name in ("snort", "ips-web"):
         proc = subprocess.run(["pgrep", "-af", name], capture_output=True, text=True)
         lines = [l for l in proc.stdout.splitlines() if "ips-supervisor" not in l]
@@ -247,18 +279,127 @@ def status():
     for name in ('ips.service', 'ips-web.service'):
         unit = subprocess.run(["systemctl", "is-active", name], capture_output=True, text=True)
         print("%s: %s" % (name, unit.stdout.strip()))
-    return 0 if ok else 1
+    return 0 if ok and listeners == QUEUE_IDS else 1
 
 
-def wait_snort_ready(snort, timeout=90.0):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+def wait_snort_ready(snort, stop):
+    deadline = time.monotonic() + STARTUP_TIMEOUT
+    while not stop.is_set() and time.monotonic() < deadline:
         if not snort.alive():
             return False
-        if os.path.exists(ENGINE_SOCKET):
+        if os.path.exists(ENGINE_SOCKET) and queue_listeners() == QUEUE_IDS:
             return True
-        time.sleep(0.5)
+        stop.wait(0.5)
     return False
+
+
+def archive_native_logs(stop):
+    """Preserve files Snort would truncate at startup, on the same filesystem."""
+    import ctypes
+
+    logs = Path(NATIVE_LOG_DIR)
+    names = ('file_connector_ndr_transmit', 'alert_json.txt', 'ndr_session.json')
+    sources = [logs / (prefix + name) for prefix in ('', '0_', '1_', '2_', '3_') for name in names]
+    files = {}
+    for path in sources:
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise OSError('原始日志路径无效：' + path.name)
+        if path.exists():
+            info = path.stat()
+            if info.st_size:
+                files[path] = info
+    if not files:
+        return
+
+    try:
+        instance = json.loads((Path(SNORT_RUNDIR) / 'instance.json').read_text())
+        epoch, started = instance['epoch'], float(instance['started'])
+    except (OSError, ValueError, KeyError, TypeError):
+        epoch = None
+    if epoch:
+        pending = {path.name: info for path, info in files.items()
+                   if info.st_size and info.st_mtime >= started}
+        deadline = time.monotonic() + 5
+        while pending and time.monotonic() < deadline:
+            try:
+                checkpoint = json.loads(BRIDGE_CHECKPOINT.read_text())
+                if checkpoint.get('epoch') == epoch and all(
+                    checkpoint['files'].get(name, {}).get('inode') == info.st_ino and
+                    checkpoint['files'][name].get('offset', 0) >= info.st_size
+                    for name, info in pending.items()
+                ):
+                    break
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+            if stop.wait(0.25):
+                return
+        else:
+            if pending:
+                log('采集尚未追平，未入库的原始记录将保存在归档中')
+
+    # Share the existing native archive naming and history cleanup policy.
+    archive = logs / ('.response-' + time.strftime('%Y%m%dT%H%M%S', time.gmtime()) + '-' + str(time.time_ns()))
+    # Keep the active pathname present while the bridge reads it independently.
+    exchange = ctypes.CDLL(None, use_errno=True).renameat2
+    exchange.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
+    exchange.restype = ctypes.c_int
+    archive.mkdir(mode=0o700)
+    for path, info in files.items():
+        destination = archive / path.name
+        with destination.open('xb'):
+            pass
+        try:
+            destination.chmod(info.st_mode & 0o777)
+            if exchange(-100, os.fsencode(path), -100, os.fsencode(destination), 2):  # AT_FDCWD, RENAME_EXCHANGE
+                error = ctypes.get_errno()
+                raise OSError(error, os.strerror(error), str(path))
+        except OSError:
+            destination.unlink()
+            raise
+    log('已保留重启前的原始日志：' + archive.name)
+
+
+def start_snort(snort, stop, queue_timeout):
+    clean_stale_pidfile()
+    if not wait_queues_free(stop, queue_timeout):
+        return False
+    try:
+        archive_native_logs(stop)
+    except OSError as exc:
+        log('原始日志归档失败，暂缓启动 Snort：' + str(exc))
+        return False
+    if stop.is_set():
+        return False
+    snort.start()
+    return True
+
+
+def recover_snort(snort, stop, overdue, socket_missing):
+    from snort_engine import configuration_lock
+
+    with ExitStack() as guard:
+        try:
+            guard.enter_context(configuration_lock(SNORT_CONF, blocking=False))
+        except BlockingIOError:
+            return False
+        except OSError as exc:
+            log('暂无法协调 Snort 恢复：' + str(exc))
+            return False
+        listeners = queue_listeners()
+        missing = overdue - listeners if listeners is not None else set()
+        socket_missing = socket_missing and not os.path.exists(ENGINE_SOCKET)
+        if stop.is_set() or RULE_MAINTENANCE.exists() or not (missing or socket_missing):
+            return False
+        reason = 'NFQUEUE %s 持续缺少监听' % ','.join(sorted(missing)) if missing else 'Snort 控制套接字未就绪'
+        log(reason + '，自动重启 Snort')
+        snort.stop()
+        if snort.alive():
+            log('Snort 未完全退出，等待后续恢复')
+        elif start_snort(snort, stop, 10) and wait_snort_ready(snort, stop):
+            log('Snort 已恢复，NFQUEUE 0–3 全部就绪')
+        elif not stop.is_set():
+            log('Snort 重启后监听尚未全部就绪')
+        return True
 
 
 def ensure_nft():
@@ -297,48 +438,40 @@ def main():
         "-c", SNORT_CONF, "-l", NATIVE_LOG_DIR, "--control-socket", ENGINE_SOCKET,
         "--script-path", SNORT_PREFIX + "/etc/snort"])
 
-    clean_stale_pidfile()
-    wait_queues_free(20)
-    snort.start()
-    started_at = time.time()
+    start_snort(snort, stop, 20)
+    health = QueueHealth(time.monotonic())
+    next_recovery = 0.0
+    recovery_armed = True
 
     last_check = 0.0
     while not stop.is_set():
-        for child in (snort,):
-            if stop.is_set():
+        if not snort.alive():
+            log("Snort 未运行 (rc=%s)，%.0fs 后重试" % (snort.returncode(), RESTART_DELAY))
+            if stop.wait(RESTART_DELAY):
                 break
-            if not child.alive():
-                log("%s 已退出 (rc=%s)，%.0fs 后重启" %
-                    (child.name, child.returncode(), RESTART_DELAY))
-                stop.wait(RESTART_DELAY)
-                if stop.is_set():
-                    break
-                if child is snort:
-                    clean_stale_pidfile()
-                    wait_queues_free(10)
-                    child.start()
-                    started_at = time.time()
-                else:
-                    child.start()
-        if stop.is_set():
-            break
+            if start_snort(snort, stop, 10):
+                health = QueueHealth(time.monotonic())
 
-        if snort.alive() and not os.path.exists(ENGINE_SOCKET):
-            if time.time() - started_at > 120:
-                log("snort 存活但 unix socket 一直没出现，判定为卡死，重启")
-                snort.kill()
-                clean_stale_pidfile()
-                wait_queues_free(10)
-                snort.start()
-                started_at = time.time()
-
-        now = time.time()
+        now = time.monotonic()
         if now - last_check >= CHECK_INTERVAL:
             last_check = now
             if not nft.has_queue():
                 log("队列表被清空（nftables 被重载？），正在重建")
                 ok, err = nft.apply()
                 log("重建%s" % ("成功" if ok else "失败: " + err))
+            if snort.alive():
+                listeners = queue_listeners()
+                socket_ready = os.path.exists(ENGINE_SOCKET)
+                if listeners == QUEUE_IDS and socket_ready:
+                    recovery_armed = True
+                overdue = health.overdue(listeners, now)
+                socket_missing = not socket_ready and now - health.started >= STARTUP_TIMEOUT
+                if recovery_armed and now >= next_recovery and (overdue or socket_missing):
+                    next_recovery = now + RECOVERY_RECHECK
+                    if recover_snort(snort, stop, overdue, socket_missing):
+                        health = QueueHealth(time.monotonic())
+                        next_recovery = health.started + RECOVERY_COOLDOWN
+                        recovery_armed = False
 
         stop.wait(1.0)
 

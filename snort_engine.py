@@ -1,6 +1,7 @@
 """Snort 3 native event normalization and bounded local control channel."""
 from datetime import datetime, timezone
 from contextlib import contextmanager
+import errno
 import hashlib
 from ipaddress import ip_address
 import json
@@ -24,17 +25,21 @@ _CONFIG_THREAD_LOCK = threading.RLock()
 
 
 @contextmanager
-def configuration_lock(config=CONFIG):
+def configuration_lock(config=CONFIG, *, blocking=True):
     """Serialize rules, scope refresh and deployment across independent processes."""
-    with _CONFIG_THREAD_LOCK:
+    if not _CONFIG_THREAD_LOCK.acquire(blocking=blocking):
+        raise BlockingIOError(errno.EAGAIN, 'Snort configuration is busy')
+    try:
         try: import fcntl
         except ImportError:
             yield
             return
         with Path(config).with_name('.configuration.lock').open('a') as handle:
-            fcntl.flock(handle,fcntl.LOCK_EX)
+            fcntl.flock(handle,fcntl.LOCK_EX if blocking else fcntl.LOCK_EX|fcntl.LOCK_NB)
             try: yield
             finally: fcntl.flock(handle,fcntl.LOCK_UN)
+    finally:
+        _CONFIG_THREAD_LOCK.release()
 
 NATIVE_FIELDS = {
     'session_id': 'session_id',

@@ -3,6 +3,7 @@ param(
     [string]$IdentityFile = '',
     [switch]$UpdateBackend,
     [switch]$UpdateNftRules,
+    [switch]$UpdateSupervisor,
     [switch]$NativeResponse,
     [string]$NativeResponsePackage = '',
     [switch]$WslBuild,
@@ -30,7 +31,7 @@ param(
 $ErrorActionPreference = 'Stop'
 if (-not $BuildOnly -and [string]::IsNullOrWhiteSpace($Target)) { throw 'Specify -Target user@host for deployment, or use -BuildOnly -OutputDirectory for a local build' }
 if ($Target -and ($Target.StartsWith('-') -or $Target -match '\s')) { throw 'Invalid SSH target' }
-if ($NativeResponse -and ($UpdateBackend -or $UpdateNftRules -or $InstallSnort3 -or $UpdateEngine -or $MigrateLogs -or $RemoveLegacySuricata -or $ClearNativeLogs -or $ReleasePackage -or $ReuseUiPackage)) { throw '-NativeResponse is a standalone adapter build or activation' }
+if ($NativeResponse -and ($UpdateBackend -or $UpdateNftRules -or $UpdateSupervisor -or $InstallSnort3 -or $UpdateEngine -or $MigrateLogs -or $RemoveLegacySuricata -or $ClearNativeLogs -or $ReleasePackage -or $ReuseUiPackage)) { throw '-NativeResponse is a standalone adapter build or activation' }
 if ($NativeResponsePackage -and -not $NativeResponse) { throw '-NativeResponsePackage requires -NativeResponse' }
 if ($NativeResponse -and -not $BuildOnly -and -not (Test-Path -LiteralPath $NativeResponsePackage)) { throw '-NativeResponse activation requires an existing -NativeResponsePackage' }
 if ($BuildOnly -and -not $OutputDirectory) { throw '-BuildOnly requires -OutputDirectory outside the source directory' }
@@ -58,6 +59,9 @@ if ($resourceArguments.Count -and (-not $UpdateBackend -or $BuildOnly)) { throw 
 if (($InstallSnort3 -or $UpdateEngine) -and $resourceArguments.Count) { throw 'Apply resource overrides with a subsequent -UpdateBackend update' }
 if ($UpdateNftRules -and ($UpdateBackend -or $InstallSnort3 -or $UpdateEngine -or $BuildOnly -or $OutputDirectory -or $resourceArguments.Count)) {
     throw '-UpdateNftRules is a standalone NFQUEUE-only deployment'
+}
+if ($UpdateSupervisor -and ($UpdateBackend -or $UpdateNftRules -or $InstallSnort3 -or $UpdateEngine -or $BuildOnly -or $OutputDirectory -or $ReleasePackage -or $ReuseUiPackage)) {
+    throw '-UpdateSupervisor is a standalone detector-supervisor deployment'
 }
 $buildWorkspace = Join-Path ([System.IO.Path]::GetTempPath()) ('aegis-release-' + [guid]::NewGuid().ToString('N'))
 $resolvedTemp = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd('\','/')
@@ -97,11 +101,18 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'Native response activation or verification failed' }
         return
     }
-    if ($UpdateNftRules) {
-        & python -B -m unittest -q tests.test_nft_rules tests.test_deploy_nft
-        if ($LASTEXITCODE -ne 0) { throw 'NFQUEUE regression checks failed' }
-        & python -B deploy-nft.py --prepare $destination
-        if ($LASTEXITCODE -ne 0) { throw 'NFQUEUE package preparation failed' }
+    if ($UpdateNftRules -or $UpdateSupervisor) {
+        $deployer = if ($UpdateSupervisor) { 'deploy-supervisor.py' } else { 'deploy-nft.py' }
+        $tests = @('tests.test_nft_rules', 'tests.test_deploy_nft')
+        $files = @('ips-supervisor', 'log_storage.py', 'deploy-nft.py', 'SHA256SUMS')
+        if ($UpdateSupervisor) {
+            $tests += 'tests.test_supervisor'
+            $files += @('snort_engine.py', 'deploy-supervisor.py')
+        }
+        & python -B -m unittest -q @tests
+        if ($LASTEXITCODE -ne 0) { throw 'Detector regression checks failed' }
+        & python -B $deployer --prepare $destination
+        if ($LASTEXITCODE -ne 0) { throw 'Detector package preparation failed' }
         $options = @('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10')
         $defaultIdentity = "$env:USERPROFILE/.ssh/id_ed25519"
         if (-not $IdentityFile -and (Test-Path -LiteralPath $defaultIdentity)) { $IdentityFile = $defaultIdentity }
@@ -116,10 +127,11 @@ try {
         & ssh @options $Target "mkdir -p '$stage'"
         if ($LASTEXITCODE -ne 0) { throw 'Remote staging failed' }
         $stageReady = $true
-        & scp @options (Join-Path $destination 'ips-supervisor') (Join-Path $destination 'log_storage.py') (Join-Path $destination 'deploy-nft.py') (Join-Path $destination 'SHA256SUMS') ($Target + ':' + $stage + '/')
-        if ($LASTEXITCODE -ne 0) { throw 'NFQUEUE upload failed' }
-        & ssh @options $Target "cd '$stage' && sha256sum --strict -c SHA256SUMS && python3 -B deploy-nft.py --release ."
-        if ($LASTEXITCODE -ne 0) { throw 'NFQUEUE deployment or verification failed' }
+        $stagedFiles = @($files | ForEach-Object { Join-Path $destination $_ })
+        & scp @options @stagedFiles ($Target + ':' + $stage + '/')
+        if ($LASTEXITCODE -ne 0) { throw 'Detector upload failed' }
+        & ssh @options $Target "cd '$stage' && sha256sum --strict -c SHA256SUMS && python3 -B '$deployer' --release ."
+        if ($LASTEXITCODE -ne 0) { throw 'Detector deployment or verification failed' }
         return
     }
     if ($ReleasePackage) {
