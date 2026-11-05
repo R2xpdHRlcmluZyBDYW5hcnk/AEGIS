@@ -79,7 +79,17 @@ try {
   rulesFailed=value;await click('↻ 刷新');
   await until(`document.querySelector('ndr-rules .table-scroll')?.getAttribute('aria-busy')==='false'&&document.querySelector('.rule-summary')?.textContent.includes('失败 ${value??'未提供'}')`);
  }
- await ruleTab('阻断动作');await evaluate(`document.querySelector('ndr-rules thead input').click()`);await click('改为 reject');
+ await ruleTab('阻断动作');await click('＋ 新建');
+ await until(`!!document.querySelector('ndr-picker [aria-label="目标动作"]')`);
+ const controls=await evaluate(`['选择对象类型','搜索候选规则','目标动作'].map(label=>{
+  const {top,bottom}=document.querySelector('ndr-picker [aria-label="'+label+'"]').getBoundingClientRect();
+  return {top,bottom};
+ })`);
+ for(const control of controls.slice(1)){
+  assert.ok(Math.abs(control.top-controls[0].top)<1&&Math.abs(control.bottom-controls[0].bottom)<1,'picker controls should share the same row');
+ }
+ await click('取消',`document.querySelector('ndr-picker dialog')`);await until(`!document.querySelector('ndr-picker')`);
+ await evaluate(`document.querySelector('ndr-rules thead input').click()`);await click('改为 reject');
  await until(`!document.querySelector('ndr-rules .selection-bar')`);
  await evaluate(`document.querySelector('ndr-rules thead input').click()`);await click('改为 drop');
  await until(`!document.querySelector('ndr-rules .selection-bar')`);
@@ -120,7 +130,7 @@ try {
  await nav('overview');await nav('rules');await ruleTab('规则源');
  await until(`document.querySelector('input[name="time"]')?.value==='06:23'`);
  assert.deepEqual(exceptions,[]);
- console.log('PASS: successful reject/drop and source toggles clear selection; partial failures retain failed rows; explicit apply, draft deletion and schedule persistence');
+ console.log('PASS: block action picker alignment; successful reject/drop and source toggles clear selection; partial failures retain failed rows; explicit apply, draft deletion and schedule persistence');
 } finally {
  if(ws)ws.close();chrome.kill();await pause(500);
  const resolved=path.resolve(profile);
