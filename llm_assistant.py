@@ -467,7 +467,6 @@ class LocalAssistant:
                     if 'text/event-stream' not in response.getheader('Content-Type',''):raise ValueError('本地模型未提供流式响应')
                     text='';finish=None;complete=False;received=0;filtering=VisibleText()
                     analysis = PublicAnalysis()
-                    reasoning_started = False
                     def accept(value, final=False):
                         nonlocal text
                         note, value = analysis.feed(value, final=final)
@@ -492,12 +491,10 @@ class LocalAssistant:
                             content=delta.get('content') or ''
                             reasoning=delta.get('reasoning_content') or ''
                             if not isinstance(content,str) or not isinstance(reasoning,str):raise ValueError('模型响应格式无效')
-                            # Private reasoning is neither retained nor sent to the client.
+                            # Keep reasoning separate from the summary and executable JSON.
                             received+=len(content)+len(reasoning)
                             if received>32768:raise ValueError('本地模型响应超过上限')
-                            if reasoning and not reasoning_started:
-                                if not publish({'phase': 'reasoning'}):return
-                                reasoning_started = True
+                            if reasoning and not publish({'reasoning_delta': reasoning}):return
                             if not accept(filtering.feed(content)):return
                             finish=choice.get('finish_reason') or finish
                     if not stopped.is_set():

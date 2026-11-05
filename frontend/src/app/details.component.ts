@@ -54,7 +54,7 @@ export class Details {
   const target=view.kind==='incident'?{kind:'incident',params:view.params}:view.record?.record_id?{kind:'record',key:view.record.record_id}:view.record?.id!=null?{kind:'event',id:view.record.id}:null;
   if(!target){this.patch(view.id,{aiError:'当前证据缺少可查询标识，无法生成'});return;}
   this.stopGeneration();const controller=this.inference=new AbortController();
-  this.patch(view.id,{aiBusy:kind,aiError:'',aiDraft:'',aiActivity:'正在读取证据',aiReasoning:false,aiNotes:[],aiNewNote:true,aiProcessOpen:true,aiAnalysisDone:false,...(kind==='rule'?{aiRule:null,aiAdded:null,aiApplyError:''}:{aiSummary:null})});
+  this.patch(view.id,{aiBusy:kind,aiError:'',aiDraft:'',aiActivity:'正在读取证据',aiReasoning:false,aiThoughts:[],aiNotes:[],aiNewNote:true,aiProcessOpen:true,aiAnalysisDone:false,...(kind==='rule'?{aiRule:null,aiAdded:null,aiApplyError:''}:{aiSummary:null})});
   const update=(item:any)=>{
    if(controller.signal.aborted||this.current?.id!==view.id)return;
    const active=this.current;
@@ -62,7 +62,12 @@ export class Details {
     const {label,detail}=item.progress;
     this.patch(view.id,{aiActivity:[label,detail].filter(Boolean).join(' '),aiNewNote:true,aiReasoning:false});
    }
-   if(item.phase==='reasoning')this.patch(view.id,{aiReasoning:true});
+   if(typeof item.reasoning_delta==='string'&&item.reasoning_delta){
+    const thoughts:string[]=[...active.aiThoughts];
+    if(active.aiReasoning&&thoughts.length)thoughts[thoughts.length-1]+=item.reasoning_delta;
+    else thoughts.push(item.reasoning_delta);
+    this.patch(view.id,{aiThoughts:thoughts,aiReasoning:true});
+   }
    if(typeof item.analysis_delta==='string'&&item.analysis_delta){
     const notes:string[]=[...active.aiNotes];
     if(active.aiNewNote||!notes.length)notes.push(item.analysis_delta);
@@ -153,12 +158,14 @@ export class Details {
     <div class="section-heading"><h3>本地智能研判</h3><span class="badge">Qwen3.5-2B</span></div>
     <div class="ai-body">
     <div class="toolbar"><button class="quiet" [disabled]="!!view.aiBusy" (click)="details.generate('summary')">{{view.aiBusy==='summary'?'正在总结…':view.aiSummary?'重新生成总结':(view.record?.session_id||view.data?.incident?.session_id)?'生成会话总结':'生成事件总结'}}</button><label class="checkbox-label">规则动作 <select aria-label="规则动作" [value]="view.aiRuleAction||'alert'" [disabled]="!!view.aiBusy||view.aiApplying||!!view.aiAdded" (change)="details.setRuleAction($any($event.target).value)"><option value="alert">告警</option><option value="block">阻断匹配特征</option></select></label><button class="quiet" [disabled]="!!view.aiBusy||view.aiApplying||!!view.aiAdded" (click)="details.generate('rule')">{{view.aiBusy==='rule'?'正在生成规则…':view.aiRule?'重新生成规则建议':'生成规则建议'}}</button><button class="text-button" *ngIf="view.aiBusy" (click)="details.stopGeneration()">停止生成</button></div>
-    <div class="ai-output" *ngIf="view.aiBusy||view.aiError||view.aiNotes?.length||view.aiDraft||view.aiSummary||view.aiRule">
-    <p class="muted ai-activity" *ngIf="view.aiBusy&&!view.aiAnalysisDone&&view.aiNewNote" role="status">{{view.aiReasoning?'模型正在思考':view.aiActivity}}</p>
+    <div class="ai-output" *ngIf="view.aiBusy||view.aiError||view.aiThoughts?.length||view.aiNotes?.length||view.aiDraft||view.aiSummary||view.aiRule">
+    <p class="muted ai-activity" *ngIf="view.aiBusy&&!view.aiAnalysisDone&&view.aiNewNote&&!view.aiReasoning" role="status">{{view.aiActivity}}</p>
     <p class="error" *ngIf="view.aiError" role="alert">{{view.aiError}}</p>
-    <details class="ai-hunts ai-process" *ngIf="view.aiNotes?.length" [open]="view.aiProcessOpen" (toggle)="details.toggleProcess($event)">
-     <summary>分析说明</summary>
-     @for (note of view.aiNotes; track $index) {<p class="muted">{{note}}</p>}
+    <details class="ai-hunts ai-process" *ngIf="view.aiThoughts?.length||view.aiNotes?.length" [open]="view.aiProcessOpen" (toggle)="details.toggleProcess($event)">
+     <summary>{{view.aiThoughts?.length?'思考过程':'分析说明'}}</summary>
+     @for (thought of view.aiThoughts; track $index) {<p class="muted ai-thought">{{thought}}</p>}
+     <h4 *ngIf="view.aiThoughts?.length&&view.aiNotes?.length">分析说明</h4>
+     @for (note of view.aiNotes; track $index) {<p class="muted ai-note">{{note}}</p>}
     </details>
     <div class="ai-summary ai-draft" *ngIf="view.aiDraft&&!view.aiSummary"><div class="section-heading"><h4>{{view.aiBusy?'正在生成总结':'未完成的总结'}}</h4></div><p>{{view.aiDraft}}</p></div>
     <div *ngIf="view.aiSummary as summary" class="ai-summary"><div class="section-heading"><h4>{{summary.context?.scope==='session'?'会话总结':'事件总结'}}</h4><button class="text-button" (click)="copy(summary.text)">复制总结</button></div><p>{{summary.text}}</p><p class="muted" *ngIf="summary.context as context">已检索 {{context.total_records}} 条{{context.scope==='session'?'会话':'事件'}}记录 使用 {{context.evidence_records}} 条证据摘录<span *ngIf="context.related_evidence_records"> 附加 {{context.related_evidence_records}} 条关联日志摘录</span></p><small class="muted">依据已保留的日志分析，请结合原始证据核查</small>

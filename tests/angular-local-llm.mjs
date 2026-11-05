@@ -57,27 +57,29 @@ try{
  await api('/__test/ai-plan',{mode:'natural'});await openIncident();await until(`document.querySelector('.ai-summary:not(.ai-draft)')?.textContent.includes('本次总结依据当前证据')`);
  assert.equal(await evaluate(`!!document.querySelector('.ai-summary:not(.ai-draft) .ai-hunts')`),false,'invalid planner output never executes a fixed fallback search');
  await close();await api('/__test/ai-plan',{mode:'default'});
- // The provider pauses after a partial public note, then after the first body chunk.
+ // Pause separately during reasoning, analysis notes and the summary body.
  await api('/__test/ai-stall',{reasoning:true,analysis:true,prefix:true});await openIncident();
- await until(`document.querySelector('.ai-activity')?.textContent==='模型正在思考'`);
+ await until(`document.querySelector('.ai-thought')?.textContent==='先观察连接方向'`);
  assert.ok(await evaluate(`(()=>{
   const output=document.querySelector('.ai-output'),toolbar=output?.previousElementSibling;
-  return output?.contains(document.querySelector('.ai-activity'))&&toolbar?.matches('.toolbar')
+  return output?.contains(document.querySelector('.ai-thought'))&&toolbar?.matches('.toolbar')
    &&getComputedStyle(output).borderTopStyle==='solid'
    &&output.getBoundingClientRect().top-toolbar.getBoundingClientRect().bottom>=12;
  })()`),'the live output has a border and space below the controls');
- assert.equal(await evaluate(`document.querySelector('.local-assistant').textContent.includes('private test reasoning')`),false);
+ assert.equal(await evaluate(`!!document.querySelector('.ai-note, .ai-draft')`),false,'reasoning reaches the browser before the other channels');
  await api('/__test/ai-stall',{analysis:true,prefix:true});
- await until(`document.querySelector('.ai-process p')?.textContent==='先比对目标端口'`);
+ await until(`document.querySelector('.ai-note')?.textContent==='先比对目标端口'`);
+ assert.equal(await evaluate(`document.querySelector('.ai-thought').textContent`),'先观察连接方向并核对 <i>参考连接</i>。');
+ assert.equal(await evaluate(`!!document.querySelector('.ai-thought i')`),false,'model text is rendered without interpreting markup');
  assert.equal(await evaluate(`document.querySelector('.ai-process').open`),true,'public analysis appears while the provider is still sending it');
  assert.equal(await evaluate(`!!document.querySelector('.ai-process ol, .ai-process .badge, .ai-draft')`),false,'the live note appears as plain text before the body');
  await api('/__test/ai-stall',{prefix:true});
  await until(`!!document.querySelector('.ai-draft p')?.textContent`);
  assert.ok(await evaluate(`!!document.querySelector('.ai-output .ai-process')&&!!document.querySelector('.ai-output .ai-draft')`),'analysis and streamed text share the output panel');
- assert.equal(await evaluate(`document.querySelector('.ai-process p').textContent`),'先比对目标端口与附近会话。');
+ assert.equal(await evaluate(`document.querySelector('.ai-note').textContent`),'先比对目标端口与附近会话。');
  assert.equal(await evaluate(`document.querySelector('.ai-process').open`),false,'process folds when public text starts');
  assert.equal(await evaluate(`!!document.querySelector('.ai-summary:not(.ai-draft)')`),false,'partial text appears before completion');
- assert.equal(await evaluate(`document.querySelector('.local-assistant').textContent.includes('private test reasoning')`),false,'private reasoning is never displayed');
+ assert.equal(await evaluate(`document.querySelector('.ai-draft').textContent.includes('先观察连接方向')`),false,'reasoning stays separate from the summary');
  await evaluate(`document.querySelector('.ai-process').open=true`);await pause(150);
  await api('/__test/ai-stall',{stall:false,prefix:false});await until(`!!document.querySelector('.ai-summary:not(.ai-draft)')`);
  assert.equal(await evaluate(`document.querySelector('.ai-process').open`),true,'manual reopening survives final output');
