@@ -57,9 +57,14 @@ try{
  await api('/__test/ai-plan',{mode:'natural'});await openIncident();await until(`document.querySelector('.ai-summary:not(.ai-draft)')?.textContent.includes('本次总结依据当前证据')`);
  assert.equal(await evaluate(`!!document.querySelector('.ai-summary:not(.ai-draft) .ai-hunts')`),false,'invalid planner output never executes a fixed fallback search');
  await close();await api('/__test/ai-plan',{mode:'default'});
- // Public text arrives before the model finishes, and the process panel folds once.
- await api('/__test/ai-stall',{stall:false,prefix:true});await openIncident();
+ // The provider pauses after a partial public note, then after the first body chunk.
+ await api('/__test/ai-stall',{analysis:true,prefix:true});await openIncident();
+ await until(`document.querySelector('.ai-process p')?.textContent==='先比对目标端口'`);
+ assert.equal(await evaluate(`document.querySelector('.ai-process').open`),true,'public analysis appears while the provider is still sending it');
+ assert.equal(await evaluate(`!!document.querySelector('.ai-process ol, .ai-process .badge, .ai-draft')`),false,'the live note appears as plain text before the body');
+ await api('/__test/ai-stall',{prefix:true});
  await until(`!!document.querySelector('.ai-draft p')?.textContent`);
+ assert.equal(await evaluate(`document.querySelector('.ai-process p').textContent`),'先比对目标端口与附近会话。');
  assert.equal(await evaluate(`document.querySelector('.ai-process').open`),false,'process folds when public text starts');
  assert.equal(await evaluate(`!!document.querySelector('.ai-summary:not(.ai-draft)')`),false,'partial text appears before completion');
  assert.equal(await evaluate(`document.querySelector('.local-assistant').textContent.includes('private test reasoning')`),false,'private reasoning is never displayed');
@@ -79,27 +84,8 @@ try{
  }
  async function cancelCase(stage,action='close',event=false){
   await api('/__test/ai-stall',{stall:true,stage});const before=await status();
-  if(event)await openEvent();else{await evaluate(`location.hash='#alerts'`);await openIncident(false);}
-  const checkTyping=stage==='hunt'&&action==='close'&&!event;
-  if(checkTyping){
-   await evaluate(`(()=>{
-    window.progressFrames=new Set();
-    window.progressObserver=new MutationObserver(()=>{
-     for(const label of document.querySelectorAll('.ai-process li .section-heading span:first-child')){
-      window.progressFrames.add(label.textContent);
-     }
-    });
-    window.progressObserver.observe(document.querySelector('.local-assistant'),{childList:true,subtree:true,characterData:true});
-   })()`);
-  }
-  if(!event)await summarize();
+  if(event)await openEvent();else{await evaluate(`location.hash='#alerts'`);await openIncident();}
   await waitCalls(before.calls+(stage==='summary'?2:1));
-  if(checkTyping){
-   const label='深度分析关联检索条件';
-   await until(`window.progressFrames.has(${JSON.stringify(label)})`);
-   const frames=await evaluate(`(()=>{window.progressObserver.disconnect();return [...window.progressFrames];})()`);
-   assert.ok(frames.some(frame=>frame&&frame!==label&&label.startsWith(frame)),'analysis progress reveals partial text before the full step');
-  }
   if(action==='escape'){
    await cdp('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
    await cdp('Input.dispatchKeyEvent',{type:'keyUp',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});

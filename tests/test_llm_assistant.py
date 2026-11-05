@@ -54,14 +54,16 @@ class Provider(BaseHTTPRequestHandler):
                 text=json.dumps(dict(candidate=0,message='Observed communication',reason='当前事件的通信端点',limitations='可能匹配正常访问'))
         finish=self.server.finish_for(self.server.payload) if hasattr(self.server,'finish_for') else self.server.finish
         deltas=self.server.deltas_for(self.server.payload) if hasattr(self.server,'deltas_for') else [{'content':text}]
-        if getattr(self.server,'stream_prefix',False) and stage=='summary':
-            deltas=[{'reasoning_content':'private test reasoning'},{'content':text[:16]},{'content':text[16:]}]
+        if stage=='summary' and (getattr(self.server,'stream_prefix',False) or getattr(self.server,'analysis_prefix',False)):
+            deltas=[{'reasoning_content':'private test reasoning'}, {'content':'分析说'},
+                    {'content':'明：先比对目标端口'}, {'content':'与附近会话。\n'+text[:16]}, {'content':text[16:]}]
         for index,delta in enumerate(deltas):
             chunk={'choices':[{'delta':delta,'finish_reason':finish if index==len(deltas)-1 else None}]}
             self.wfile.write(b'data: ' + (json.dumps(chunk).encode() if isinstance(chunk, dict) else chunk.encode()) + b'\n\n')
             self.wfile.flush()
-            if getattr(self.server,'stream_prefix',False) and stage=='summary' and index==1:
-                while self.server.stream_prefix and not self.server.stop.is_set():
+            if stage=='summary' and index in (2,3):
+                flag='analysis_prefix' if index==2 else 'stream_prefix'
+                while getattr(self.server,flag,False) and not self.server.stop.is_set():
                     if select.select([self.connection],[],[],.05)[0] and not self.connection.recv(1):
                         self.server.cancelled.set();self.server.cancellations=getattr(self.server,'cancellations',0)+1;return
         self.wfile.write(b'data: [DONE]\n\n');self.wfile.flush()
@@ -145,13 +147,15 @@ class AssistantTests(unittest.TestCase):
             self.generate()
 
     def test_summary_stream_omits_private_channels_and_split_reasoning_markers(self):
-        self.server.deltas_for=lambda payload:([{'content':'{"queries":[]}'}] if '狩猎助手' in payload['messages'][0]['content'] else
+        self.server.deltas_for=lambda payload:([{'content':'分析说明：先核对相似连接。\n{"queries":[]}'}] if '狩猎助手' in payload['messages'][0]['content'] else
             [{'reasoning_content':'private test reasoning'},{'content':'<thi'},{'content':'nk>private tagged reasoning</th'},
-             {'content':'ink>通信概览：'},{'content':'公开正文。'}])
+             {'content':'ink>分析说'}, {'content':'明：现有证据有限'}, {'content':'。\n通信概览：'}, {'content':'公开正文。'}])
         output=[]
         self.assistant.generate(self.app,'owner',dict(self.body,kind='summary'),lambda item:output.append(item) or True,lambda:False)
         public=''.join(item.get('delta','') for item in output)
         self.assertEqual(public,'通信概览：公开正文。');self.assertEqual(output[-1]['result']['text'],public)
+        notes=[item['analysis_delta'] for item in output if 'analysis_delta' in item]
+        self.assertEqual(notes,['先核对相似连接。','现有证据有限','。'])
         self.assertNotIn('private',json.dumps(output));self.assertNotIn('queries',public)
         first=next(index for index,item in enumerate(output) if 'delta' in item)
         self.assertTrue(output[first-1]['analysis_done'])
