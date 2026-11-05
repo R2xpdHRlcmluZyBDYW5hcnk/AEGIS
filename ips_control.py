@@ -98,6 +98,7 @@ def install_proxies(module, client, runtime=None):
             return runtime.read().get(_name,{'state':'unknown'} if _name=='service' else {})
         setattr(module.SysInfo, name, lambda self, _fn=function: _fn())
     module.SysInfo.telemetry=lambda self:runtime.read().get('telemetry',{})
+    module.SysInfo._queue_listeners=staticmethod(lambda:runtime.read().get('queue_listeners'))
     module.SysInfo.history_reset_status=lambda self:runtime.read().get('history_reset',{'state':'idle'})
     module.Snort.call = lambda self, commands, timeout=10: runtime.engine_call(commands,timeout)
     module.nft_query_table = lambda family, table: runtime.read().get('queue_table') if (family, table) == ('inet', 'ips') else None

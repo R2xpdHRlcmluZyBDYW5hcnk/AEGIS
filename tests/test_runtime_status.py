@@ -92,6 +92,32 @@ class RuntimeStatusCase(unittest.TestCase):
         finally:
             release.set();stop.set();server.shutdown();server.server_close();serving.join(timeout=5)
 
+    def test_queue_snapshot_distinguishes_active_empty_and_unavailable_listeners(self):
+        web=fixture.engine()
+        ips_control.install_proxies(web,mock.Mock(),RuntimeReader(self.path))
+        self.manager.busy=True
+        for contents,count,total,drops in (
+                ('0 40 3 2 65531 8 0 30 1\n1 41 5 2 65531 2 0 31 1\n',2,8,10),
+                ('',0,0,0),
+                (None,None,0,0)):
+            def open_listeners(path,*args,**kwargs):
+                self.assertEqual(path,'/proc/net/netfilter/nfnetlink_queue')
+                if contents is None:raise PermissionError(path)
+                return mock.mock_open(read_data=contents)()
+            with mock.patch.object(self.manager.jobs.local,'service',return_value={}), \
+                    mock.patch.object(self.manager.module,'nft_query_table',return_value={}), \
+                    mock.patch.object(self.manager.module,'open',side_effect=open_listeners,create=True):
+                self.snapshot.sample()
+            self.snapshot.publish(self.path)
+            with mock.patch.object(web,'open',side_effect=AssertionError('Web cannot open the queue file'),create=True):
+                queue=web.SysInfo().queue()
+            self.assertIs(queue['listeners_known'],count is not None)
+            self.assertEqual((queue.get('count'),queue['queue_total'],queue['kernel_drops']),(count,total,drops))
+
+        self.snapshot.queue_listeners=dict(listeners_known=True,listeners_at=time.time()-11,queues=[],count=0)
+        self.snapshot.publish(self.path)
+        self.assertFalse(web.SysInfo().queue()['listeners_known'])
+
     def test_reader_retains_last_good_values_but_marks_missing_or_invalid_publication_stale(self):
         reader=RuntimeReader(self.path)
         self.assertEqual(reader.engine_call(['dump-counters'])['dump-counters']['ips']['accepted'],7)

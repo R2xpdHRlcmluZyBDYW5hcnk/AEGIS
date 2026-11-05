@@ -16,9 +16,10 @@ CONFIG=Path(layout()['config'])
 BIN=Path(layout()['program_dir'])
 BACKUPS=Path('/var/backups/ips-console')
 SERVICES=('ips-web','ips-rule-manager','ips-event-bridge')
+SHARED_CONSOLE_PROGRAMS=frozenset(('ips_control.py','runtime_status.py'))
 WEB_PROGRAMS=frozenset(('ips-web','llm_assistant.py','dns_context.py','llm_hunting.py',
-                       'overview_metrics.py','hunt_query.py','python_dependencies.py','python-dependencies.zip','libsqlite3-ndr.so'))
-MANAGER_PROGRAMS=frozenset(('openappid_update.py','history_reset.py'))
+                       'overview_metrics.py','hunt_query.py','python_dependencies.py','python-dependencies.zip','libsqlite3-ndr.so')) | SHARED_CONSOLE_PROGRAMS
+MANAGER_PROGRAMS=frozenset(('openappid_update.py','history_reset.py')) | SHARED_CONSOLE_PROGRAMS
 PIDFILE=Path('/run/snort/snort.pid')
 RESOURCE_ROOT=Path('/etc/systemd/system')
 RESOURCE_OVERRIDES={

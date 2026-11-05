@@ -62,12 +62,16 @@ try {
  await until(`document.querySelector('.job-log')?.textContent.includes('规则已校验并完成热重载')`);
  await nav('system');await until(`!!document.querySelector('ndr-system .system-grid')&&!document.querySelector('ndr-system .telemetry-status')`);
  if(process.env.NDR_PREVIEW_COMPONENT_HEALTH==='1'){
-  await nav('overview');await click('查看组件健康 ↗');
+  await nav('overview');
+  await until(`[...document.querySelectorAll('ndr-overview [role="alert"]')].some(e=>e.textContent.includes('malformed'))`);
+  assert.equal(await evaluate(`document.querySelector('ndr-overview').textContent.includes('查看组件健康')`),false);
+  await nav('system');
   await until(`location.hash==='#system'&&document.querySelector('.component-health [data-component="network"]')?.textContent.includes('malformed')`);
   assert.equal(await evaluate(`document.querySelector('[data-component="event-read"] .badge').textContent.trim()`),'异常');
   assert.equal(await evaluate(`document.querySelector('[data-component="ingest"] .badge').textContent.trim()`),'正常');
+  assert.equal(await evaluate(`document.querySelector('[data-component="nfqueue"] .badge').textContent.trim()`),'正常');
   assert.equal(await evaluate(`document.querySelector('.component-health h2').textContent.trim()`),'组件健康');
-  console.log('PASS: overview error links to component health, separating event database reads, statistics, and ingestion');
+  console.log('PASS: overview shows the network error and the System page shows component health');
  }
  assert.deepEqual(exceptions,[]);
  console.log('PASS: blocked native reload leaves system, overview, history and job status navigable; sampling timestamp visible and fresh sampling resumes');

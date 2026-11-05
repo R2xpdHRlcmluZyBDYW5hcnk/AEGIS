@@ -64,6 +64,7 @@ class RuntimeSnapshot:
         self.engine={}
         self.service={}
         self.queue_table=None
+        self.queue_listeners=None
         self.as_of=0
         self.error='引擎状态正在采样'
 
@@ -77,6 +78,7 @@ class RuntimeSnapshot:
         with self.lock:
             result=dict(schema=1,published=time.time(),engine=copy.deepcopy(self.engine),
                         service=copy.deepcopy(self.service),queue_table=copy.deepcopy(self.queue_table),
+                        queue_listeners=copy.deepcopy(self.queue_listeners),
                         telemetry=dict(as_of=self.as_of,error=self.error,updating=self.manager.busy))
         result.update(update_status=self.manager.jobs.update_status(),reload_state=self.manager.jobs.reload_state())
         from history_reset import status
@@ -89,7 +91,9 @@ class RuntimeSnapshot:
         ensure_loaded(manager)
         service=manager.jobs.local.service()
         table=manager.module.nft_query_table('inet','ips')
-        with self.lock:self.service,self.queue_table=service,table
+        listeners=manager.jobs.local._queue_listeners()
+        with self.lock:
+            self.service,self.queue_table,self.queue_listeners=service,table,listeners
         if manager.busy or getattr(manager,'paused',False):return
         with self.engine_gate:
             if manager.busy or getattr(manager,'paused',False):return

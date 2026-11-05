@@ -37,7 +37,7 @@ export class ConsoleState {
   readonly notice = signal('');
   readonly confirmation = signal<{title:string;message:string;resolve:(ok:boolean)=>void}|null>(null);
   private timer: ReturnType<typeof setTimeout>|undefined;
-  navigate(page:Page,top?:number):void {if(this.page()!==page){const main=document.querySelector('main');this.scrollPositions.set(this.page(),main?main.scrollTop:window.scrollY);this.page.set(page);this.pendingScroll={page,top:top??this.scrollPositions.get(page)??0,ready:false,initialized:false};}if(location.hash!=='#'+page)history.pushState(null,'','#'+page);document.title=pages.find(p=>p.id===page)?.title+' AEGIS';}
+  navigate(page:Page):void {if(this.page()!==page){const main=document.querySelector('main');this.scrollPositions.set(this.page(),main?main.scrollTop:window.scrollY);this.page.set(page);this.pendingScroll={page,top:this.scrollPositions.get(page)||0,ready:false,initialized:false};}if(location.hash!=='#'+page)history.pushState(null,'','#'+page);document.title=pages.find(p=>p.id===page)?.title+' AEGIS';}
   viewReady(page:Page):void{if(this.pendingScroll?.page===page)this.pendingScroll.ready=true;}
   cancelScrollRestore():void{this.pendingScroll=undefined;}
   scrollKey(event:KeyboardEvent):void{if(['ArrowUp','ArrowDown','PageUp','PageDown','Home','End',' '].includes(event.key))this.cancelScrollRestore();}

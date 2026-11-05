@@ -3236,6 +3236,23 @@ class SysInfo:
                     return (counter.get("packets"), counter.get("bytes"))
         return None
 
+    @staticmethod
+    def _queue_listeners():
+        queues, total, drops = [], 0, 0
+        try:
+            with open("/proc/net/netfilter/nfnetlink_queue", encoding="utf-8") as fh:
+                for line in fh:
+                    cols = line.split()
+                    if len(cols) >= 6 and cols[0] in ("0", "1", "2", "3") and int(cols[1]):
+                        backlog = int(cols[2])
+                        total += backlog
+                        drops += int(cols[5])
+                        queues.append({"id": int(cols[0]), "backlog": backlog})
+        except (OSError, ValueError):
+            return None
+        return dict(queues=queues, count=len(queues), queue_total=total, kernel_drops=drops,
+                    listeners_known=True, listeners_at=now())
+
     def queue(self):
         def fetch():
             info = {"packets": None, "bytes": None, "kernel_drops": 0, "queue_total": 0,
@@ -3249,18 +3266,9 @@ class SysInfo:
                 counters = self.counters()
                 info["packets"] = (counters.get("decoder") or {}).get("pkts")
                 info["bytes"] = (counters.get("decoder") or {}).get("bytes")
-            try:
-                with open("/proc/net/netfilter/nfnetlink_queue", encoding="utf-8") as fh:
-                    for line in fh:
-                        cols = line.split()
-                        if len(cols) >= 6 and cols[0] in ("0", "1", "2", "3") and int(cols[1]):
-                            info["queue_total"] += int(cols[2])
-                            info["kernel_drops"] += int(cols[5])
-                            info["queues"].append({"id": int(cols[0]), "backlog": int(cols[2])})
-                info['listeners_known'] = True
-                info['count'] = len(info['queues'])
-            except (OSError, ValueError):
-                pass
+            listeners = self._queue_listeners()
+            if listeners and now() - listeners['listeners_at'] <= 10:
+                info.update(listeners)
             return info
         return self.cached("queue", 1.0, fetch)
 
@@ -6381,7 +6389,7 @@ class App:
             nfqueue = ('error', '缺少监听的队列 ' + ', '.join(map(str, sorted(missing)))) if missing else ('ok', '四个队列均在监听')
         else:
             nfqueue = ('pending', '队列监听状态不可用')
-        components.append(item('nfqueue', 'NFQUEUE', *nfqueue))
+        components.append(item('nfqueue', 'NFQUEUE', *nfqueue, at=queue.get('listeners_at')))
 
         fault = self.db.read_health.get('fault')
         if self.db.conn is None:

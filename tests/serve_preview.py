@@ -133,6 +133,10 @@ manager.jobs.run = lambda *a, **kw: None
 manager.jobs.local.engine.call = lambda commands, **kw: {name:{} for name in commands}
 manager.jobs.local.ruleset = app.sys.ruleset
 manager.jobs.local.service = app.sys.service
+if os.environ.get('NDR_PREVIEW_COMPONENT_HEALTH') == '1':
+    del app.sys.queue
+    manager.jobs.local._queue_listeners=lambda:dict(listeners_known=True,listeners_at=m.now(),
+        queues=[dict(id=i,backlog=0) for i in range(4)],count=4,queue_total=0,kernel_drops=0)
 manager.runtime.engine={'ruleset-stats':app.sys.ruleset(),'dump-counters':app.sys.counters(),
     'version':'preview','uptime':None,'ruleset-reload-time':None,'running-mode':'inline','capture-mode':'NFQ'}
 manager.runtime.as_of=time.time();manager.runtime.error=''
