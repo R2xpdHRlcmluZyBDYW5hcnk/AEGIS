@@ -26,10 +26,24 @@ class EvidenceTests(unittest.TestCase):
         result=self.app.summary_dns_context(dict(session_id=fixture.FIRST))
         self.assertEqual([row['name'] for row in result['records']],['normal.example.test'])
         clue=result['records'][0];self.assertEqual(clue['relation'],'candidate');self.assertEqual(clue['session_id'],fixture.SECOND)
+        self.assertEqual(self.app.record({'key':clue['record_id']})['record']['dns'],'normal.example.test')
         context=self.app.summary_context(self.target());context['dns_clues']=result
         payload,_=summary_payload(context)
         data=json.loads(payload['messages'][1]['content']);self.assertEqual(data['dns_hint']['name'],'normal.example.test')
         self.assertEqual(context['total_records'],1)
+
+    def test_structured_plan_compiles_numeric_comparisons_and_escapes_literal_text(self):
+        checks=[
+            {'terms':[['type','=','drop'],['sig','=','Fixture "quoted" AND src:*']]},
+            {'terms':[['type','=','flow'],['flow_age','=',0],['bytes_toclient','>',1000000000]]},
+        ]
+        planned,status=select_hunts(json.dumps({'checks':checks}))
+        self.assertEqual(status,'model')
+        self.assertEqual(planned[1]['query'],'type:"flow" AND flow_age:0 AND bytes_toclient:>1000000000')
+        self.assertEqual(m.hunt_used_fields(m.hunt_parse(planned[0]['query'])), {'type','sig'})
+        for invalid in ([['session_id','=','other']], [['src','>','192.0.2.1']], [['flow_age','=',True]],
+                        [['bytes_toclient','>',"0 OR type:*"]]):
+            self.assertEqual(select_hunts(json.dumps({'checks':[{'terms':invalid}]})), ([], 'invalid'))
 
     def test_behavior_search_can_find_unalerted_traffic_with_different_indicators(self):
         self.add('tls',0,tls=dict(sni='observed.example.test'))

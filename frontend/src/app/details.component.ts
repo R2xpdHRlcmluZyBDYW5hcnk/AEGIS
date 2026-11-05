@@ -60,8 +60,8 @@ export class Details {
    if(controller.signal.aborted||this.current?.id!==view.id)return;
    const active=this.current;
    if(item.progress){
-    const {label,detail}=item.progress;
-    this.patch(view.id,{aiActivity:[label,detail].filter(Boolean).join(' '),aiNewNote:true,aiReasoning:false});
+    const {id,label,detail}=item.progress;
+    this.patch(view.id,{aiActivity:[label,detail].filter(Boolean).join(' '),aiRepairing:id==='compose-fallback',aiNewNote:true,aiReasoning:false});
    }
    if(typeof item.reasoning_delta==='string'&&item.reasoning_delta){
     const thoughts:string[]=[...active.aiThoughts];
@@ -76,7 +76,7 @@ export class Details {
     this.patch(view.id,{aiNotes:notes,aiNewNote:false});
    }
    if(item.analysis_done&&!active.aiAnalysisDone)this.patch(view.id,{aiAnalysisDone:true,aiProcessOpen:false});
-   if(typeof item.delta==='string')this.patch(view.id,{aiDraft:(this.current.aiDraft||'')+item.delta});
+   if(typeof item.delta==='string')this.patch(view.id,{aiDraft:(item.replace_draft?'':this.current.aiDraft||'')+item.delta});
   };
   try{const result=await generateLocal(kind,target,controller.signal,view.aiRuleAction||'alert',update);if(!controller.signal.aborted&&this.current?.id===view.id)this.patch(view.id,{[kind==='rule'?'aiRule':'aiSummary']:result,aiDraft:'',aiAnalysisDone:true,aiProcessOpen:this.current.aiAnalysisDone?this.current.aiProcessOpen:false});}
   catch(e:any){if(!controller.signal.aborted&&this.current?.id===view.id)this.patch(view.id,{aiError:e.message});}
@@ -175,7 +175,7 @@ export class Details {
     <div class="ai-body">
     <div class="toolbar"><button class="quiet" [disabled]="!!view.aiBusy" (click)="details.generate('summary')">{{view.aiBusy==='summary'?'正在总结…':view.aiSummary?'重新生成总结':(view.record?.session_id||view.data?.incident?.session_id)?'生成会话总结':'生成事件总结'}}</button><label class="checkbox-label">规则动作 <select aria-label="规则动作" [value]="view.aiRuleAction||'alert'" [disabled]="!!view.aiBusy||view.aiApplying||!!view.aiAdded" (change)="details.setRuleAction($any($event.target).value)"><option value="alert">告警</option><option value="block">阻断匹配特征</option></select></label><button class="quiet" [disabled]="!!view.aiBusy||view.aiApplying||!!view.aiAdded" (click)="details.generate('rule')">{{view.aiBusy==='rule'?'正在生成规则…':view.aiRule?'重新生成规则建议':'生成规则建议'}}</button><button class="text-button" *ngIf="view.aiBusy" (click)="details.stopGeneration()">停止生成</button></div>
     <div class="ai-output" role="region" aria-label="研判输出" tabindex="0" *ngIf="view.aiBusy||view.aiError||view.aiThoughts?.length||view.aiNotes?.length||view.aiDraft||view.aiSummary||view.aiRule">
-    <p class="muted ai-activity" *ngIf="view.aiBusy&&!view.aiAnalysisDone&&view.aiNewNote&&!view.aiReasoning" role="status">{{view.aiActivity}}</p>
+    <p class="muted ai-activity" *ngIf="view.aiBusy&&(view.aiRepairing||!view.aiAnalysisDone&&view.aiNewNote&&!view.aiReasoning)" role="status">{{view.aiActivity}}</p>
     <p class="error" *ngIf="view.aiError" role="alert">{{view.aiError}}</p>
     <details class="ai-hunts ai-process" *ngIf="view.aiThoughts?.length||view.aiNotes?.length" [open]="view.aiProcessOpen" (toggle)="details.toggleProcess($event)">
      <summary>{{view.aiThoughts?.length?'思考过程':'分析说明'}}</summary>
@@ -186,9 +186,9 @@ export class Details {
     <div class="ai-summary ai-draft" *ngIf="view.aiDraft&&!view.aiSummary"><div class="section-heading"><h4>{{view.aiBusy?'正在生成总结':'未完成的总结'}}</h4></div><div class="ai-markdown" [innerHTML]="view.aiDraft | assistantMarkdown"></div></div>
     <div *ngIf="view.aiSummary as summary" class="ai-summary"><div class="section-heading"><h4>{{summary.context?.scope==='session'?'会话总结':'事件总结'}}</h4><button class="text-button" (click)="copy(summary.text)">复制总结</button></div><div class="ai-markdown" [innerHTML]="summary.text | assistantMarkdown"></div><p class="muted" *ngIf="summary.context as context">已检索 {{context.total_records}} 条{{context.scope==='session'?'会话':'事件'}}记录 使用 {{context.evidence_records}} 条证据摘录<span *ngIf="context.related_evidence_records"> 附加 {{context.related_evidence_records}} 条关联日志摘录</span></p><small class="muted">依据已保留的日志分析，请结合原始证据核查</small>
      <details class="ai-hunts" *ngIf="summary.hunts?.length"><summary>关联检索</summary><section *ngFor="let hunt of summary.hunts"><div class="section-heading"><span>{{hunt.label}}</span><span class="badge">{{hunt.error_kind==='validation'?'条件无效':hunt.error?'检索失败':'命中 '+hunt.total+' 条'}}</span><button class="text-button" *ngIf="hunt.query&&!hunt.error" (click)="openSummaryHunt(hunt.query,summary.context,hunt.range)">查看命中日志 ↗</button></div><span class="badge" *ngIf="hunt.scope==='related'">关联候选线索</span><pre>{{hunt.query||hunt.predicate}}</pre><p class="muted" *ngIf="hunt.error">{{hunt.error}}</p></section></details>
-     <details class="ai-hunts" *ngIf="summary.dns_clues?.records?.length"><summary>DNS 候选关联</summary><p class="muted">同客户端曾解析到目标 IP，属于可能相关的独立 DNS 会话，不能据此确认连接使用了该域名。</p><section *ngFor="let clue of summary.dns_clues.records"><strong>{{clue.name}}</strong><p>{{clue.answer}} {{dt(clue.ts)}}</p><p class="muted">最小应答 TTL {{clue.ttl_seconds??'未知'}}<span *ngIf="clue.ttl_seconds!=null"> 秒</span> {{clue.name_matches?'与当前域名线索一致':'域名线索尚待核查'}}</p></section></details>
+     <details class="ai-hunts" *ngIf="summary.dns_clues?.records?.length"><summary>DNS 候选关联</summary><p class="muted">同客户端曾解析到目标 IP，属于可能相关的独立 DNS 证据，不能据此确认连接使用了该域名。</p><section *ngFor="let clue of summary.dns_clues.records"><strong>{{clue.name}}</strong><p>{{clue.answer}} {{dt(clue.ts)}}</p><p class="muted">最小应答 TTL {{clue.ttl_seconds??'未知'}}<span *ngIf="clue.ttl_seconds!=null"> 秒</span> {{clue.name_matches?'与当前域名线索一致':'域名线索尚待核查'}}</p><p class="muted">会话 ID <code>{{clue.session_id||'未采集'}}</code></p><div class="toolbar"><button class="text-button" *ngIf="clue.session_id" (click)="openDnsSession(clue.session_id)">查看 DNS 会话 ↗</button><button class="text-button" *ngIf="clue.record_id" (click)="details.event(clue,false)">查看 DNS 日志 ↗</button></div></section></details>
      <p class="muted" *ngIf="summary.truncated" role="status">模型达到生成上限，以上为已输出的部分总结</p>
-     <p class="muted" *ngIf="summary.hunt_status==='invalid'">模型未提供可执行的关联条件，本次总结依据当前证据</p><p class="muted" *ngIf="summary.hunt_status==='not_needed'">模型未提出需要扩展检索的线索</p>
+     <p class="muted" *ngIf="summary.hunt_status==='invalid'">模型未提供可执行的关联条件，本次总结依据当前证据</p><p class="muted" *ngIf="summary.hunt_status==='partial'">部分关联检索未完成</p><p class="muted" *ngIf="summary.hunt_status==='not_needed'">模型未提出需要扩展检索的线索</p>
     </div>
     <div *ngIf="view.aiRule as rule" class="ai-rule"><h4>Snort 3 规则建议</h4><p *ngIf="rule.unavailable">{{rule.reason}}</p><ng-container *ngIf="rule.rule"><p>{{rule.scope}}</p><pre>{{rule.rule}}</pre><p>{{rule.reason}}</p><p>{{rule.limitations}}</p><p class="muted">{{rule.notice}}</p><div class="toolbar"><strong class="rule-source">手动规则</strong><button [disabled]="view.aiApplying||!!view.aiAdded" (click)="details.addRule()">{{view.aiApplying?'正在校验并应用…':view.aiAdded?'已提交应用':'添加并应用规则'}}</button></div><p class="muted">SID 在添加时分配，仅保存到独立手动规则文件</p><p role="status" *ngIf="view.aiApplyStatus?.rc===0">手动规则 {{view.aiAdded.sid}} 已通过校验并应用</p><p class="error" role="alert" *ngIf="view.aiApplyError">{{view.aiApplyError}}</p></ng-container></div>
     </div>
@@ -241,6 +241,7 @@ export class DetailsComponent {
  }
  investigateRule(sid:any,gid:any=1):void{this.state.investigate('gid: '+gid+' AND sid: '+sid);this.details.dismiss();}
  openSummaryHunt(query:string,context:any,range?:number[]):void{const from=range?.[0]??context?.from,to=range?.[1]??context?.to;if(!query||from==null||to==null)return;this.state.investigate(query,undefined,{choice:'custom',from:localDate(new Date(Math.floor(from/60)*60000)),to:localDate(new Date(Math.ceil(to/60)*60000))});this.details.dismiss();}
+ openDnsSession(session:string):void{if(!/^[0-9a-f]{32}:[0-9a-f]{16}$/.test(session))return;this.state.investigate('session_id:'+JSON.stringify(session),undefined,{choice:'all',from:'',to:''});this.details.dismiss();}
  async copy(value:string):Promise<void>{try{await navigator.clipboard.writeText(value);this.state.toast('已复制');}catch{this.state.toast('当前浏览器无法复制，请选中文本复制');}}
  copyJson(data:any,raw?:string):void{void this.copy(raw || JSON.stringify(data,null,2));}
  async ban(target:string):Promise<void>{if(!target||this.banning)return;if(!await this.state.confirm('封禁地址',target+' 将被加入封禁规则，确定继续？'))return;this.banning=true;try{const d=await this.api.post('/api/bans',{target});this.state.toast(d.message||'已提交封禁');}catch(e:any){this.state.toast(e.message);}finally{this.banning=false;}}

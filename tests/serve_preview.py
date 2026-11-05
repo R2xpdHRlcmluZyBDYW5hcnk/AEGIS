@@ -190,6 +190,9 @@ if os.environ.get('NDR_PREVIEW_AI')=='1':
     events.append(dict(timestamp=m.iso(m.now()-40),event_type='tls',flow_id=9099,
         src_ip='192.0.2.90',src_port=51990,dest_ip='198.51.100.90',dest_port=443,proto='TCP',
         app_proto='tls',tls=dict(sni='unalerted.example.test',version='TLS 1.3')))
+    events.append(dict(timestamp=m.iso(m.now()-170),event_type='dns',flow_id=9100,
+        src_ip='192.0.2.10',src_port=51991,dest_ip='198.51.100.53',dest_port=53,proto='UDP',
+        app_proto='dns',dns=dict(rrname='example.org',rrtype='A',answers=[dict(rdata='198.51.100.4')])))
 for etype in ('alert', 'drop'):
     events.append(dict(timestamp=m.iso(m.now() - 5), event_type=etype,
         flow_id=2002, tx_id=4, community_id='1:preview-pair', src_ip='192.0.2.20', src_port=51020,

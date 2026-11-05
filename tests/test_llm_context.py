@@ -114,7 +114,7 @@ class SummaryPipelineTests(unittest.TestCase):
         self.add('http',4,SECOND,src_ip='192.0.2.99',dest_ip='198.51.100.99',http=dict(status=403))
         assistant,server=self.provider()
         def respond(payload):
-            return json.dumps({'queries':[{'query':'status:[400 TO *]','reason':'比较其他连接的响应'}]}) if '狩猎助手' in payload['messages'][0]['content'] else '通信概览：HTTP 返回403。研判依据：尚未证实攻击。'
+            return json.dumps({'checks':[{'terms':[['status','>=',400]],'reason':'比较其他连接的响应'}]}) if '狩猎助手' in payload['messages'][0]['content'] else '通信概览：HTTP 返回403。研判依据：尚未证实攻击。'
         server.response_for=respond
         output=[]
         assistant.generate(self.app,'owner',dict(kind='summary',target=self.target()),lambda v:output.append(v) or True,lambda:False)
@@ -170,17 +170,17 @@ class SummaryPipelineTests(unittest.TestCase):
         self.add('tls',0)
         self.add('http',1,SECOND,http=dict(status=502))
         assistant,server=self.provider()
-        queries=[dict(query='status:>499',reason='比较响应异常'),dict(query='payload:secret',reason='无效字段')]
-        server.response_for=lambda payload:json.dumps(dict(queries=queries)) if '狩猎助手' in payload['messages'][0]['content'] else '通信概览：需进一步核查。'
+        checks=[dict(terms=[['status','>',499]],reason='比较响应异常'),dict(terms=[['payload','=','secret']],reason='无效字段')]
+        server.response_for=lambda payload:json.dumps(dict(checks=checks)) if '狩猎助手' in payload['messages'][0]['content'] else '通信概览：需进一步核查。'
         output=[];assistant.generate(self.app,'owner',dict(kind='summary',target=self.target()),lambda v:output.append(v) or True,lambda:False)
         result=output[-1]['result'];self.assertEqual(server.calls,2)
-        self.assertEqual(result['hunts'][0]['total'],1);self.assertEqual(result['hunts'][1]['error_kind'],'validation')
+        self.assertEqual(result['hunts'][0]['total'],1)
         self.assertEqual(result['hunt_status'],'partial')
-        self.assertEqual([row['predicate'] for row in result['hunts']],[item['query'] for item in queries])
+        self.assertEqual([row['predicate'] for row in result['hunts']],['status:>499'])
 
     def test_empty_model_plan_does_not_run_a_baseline_search(self):
         self.add('tls',0);assistant,server=self.provider()
-        server.response_for=lambda payload:'{"queries":[]}' if '狩猎助手' in payload['messages'][0]['content'] else '通信概览：普通连接。'
+        server.response_for=lambda payload:'{"checks":[]}' if '狩猎助手' in payload['messages'][0]['content'] else '通信概览：普通连接。'
         with mock.patch.object(self.app,'summary_hunt',side_effect=AssertionError('No query was proposed')):
             output=[];assistant.generate(self.app,'owner',dict(kind='summary',target=self.target()),lambda v:output.append(v) or True,lambda:False)
         self.assertEqual(output[-1]['result']['hunts'],[]);self.assertEqual(output[-1]['result']['hunt_status'],'not_needed')
@@ -205,10 +205,10 @@ class SummaryPipelineTests(unittest.TestCase):
         self.assertNotIn('checks',data);self.assertNotIn('reply_example',data)
         self.assertIn('bytes_toserver#',data['fields']);self.assertIn('dport#',data['fields'])
         self.assertTrue(any(row.get('bytes_toserver')==1234 for row in data['facts']))
-        planned,source=select_hunts('{"queries":[{"query":"dport:443 AND pkts_toclient:0","reason":"核查单向连接"}]}')
+        planned,source=select_hunts('{"checks":[{"terms":[["dport","=",443],["pkts_toclient","=",0]],"reason":"核查单向连接"}]}')
         self.assertEqual(source,'model');self.assertEqual(len(planned),1)
         self.assertNotIn('session_id',planned[0]['query'])
-        self.assertEqual(select_hunts('{"queries":[]}'),([],'model'))
+        self.assertEqual(select_hunts('{"checks":[]}'),([],'model'))
         from llm_hunting import FIELDS,NUMBERS
         self.assertTrue(set(FIELDS)<=m.HUNT_FIELDS.keys())
         self.assertTrue({m.HUNT_FIELDS[field] for field in NUMBERS}<=m.HUNT_NUMBER_FIELDS)

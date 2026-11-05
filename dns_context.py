@@ -31,6 +31,6 @@ def candidates(db, context):
         seen.add(name.lower())
         matches.append(dict(name=name,answer=target,client=client,ts=row['ts'],age_seconds=round(age,3),
                             ttl_seconds=ttl if known else None,name_matches=name.lower() in names,
-                            session_id=row.get('session_id',''),relation='candidate'))
+                            session_id=row.get('session_id',''),record_id=row.get('record_id',''),relation='candidate'))
     matches.sort(key=lambda row:(not row['name_matches'],abs(row['age_seconds'])))
     return dict(status='partial' if len(rows)==128 else 'matched' if matches else 'not_found',records=matches[:2])

@@ -43,7 +43,13 @@ try{
  assert.equal((await api('/api/hunt/rules')).rules.length,0,'generation does not save rules');
  assert.ok(await evaluate(`document.querySelector('.ai-summary:not(.ai-draft)').textContent.includes('7 条会话记录')`));
  await evaluate(`document.querySelector('.ai-summary:not(.ai-draft) .ai-hunts').open=true`);await until(`!!document.querySelector('.ai-summary:not(.ai-draft) .ai-hunts pre')`);
- assert.ok(await evaluate(`document.querySelector('.ai-summary:not(.ai-draft) .ai-hunts pre').textContent.startsWith('(proto:TCP AND dport:443)')`));
+ assert.ok(await evaluate(`document.querySelector('.ai-summary:not(.ai-draft) .ai-hunts pre').textContent.startsWith('(proto:"TCP" AND dport:443)')`));
+ await evaluate(`[...document.querySelectorAll('.ai-summary details')].find(d=>d.querySelector('summary').textContent==='DNS 候选关联').open=true`);
+ await until(`[...document.querySelectorAll('.ai-summary details code')].some(e=>e.textContent===${JSON.stringify('a'.repeat(32)+':000000000000238c')})`);
+ await click('查看 DNS 日志 ↗');
+ await until(`document.querySelector('ndr-details .evidence-heading')?.textContent.includes('example.org')`);
+ await click('← 返回上一层');
+ await until(`!!document.querySelector('ndr-details .incident-heading')`);
  if(process.env.NDR_TEST_SCREENSHOT){const shot=await cdp('Page.captureScreenshot',{format:'png'});await writeFile(process.env.NDR_TEST_SCREENSHOT,Buffer.from(shot.data,'base64'));}
  await click('生成规则建议');await until(`!!document.querySelector('.ai-rule pre')`);
  assert.equal((await status()).stages.at(-1),'rule','rule generation requires its own click');
@@ -56,7 +62,7 @@ try{
  await evaluate(`location.hash='#alerts'`);await openIncident();await until(`!!document.querySelector('.ai-summary:not(.ai-draft)')`);
  assert.equal(await evaluate(`!!document.querySelector('.ai-rule pre')`),false,'the summary action does not generate a rule');await close();
  await api('/__test/ai-plan',{mode:'natural'});await openIncident();await until(`document.querySelector('.ai-summary:not(.ai-draft)')?.textContent.includes('本次总结依据当前证据')`);
- assert.equal(await evaluate(`!!document.querySelector('.ai-summary:not(.ai-draft) .ai-hunts')`),false,'invalid planner output never executes a fixed fallback search');
+ assert.equal(await evaluate(`[...document.querySelectorAll('.ai-summary:not(.ai-draft) .ai-hunts summary')].some(s=>s.textContent==='关联检索')`),false,'invalid planner output never executes a fixed fallback search');
  await close();await api('/__test/ai-plan',{mode:'default'});
  // Pause separately during reasoning, analysis notes and the summary body.
  await api('/__test/ai-stall',{reasoning:true,analysis:true,prefix:true});await openIncident();

@@ -1,5 +1,8 @@
 """Metadata vocabulary and observations for autonomous bounded hunting."""
 from urllib.parse import urlsplit
+import math
+
+from hunt_query import quote
 
 FIELDS = ('type','src','dst','sport','dport','proto','app','action','level','sni','host','dns','url',
           'method','status','rcode','rrtype','state','bytes_toserver','bytes_toclient',
@@ -14,6 +17,32 @@ NUMBERS = {'sport','dport','status','bytes_toserver','bytes_toclient','pkts_tose
 ALIASES = {'sig_id':'sid','sev':'level'}
 COMMON = ('type','src','dst','sport','dport','proto','app','sni','host','dns','state',
           'bytes_toserver','bytes_toclient','pkts_toserver','pkts_toclient')
+
+
+def compile_terms(terms):
+    """Render a small conjunction of typed metadata conditions as Lucene."""
+    if not isinstance(terms,list) or not 1<=len(terms)<=5:
+        raise ValueError('检索条件数量无效')
+    clauses=[]
+    for term in terms:
+        if not isinstance(term,list) or len(term)!=3:
+            raise ValueError('检索条件格式无效')
+        field,operator,value=term
+        if not isinstance(field,str) or field not in FIELDS or operator not in ('=','>','>=','<','<='):
+            raise ValueError('检索字段或运算符无效')
+        if field in NUMBERS:
+            if type(value) not in (int,float) or not math.isfinite(value):
+                raise ValueError('数值字段需要数字')
+            literal=str(value)
+        elif operator=='=' and isinstance(value,str) and value.strip() and not any(ord(c)<32 for c in value):
+            literal=quote(value)
+        else:
+            raise ValueError('文字字段仅支持精确匹配')
+        clause=field+':'+('' if operator=='=' else operator)+literal
+        if clause not in clauses:clauses.append(clause)
+    query=' AND '.join(clauses)
+    if len(query)>240:raise ValueError('检索条件过长')
+    return query
 
 
 def observations(context):
