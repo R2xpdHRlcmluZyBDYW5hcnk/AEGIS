@@ -4336,6 +4336,9 @@ def _hunt_sql_pushdown(node, icase=False, metadata=True):
             # Opaque Base64 identities are case-sensitive; keep the native association index usable.
             return ['community=?'],[value],True
         return _hunt_sql_text('community',value,False)
+    if field == 'session_id' and re.fullmatch(r'[0-9a-fA-F]{32}:[0-9a-fA-F]{16}', value):
+        # Engine session IDs are stored in lowercase. Keep exact lookups on the session index.
+        return ['session_id=?'], [value.lower() if icase else value], True
     if field == 'tuple_hash':
         expression = "CASE WHEN COALESCE(community,'')='' AND COALESCE(flow_id,0)<=0 THEN tuple_hash(src,sport,dst,dport,proto) END"
         if value=='*':

@@ -138,8 +138,13 @@ class SessionIdentityCase(unittest.TestCase):
         timeline=self.app.session_events(dict(session_id=FIRST))
         self.assertEqual(timeline['total'],2)
         self.assertEqual({r['type'] for r in timeline['events']},{'http','flow'})
-        hunted=self.app.hunt(dict(q=related['query'],all='1',view='list'))
+        hunted=self.app.hunt(dict(q=related['query'],all='1',view='list',icase='1'))
         self.assertEqual(hunted['total'],2)
+        where,args,complete=m.hunt_sql_pushdown(m.hunt_parse(related['query']),icase=True)
+        self.assertTrue(complete)
+        plan=self.db.conn.execute('EXPLAIN QUERY PLAN SELECT id FROM events WHERE ts>=? AND ts<=? AND '+
+                                  ' AND '.join(where),[0,10**15,*args]).fetchall()
+        self.assertTrue(any('idx_events_session_ts' in row[3] for row in plan),plan)
         self.assertEqual(self.app.session_events(dict(session_id=FIRST,offset=1,limit=1))['total'],2)
         with self.assertRaises(ValueError):self.app.session_events(dict(session_id='invalid'))
 
