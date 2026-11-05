@@ -20,7 +20,8 @@ with mock.patch.dict(sys.modules, {'fcntl': types.SimpleNamespace()} if sys.plat
 class BackendDeploymentCase(unittest.TestCase):
     def test_resource_validation_and_whitelist(self):
         self.assertEqual(deployer.resource_overrides({'read_workers':4,'password_pbkdf2':'ignored'}),{'read_workers':4})
-        for values in ({'read_workers':0},{'stats_batch_size':100000},{'cache_memory_percent':float('nan')}):
+        self.assertEqual(deployer.resource_overrides({'llm_summary_max_tokens':1024}),{'llm_summary_max_tokens':1024})
+        for values in ({'read_workers':0},{'stats_batch_size':100000},{'cache_memory_percent':float('nan')},{'llm_summary_max_tokens':4096}):
             with self.assertRaises(ValueError):
                 deployer.resource_overrides(values)
 

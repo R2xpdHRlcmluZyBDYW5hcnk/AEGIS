@@ -55,7 +55,7 @@ class SessionContextTests(unittest.TestCase):
         self.assertNotIn('Different session',payload['messages'][1]['content'])
         self.assertNotIn('private-fixture',payload['messages'][1]['content'])
         self.assertEqual(meta['scope'],'session')
-        self.assertIn('无攻击依据就分析通信',SUMMARY_PROMPT)
+        self.assertIn('没有威胁证据时说明通信情况',SUMMARY_PROMPT)
         self.assertLessEqual(sum(len(v['content'].encode()) for v in payload['messages']),1500)
 
     def test_no_session_never_merges_by_shared_endpoints_community_or_flow(self):

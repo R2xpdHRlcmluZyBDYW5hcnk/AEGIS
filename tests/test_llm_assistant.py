@@ -31,7 +31,7 @@ class Provider(BaseHTTPRequestHandler):
         self.end_headers()
         self.server.entered.set()
         system=self.server.payload['messages'][0]['content']
-        stage='hunt' if '狩猎助手' in system else 'summary' if '四段' in system else 'rule'
+        stage='hunt' if '狩猎助手' in system else 'summary' if '分析助手' in system else 'rule'
         stalled = lambda:(self.server.stall and getattr(self.server,'stall_stage',stage)==stage) or self.server.calls in getattr(self.server,'stall_calls',set())
         if stalled():
             while stalled() and not self.server.stop.is_set():
@@ -48,7 +48,7 @@ class Provider(BaseHTTPRequestHandler):
             system=self.server.payload['messages'][0]['content']
             if '狩猎助手' in system:
                 text=json.dumps({'queries':[{'query':'proto:TCP AND dport:443','reason':'比较附近的加密连接'}]})
-            elif '四段' in system:
+            elif '分析助手' in system:
                 text='**通信概览**：当前会话存在通信记录。\n行为与处置：结合检索结果核查。\n研判依据：尚不能确认入侵成功。\n建议核查：查看命中日志。'
             else:
                 text=json.dumps(dict(candidate=0,message='Observed communication',reason='当前事件的通信端点',limitations='可能匹配正常访问'))
@@ -160,6 +160,44 @@ class AssistantTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '不完整'):
             self.generate()
 
+    def test_summary_retries_once_when_thinking_fills_the_generation_budget(self):
+        self.assistant.summary_max_tokens=1024
+        def thinking_summary(payload):
+            return '分析助手' in payload['messages'][0]['content'] and payload['enable_thinking']
+
+        def deltas(payload):
+            if thinking_summary(payload):
+                return [{'reasoning_content':'逐步核对证据，尚未写出正文。'}]
+            if '狩猎助手' in payload['messages'][0]['content']:
+                return [{'content':'{"queries":[]}'}]
+            return [{'content':'已观察到连接与告警。'}]
+
+        self.server.deltas_for=deltas
+        self.server.finish_for=lambda payload:'length' if thinking_summary(payload) else 'stop'
+        output=[]
+        self.assistant.generate(self.app,'owner',dict(self.body,kind='summary'),lambda frame:output.append(frame) or True,lambda:False)
+        self.assertEqual([payload['enable_thinking'] for payload in self.server.payloads],[False,True,False])
+        self.assertEqual([payload['max_tokens'] for payload in self.server.payloads],[224,1024,384])
+        self.assertEqual(self.server.payloads[1]['presence_penalty'],1.5)
+        self.assertEqual(self.server.payloads[1]['messages'],self.server.payloads[2]['messages'])
+        self.assertTrue(any('正在补写' in frame.get('progress',{}).get('label','') for frame in output))
+        self.assertEqual(''.join(frame.get('delta','') for frame in output),'已观察到连接与告警。')
+        self.assertFalse(output[-1]['result']['truncated'])
+
+    def test_summary_budget_configuration_is_bounded(self):
+        self.assertEqual(LocalAssistant(summary_max_tokens=1024).summary_max_tokens,1024)
+        for value in (True,'768',0,4096,None):
+            with self.subTest(value=value):
+                self.assertEqual(LocalAssistant(summary_max_tokens=value).summary_max_tokens,384)
+
+    def test_summary_keeps_partial_public_text_on_length_finish(self):
+        self.server.text='已观察到连接。'
+        self.server.finish_for=lambda payload:'length' if '分析助手' in payload['messages'][0]['content'] else 'stop'
+        result=self.generate(dict(self.body,kind='summary'))
+        self.assertEqual(result['text'],self.server.text)
+        self.assertTrue(result['truncated'])
+        self.assertEqual(self.server.calls,2)
+
     def test_summary_stream_separates_reasoning_deltas_from_summary_and_tagged_content(self):
         self.server.deltas_for=lambda payload:([{'content':'分析说明：先核对相似连接。\n{"queries":[]}'}] if '狩猎助手' in payload['messages'][0]['content'] else
             [{'reasoning_content':'先核对'},{'reasoning_content':'连接方向。'},{'content':'<thi'},{'content':'nk>tagged reasoning</th'},
@@ -175,7 +213,7 @@ class AssistantTests(unittest.TestCase):
         first=next(index for index,item in enumerate(output) if 'delta' in item)
         self.assertTrue(output[first-1]['analysis_done'])
         self.assertTrue(all(index < first-1 for index,item in enumerate(output) if 'reasoning_delta' in item))
-        self.assertTrue(all(payload['enable_thinking'] for payload in self.server.payloads))
+        self.assertEqual([payload['enable_thinking'] for payload in self.server.payloads],[False,True])
         stream=VisibleText();self.assertEqual(stream.feed('a<analysis>hidden'), 'a')
         self.assertEqual(stream.feed('</analysis>b',final=True),'b')
 

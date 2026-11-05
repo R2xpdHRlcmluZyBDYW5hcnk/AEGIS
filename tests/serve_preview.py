@@ -274,7 +274,7 @@ class PreviewHandler(m.Handler):
     def do_GET(self):
         if self.path=='/__test/ai-status' and ai_provider:
             if not self._require():return
-            stages=['hunt' if '狩猎助手' in p['messages'][0]['content'] else 'summary' if '四段' in p['messages'][0]['content'] else 'rule' for p in getattr(ai_provider,'payloads',[])]
+            stages=['hunt' if '狩猎助手' in p['messages'][0]['content'] else 'summary' if '分析助手' in p['messages'][0]['content'] else 'rule' for p in getattr(ai_provider,'payloads',[])]
             return self._json(dict(calls=ai_provider.calls,cancellations=ai_provider.cancellations,stages=stages))
         if self.path.startswith('/api/rules') or self.path.split('?', 1)[0] in ('/api/incidents', '/api/events', '/api/hunt'):
             delay = min(5, max(0, float(os.environ.get('NDR_PREVIEW_DELAY', '0'))))

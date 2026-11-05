@@ -24,7 +24,8 @@ param(
     [ValidateRange(0.1,10)][Nullable[double]]$CacheMemoryPercent,
     [ValidateRange(1,1024)][Nullable[int]]$CacheMaxMiB,
     [ValidateRange(128,8192)][Nullable[int]]$StatsBatchSize,
-    [ValidateRange(5,80)][Nullable[double]]$StatsDutyPercent
+    [ValidateRange(5,80)][Nullable[double]]$StatsDutyPercent,
+    [ValidateRange(384,1024)][Nullable[int]]$LlmSummaryMaxTokens
 )
 $ErrorActionPreference = 'Stop'
 if (-not $BuildOnly -and [string]::IsNullOrWhiteSpace($Target)) { throw 'Specify -Target user@host for deployment, or use -BuildOnly -OutputDirectory for a local build' }
@@ -45,7 +46,7 @@ if ($QuicInterface -and (-not $UpdateBackend -or $BuildOnly -or $QuicInterface -
 if ($SessionLoggerDirectory -and (-not $UpdateBackend -or $BuildOnly -or -not (Test-Path -LiteralPath $SessionLoggerDirectory -PathType Container))) { throw '-SessionLoggerDirectory requires -UpdateBackend and a compiled extension directory' }
 if ($ReleasePackage -and ($BuildOnly -or -not (Test-Path -LiteralPath $ReleasePackage))) { throw '-ReleasePackage requires an existing release and cannot be combined with -BuildOnly' }
 if ($ReuseUiPackage -and ($ReleasePackage -or -not (Test-Path -LiteralPath $ReuseUiPackage))) { throw '-ReuseUiPackage requires an existing UI release and cannot be combined with -ReleasePackage' }
-$resourceFlags = [ordered]@{WebReadWorkers='--read-workers';CacheMemoryPercent='--cache-memory-percent';CacheMaxMiB='--cache-max-mib';StatsBatchSize='--stats-batch-size';StatsDutyPercent='--stats-duty-percent'}
+$resourceFlags = [ordered]@{WebReadWorkers='--read-workers';CacheMemoryPercent='--cache-memory-percent';CacheMaxMiB='--cache-max-mib';StatsBatchSize='--stats-batch-size';StatsDutyPercent='--stats-duty-percent';LlmSummaryMaxTokens='--llm-summary-max-tokens'}
 $resourceArguments = @()
 foreach ($parameter in $resourceFlags.Keys) {
     if ($PSBoundParameters.ContainsKey($parameter)) {
