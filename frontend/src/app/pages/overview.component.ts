@@ -22,7 +22,7 @@ import { eventType } from '../event-fields';
   <div class="three-grid"><section class="card" *ngFor="let top of tops"><header><h2>{{top.title}}</h2><button class="quiet chart-view-toggle" (click)="top.table=!top.table" [attr.aria-label]="top.title+(top.table?'查看图表':'查看表格')">{{top.table?'图表':'表格'}}</button></header><ndr-chart *ngIf="!top.table" [ranks]="d.top?.[top.key] || []" [labelKey]="top.key==='signatures'?'sig':'ip'" [title]="top.title" (rowOpen)="filterTop(top,$event)"/><ndr-table *ngIf="top.table" [id]="top.key" [columns]="top.columns" [rows]="d.top?.[top.key] || []" [pagination]="false" [fit]="true" [interactive]="true" (rowOpen)="filterTop(top,$event)"/></section></div>
   <ng-container *ngIf="d.network as n">
    <div class="section-heading visibility-heading"><h2>网络可见性</h2><div class="network-update muted" role="status" aria-live="polite"><span *ngIf="n.computed_at">更新于 {{formatDate(n.computed_at)}}</span><span *ngIf="n.available!==false">已记录连接载荷 {{memory(n.bytes)}}</span><span *ngIf="n.status==='refreshing'||n.status==='stale'">{{networkStatus(n)}}</span></div></div>
-   <p class="error" role="alert" *ngIf="n.error">{{n.error}}</p>
+   <p [class.error]="!n.available" [class.muted]="n.available" [attr.role]="n.available?'status':'alert'" *ngIf="n.error">{{n.error}}</p>
    <ng-container *ngIf="n.available!==false;else networkPreparing">
    <div class="stats-grid network-summary">
     <button class="stat-card" (click)="filterKind('connection','连接记录')" [attr.aria-pressed]="hasKind('connection')"><span>连接记录</span><strong>{{n.flows | number}}</strong></button>

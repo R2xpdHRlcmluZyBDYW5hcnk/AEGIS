@@ -367,6 +367,7 @@ class DataService:
         self.app, self.cache = app, cache
         self.lock = threading.Lock()
         self.inflight, self.queue = {}, OrderedDict()
+        self.retry_after = OrderedDict()
         self.readers = set()
         self.read_workers = max(1,min(8,int(getattr(app,'config',{}).get('read_workers',4))))
         self.sql = ReadExecutor()
@@ -439,7 +440,7 @@ class DataService:
             if analytics is not None:
                 locks.append(analytics.lock)
             with self.sql.snapshot(source,conn,setup=setup,
-                    cancelled=lambda:is_cancelled() or generation!=source.network_generation,
+                    cancelled=lambda:is_cancelled() or generation!=source.network_generation or time.monotonic()>deadline,
                     locks=locks) as snapshot:
                 db.parallel = snapshot
                 if attached_summary:
@@ -458,7 +459,8 @@ class DataService:
 
     def schedule(self, key, task):
         with self.lock:
-            if self.stop.is_set() or key in self.queue or key in self.inflight or len(self.queue) >= 16:
+            if (self.stop.is_set() or key in self.queue or key in self.inflight or len(self.queue) >= 16
+                    or time.monotonic()<self.retry_after.get(key,(0,''))[0]):
                 return
             self.queue[key] = (time.monotonic()+15, task)
 
@@ -468,15 +470,21 @@ class DataService:
             with self.lock:
                 self.generation = self.app.db.network_generation
                 self.queue.clear()
+                self.retry_after.clear()
                 self.cache.clear()
         requested_generation = (self.app.db.network_generation,self.revision)
         key = self.key(function.__name__, params)
         fresh = self.cache.get(key, ttl)
-        stale = fresh if fresh is not None else self.cache.get(key, 30)
+        # Same query/range/page only. Keep a bounded last success while one
+        # background refresh retries; never cache or substitute failed results.
+        stale = fresh if fresh is not None else self.cache.get(key, 900)
         if stale is not None and not background:
             if fresh is None:
                 self.schedule(key, lambda: self.query(function, dict(params), ttl, False, True))
-            result = stale
+            failure = self.retry_after.get(key,(0,''))[1]
+            result = stale if fresh is not None else dict(stale,read_state=dict(
+                status='stale' if failure or self.cache.get(key,30) is None else 'refreshing',
+                as_of=stale.get('as_of'),error=failure))
         else:
             with self.lock:
                 flight = self.inflight.get(key)
@@ -500,8 +508,19 @@ class DataService:
                     flight['result'] = result
                     if generation == (self.app.db.network_generation,self.revision) and not result.get('error') and not (result.get('security') or {}).get('error'):
                         self.cache.put(key, result)
+                        with self.lock:self.retry_after.pop(key,None)
+                    elif generation == (self.app.db.network_generation,self.revision):
+                        with self.lock:
+                            self.retry_after[key]=(time.monotonic()+5,str(result.get('error') or result['security']['error']))
+                            self.retry_after.move_to_end(key)
+                            while len(self.retry_after)>16:self.retry_after.popitem(last=False)
                 except Exception as exc:
                     flight['error'] = str(exc)
+                    with self.lock:
+                        if generation == (self.app.db.network_generation,self.revision):
+                            self.retry_after[key]=(time.monotonic()+5,str(exc))
+                            self.retry_after.move_to_end(key)
+                            while len(self.retry_after)>16:self.retry_after.popitem(last=False)
                     raise
                 finally:
                     with self.lock:
@@ -526,6 +545,7 @@ class DataService:
         with self.lock:
             self.revision += 1
             self.queue.clear()
+            self.retry_after.clear()
             self.cache.clear()
 
     def start(self):
@@ -1998,7 +2018,7 @@ class StoredNetworkStats:
         if self.thread is not None:
             self.thread.join(timeout=5)
 
-    def summary(self, start, end, cancelled):
+    def summary(self, start, end, cancelled, parallel=True):
         if not self.ready or self.generation != self.db.network_generation:
             return None
         conn = sqlite3.connect(Path(self.path).resolve().as_uri()+'?mode=ro',uri=True,timeout=1)
@@ -2009,7 +2029,7 @@ class StoredNetworkStats:
             conn.execute('BEGIN')
             pool = getattr(self.db,'query_pool',None)
             context = (pool.snapshot(SimpleNamespace(path=self.path,lock=self.lock),conn,cancelled=cancelled)
-                       if pool is not None and not pool.stop.is_set() else nullcontext(None))
+                       if parallel and pool is not None and not pool.stop.is_set() else nullcontext(None))
             with context as parallel:
                 state = self.state(conn)
                 if state.get('ready') != '1' or now()-float(state.get('as_of',0))>30:
@@ -2038,7 +2058,9 @@ class NetworkSnapshots:
     REFRESH_SECONDS = 30
     MAX_AGE_SECONDS = 180
     IDLE_SECONDS = 300
-    QUERY_SECONDS = 20
+    # This is a single background reader, never an HTTP request or a pool lease.
+    # A bounded longer pass can finish instead of restarting the same large sort.
+    QUERY_SECONDS = 60
     QUERY_GAP_SECONDS = 1
     MAX_ENTRIES = 8
     DEFAULT_KEY = ('rolling', 86400.0)
@@ -2057,7 +2079,7 @@ class NetworkSnapshots:
 
     def _entry(self):
         return dict(result=None, error='', used=self.clock(), due=0.0,
-                    completed=0.0, running=False)
+                    completed=0.0, running=False, failures=0, requested=False)
 
     def _cache_key(self, key):
         return json.dumps(['network', self.generation, key], separators=(',', ':'))
@@ -2091,29 +2113,28 @@ class NetworkSnapshots:
                     self.entries.pop(victim)
                 entry = self.entries[key] = self._entry()
             entry['used'] = self.clock()
+            entry['requested'] = True
             self.entries.move_to_end(key)
             self.condition.notify_all()
             snapshot = self.cache.get(self._cache_key(key)) if entry['result'] else None
             if snapshot is None and entry['result']:
                 entry.update(result=None, due=0.0)
             age = self.clock() - entry['completed'] if snapshot is not None else None
-            available = snapshot is not None and age <= self.MAX_AGE_SECONDS
+            available = snapshot is not None
             refreshing = entry['running'] or self.clock() >= entry['due']
             error = entry['error']
             if self.db.conn is None:
-                available, error = False, self.db.last_error or '事件库不可用'
+                error = self.db.last_error or '事件库不可用'
             if available:
-                status = 'stale' if error else 'refreshing' if refreshing else 'ready'
+                status = 'stale' if error or age > self.MAX_AGE_SECONDS else 'refreshing' if refreshing else 'ready'
                 result = dict(snapshot)
             else:
                 status = 'error' if error else 'pending'
                 result = self.db.empty_network(None)
                 result.update(range=None, as_of=None, computed_at=None)
-                if snapshot is not None:
-                    error = error or '网络统计已过期，正在重新生成'
             result.update(available=available, status=status, refreshing=refreshing,
                           requested_range=[start, end], refresh_seconds=self.REFRESH_SECONDS,
-                          age_seconds=age, error=error)
+                          retry_seconds=max(0,entry['due']-self.clock()),age_seconds=age, error=error)
             return result
 
     def start(self):
@@ -2157,18 +2178,14 @@ class NetworkSnapshots:
             self.connection = conn
         try:
             conn.execute('PRAGMA query_only=ON')
+            conn.execute('PRAGMA cache_size=-2048')
             conn.set_progress_handler(cancelled, 10000)
             conn.execute('BEGIN')
             analytics = getattr(self.db, 'analytics', None)
-            result = analytics.summary(start,end,cancelled) if analytics is not None and not push else None
+            result = analytics.summary(start,end,cancelled,parallel=False) if analytics is not None and not push else None
             if result is None:
-                pool = getattr(self.db,'query_pool',None)
-                if pool is not None and not pool.stop.is_set():
-                    with pool.snapshot(self.db,conn,cancelled=cancelled) as parallel:
-                        result = EventDB.compute_network_summary(conn,start,end,push=push,parallel=parallel)
-                else:
-                    result = (EventDB.compute_network_summary(conn,start,end,push=push) if push
-                              else EventDB.compute_network_summary(conn,start,end))
+                result = (EventDB.compute_network_summary(conn,start,end,push=push) if push
+                          else EventDB.compute_network_summary(conn,start,end))
             if cancelled():
                 raise sqlite3.OperationalError('interrupted')
             return dict(result, computed_at=now())
@@ -2192,7 +2209,9 @@ class NetworkSnapshots:
                 stamp = self.clock()
                 active = [(k, v) for k, v in self.entries.items()
                           if k == self.DEFAULT_KEY or stamp - v['used'] <= self.IDLE_SECONDS]
-                key, entry = min(active, key=lambda pair: pair[1]['due'])
+                ready = [(k,v) for k,v in active if v['due']<=stamp]
+                key, entry = (min(ready,key=lambda pair:(not pair[1]['requested'],-pair[1]['used'])) if ready
+                              else min(active, key=lambda pair: pair[1]['due']))
                 wait = max(entry['due'], self.last_finished + self.QUERY_GAP_SECONDS) - stamp
                 if wait > 0:
                     self.condition.wait(timeout=min(wait, 1))
@@ -2210,8 +2229,9 @@ class NetworkSnapshots:
                 if self.stop.is_set():
                     return
                 if generation == self.generation and self.entries.get(key) is entry:
+                    failures = entry['failures']+1 if error else 0
                     entry.update(running=False, error=error,
-                                 due=self.clock() + self.REFRESH_SECONDS)
+                                 failures=failures,due=self.clock() + (min(60,5*2**min(failures-1,4)) if error else self.REFRESH_SECONDS))
                     if result is not None:
                         self.cache.put(self._cache_key(key), result)
                         entry.update(result=True, completed=self.clock())

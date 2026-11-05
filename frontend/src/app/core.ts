@@ -78,21 +78,23 @@ export class Api {
 }
 // Each replacement closes the old stream and ignores in-flight replies from older queries.
 export class LiveQuery {
-  private revision=0; private request?:AbortController; private source?:EventSource; private fallback?:ReturnType<typeof setInterval>;private initial?:ReturnType<typeof setTimeout>;
+  private revision=0; private request?:AbortController; private source?:EventSource; private fallback?:ReturnType<typeof setInterval>;private initial?:ReturnType<typeof setTimeout>;private interruption?:ReturnType<typeof setTimeout>;
   constructor(private api:Api,private receive:(data:any)=>void,private error:(message:string)=>void){}
   start(path:string,params:Record<string,any>,topic?:string):void {
     this.stop();const revision=this.revision;
-    const fetch=()=>{if(this.request)return;const request=this.request=new AbortController();return this.api.get(path,params,request.signal).then(data=>{if(revision===this.revision&&!request.signal.aborted)this.api.zone.run(()=>this.receive(data));}).catch(e=>{if(revision===this.revision&&!request.signal.aborted)this.api.zone.run(()=>this.error(e.message));}).finally(()=>{if(this.request===request)this.request=undefined;});};
+    const accept=(data:any)=>this.api.zone.run(()=>{this.receive(data);if(data.read_state?.status==='stale')this.error('更新延迟，显示上次结果'+(data.read_state.as_of?'（'+date(data.read_state.as_of)+'）':'')+(data.read_state.error?'：'+data.read_state.error:''));});
+    const interrupted=(message:string)=>{if(this.interruption)return;this.interruption=setTimeout(()=>{this.interruption=undefined;if(revision===this.revision&&this.source?.readyState!==EventSource.OPEN)this.api.zone.run(()=>this.error(message));},6000);};
+    const fetch=()=>{if(this.request)return;const request=this.request=new AbortController();return this.api.get(path,params,request.signal).then(data=>{if(revision===this.revision&&!request.signal.aborted){clearTimeout(this.interruption);this.interruption=undefined;accept(data);}}).catch(e=>{if(revision===this.revision&&!request.signal.aborted){if(topic)interrupted(e.message);else this.api.zone.run(()=>this.error(e.message));}}).finally(()=>{if(this.request===request)this.request=undefined;});};
     if(topic){
       const query=new URLSearchParams({...params,topic} as Record<string,string>);
       this.source=new EventSource('/api/stream?'+query);
       this.initial=setTimeout(()=>{if(revision===this.revision)void fetch();},2000);
-      this.source.onmessage=e=>{if(revision!==this.revision)return;clearTimeout(this.initial);this.request?.abort();this.request=undefined;try{const data=JSON.parse(e.data);if(data.status===401){location.assign('/login');return;}this.api.zone.run(()=>{if(data.error)this.error(data.error);else this.receive(data);});}catch{this.api.zone.run(()=>this.error('实时数据格式错误'));}};
-      this.source.onerror=()=>{if(revision===this.revision)this.api.zone.run(()=>this.error('实时连接中断，正在重连；保留最近数据'));};
-      this.fallback=setInterval(()=>{if(!document.hidden && this.source?.readyState!==EventSource.OPEN)void fetch();},15000);
+      this.source.onmessage=e=>{if(revision!==this.revision)return;clearTimeout(this.initial);clearTimeout(this.interruption);this.interruption=undefined;try{const data=JSON.parse(e.data);if(data.status===401){location.assign('/login');return;}if(data.error){this.api.zone.run(()=>this.error(data.error));return;}this.request?.abort();this.request=undefined;accept(data);}catch{this.api.zone.run(()=>this.error('实时数据格式错误'));}};
+      this.source.onerror=()=>{if(revision===this.revision){interrupted('实时连接中断，正在重连；保留最近数据');void fetch();}};
+      this.fallback=setInterval(()=>{if(!document.hidden && this.source?.readyState!==EventSource.OPEN)void fetch();},5000);
     }else void fetch();
   }
-  stop():void {this.revision++;this.request?.abort();this.request=undefined;this.source?.close();this.source=undefined;clearInterval(this.fallback);clearTimeout(this.initial);}
+  stop():void {this.revision++;this.request?.abort();this.request=undefined;this.source?.close();this.source=undefined;clearInterval(this.fallback);clearTimeout(this.initial);clearTimeout(this.interruption);this.interruption=undefined;}
 }
 export function localDate(d:Date):string {const p=(n:number)=>String(n).padStart(2,'0');return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;}
 export function timeRange(choice:string,from:string,to:string):Record<string,string> {

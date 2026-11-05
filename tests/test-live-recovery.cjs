@@ -1,0 +1,33 @@
+const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
+const ts=require('../frontend/node_modules/typescript');
+const code=ts.transpileModule(fs.readFileSync('frontend/src/app/core.ts','utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS,experimentalDecorators:true}}).outputText;
+const timers=new Map();let next=0,stamp=0;
+const schedule=(fn,ms)=>{const id=++next;timers.set(id,{fn,due:stamp+ms});return id;};
+const tick=ms=>{stamp+=ms;for(const [id,item] of [...timers])if(item.due<=stamp){timers.delete(id);item.fn();}};
+class EventSource {static OPEN=1;readyState=0;close(){this.closed=true;}}
+const core={};
+vm.runInNewContext(code,{exports:core,require:name=>name==='@angular/core'?{Injectable:()=>value=>value}: {},URLSearchParams,AbortController,EventSource,document:{hidden:false},setTimeout:schedule,clearTimeout:id=>timers.delete(id),setInterval:schedule,clearInterval:id=>timers.delete(id)});
+const flush=()=>new Promise(resolve=>setImmediate(resolve));
+(async()=>{
+ const frames=[],errors=[];let reject=true,calls=0;
+ const api={zone:{run:fn=>fn()},get:async()=>{calls++;if(reject)throw Error('network unavailable');return {total:3};}};
+ const live=new core.LiveQuery(api,data=>frames.push(data),message=>errors.push(message));
+ live.start('/api/hunt',{q:'proto: TCP'},'hunt');
+ const first=live.source;first.onerror();await flush();
+ assert.equal(calls,1,'transport loss immediately tries one REST fallback');
+ assert.equal(errors.length,0,'short reconnects do not show a failure');
+ first.readyState=EventSource.OPEN;first.onmessage({data:'{"total":2}'});tick(6000);await flush();
+ assert.equal(errors.length,0,'recovery cancels the delayed warning');
+ assert.equal(frames.at(-1).total,2);
+ first.readyState=0;first.onerror();await flush();tick(6000);await flush();
+ assert.ok(errors.length,'persistent loss remains visible');
+ reject=false;first.onerror();await flush();assert.equal(frames.at(-1).total,3,'REST recovers while SSE reconnects');
+ first.onmessage({data:'{"total":4,"read_state":{"status":"stale","error":"query busy"}}'});
+ assert.equal(frames.at(-1).total,4);assert.match(errors.at(-1),/更新延迟.*query busy/);
+ first.onmessage({data:'{"error":"Invalid query syntax"}'});assert.equal(errors.at(-1),'Invalid query syntax');
+ live.start('/api/hunt',{q:'proto: UDP'},'hunt');const before=frames.length;
+ first.onmessage({data:'{"total":999}'});assert.equal(frames.length,before,'old query frames cannot replace a new filter');
+ live.source.onerror();live.stop();await flush();tick(10000);await flush();
+ assert.equal(timers.size,0,'leaving clears requests and recovery timers');
+ console.log('ok - grace period, REST recovery, stale metadata, query isolation and teardown');
+})().catch(error=>{console.error(error);process.exitCode=1;});

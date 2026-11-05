@@ -131,6 +131,35 @@ class ConsoleUpdateTests(unittest.TestCase):
         self.assertEqual(client.request.call_count,2)
         sleep.assert_called_once_with(.1)
 
+    def test_web_module_update_and_rollback_restart_only_console(self):
+        module=load('deploy-native-backend')
+        for failure in (False,True):
+            with self.subTest(rollback=failure),tempfile.TemporaryDirectory() as temporary:
+                root=Path(temporary);release=root/'release';installed=root/'installed'
+                release.mkdir();installed.mkdir()
+                for name in module.PROGRAMS:
+                    (release/name).write_text('# unchanged module\n');(installed/name).write_text('# unchanged module\n')
+                with zipfile.ZipFile(release/'python-dependencies.zip','w') as bundle:bundle.writestr('luqum/parser.py','# fixture\n')
+                (installed/'python-dependencies.zip').write_bytes((release/'python-dependencies.zip').read_bytes())
+                for name in ('ips-web','llm_assistant.py','overview_metrics.py'):(release/name).write_text('# changed web module\n')
+                previous={name:(installed/name).read_bytes() for name in module.PROGRAMS}
+                config=root/'config';original=b'{ "read_workers": 4 }\n';config.write_bytes(original)
+                for service,data in module.RESOURCE_OVERRIDES.items():
+                    path=root/'units'/(service+'.d')/'50-ips-parallel.conf';path.parent.mkdir(parents=True);path.write_bytes(data)
+                client=mock.Mock();client.request.return_value={'ok':True,'ready':True}
+                ready=mock.Mock(side_effect=[RuntimeError('fixture startup failure'),None] if failure else None)
+                with mock.patch.multiple(module,CONFIG=config,BIN=installed,BACKUPS=root/'backups',PIDFILE=root/'pid',RESOURCE_ROOT=root/'units'), \
+                     mock.patch.object(module,'Client',return_value=client),mock.patch.object(module.subprocess,'run') as run,mock.patch('builtins.print'):
+                    if failure:
+                        with self.assertRaisesRegex(RuntimeError,'fixture startup failure'):module.apply(release,ready,{})
+                    else:module.apply(release,ready,{})
+                self.assertEqual(config.read_bytes(),original)
+                for call in run.call_args_list:self.assertEqual(call.args[0][2:],['ips-web'])
+                self.assertTrue(run.call_count)
+                for name in module.PROGRAMS:
+                    expected=previous[name] if failure else (release/name).read_bytes()
+                    self.assertEqual((installed/name).read_bytes(),expected)
+
     def test_external_detector_without_project_pidfile_is_left_untouched(self):
         module=load('deploy-native-backend')
         with tempfile.TemporaryDirectory() as temporary:

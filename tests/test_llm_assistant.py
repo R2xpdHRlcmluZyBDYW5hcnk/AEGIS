@@ -12,7 +12,7 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from llm_assistant import LocalAssistant, candidates, rule_from_choice, validate_rule, prompt_payload
+from llm_assistant import LocalAssistant, VisibleText, candidates, rule_from_choice, validate_rule, prompt_payload
 
 ROW = dict(src='192.0.2.1', dst='198.51.100.2', dport=80, proto='TCP', app='http', host='example.test', sig='Observed alert')
 
@@ -53,9 +53,18 @@ class Provider(BaseHTTPRequestHandler):
             else:
                 text=json.dumps(dict(candidate=0,message='Observed communication',reason='当前事件的通信端点',limitations='可能匹配正常访问'))
         finish=self.server.finish_for(self.server.payload) if hasattr(self.server,'finish_for') else self.server.finish
-        for chunk in ({'choices': [{'delta': {'content': text}, 'finish_reason': finish}]}, '[DONE]'):
+        deltas=self.server.deltas_for(self.server.payload) if hasattr(self.server,'deltas_for') else [{'content':text}]
+        if getattr(self.server,'stream_prefix',False) and stage=='summary':
+            deltas=[{'reasoning_content':'private test reasoning'},{'content':text[:16]},{'content':text[16:]}]
+        for index,delta in enumerate(deltas):
+            chunk={'choices':[{'delta':delta,'finish_reason':finish if index==len(deltas)-1 else None}]}
             self.wfile.write(b'data: ' + (json.dumps(chunk).encode() if isinstance(chunk, dict) else chunk.encode()) + b'\n\n')
             self.wfile.flush()
+            if getattr(self.server,'stream_prefix',False) and stage=='summary' and index==1:
+                while self.server.stream_prefix and not self.server.stop.is_set():
+                    if select.select([self.connection],[],[],.05)[0] and not self.connection.recv(1):
+                        self.server.cancelled.set();self.server.cancellations=getattr(self.server,'cancellations',0)+1;return
+        self.wfile.write(b'data: [DONE]\n\n');self.wfile.flush()
 
 
 class AssistantTests(unittest.TestCase):
@@ -93,7 +102,7 @@ class AssistantTests(unittest.TestCase):
         self.assertNotIn('192.0.2.1',result['rule'])
         self.assertNotIn('sid:', result['rule'])
         self.assertTrue(self.server.payload['stream'])
-        self.assertFalse(self.server.payload['enable_thinking'])
+        self.assertTrue(self.server.payload['enable_thinking'])
         self.app.control.request.assert_not_called()
         with self.assertRaises(ValueError):
             self.assistant.add(self.app, 'different-owner', result['proposal'])
@@ -134,6 +143,41 @@ class AssistantTests(unittest.TestCase):
         self.server.finish = 'length'
         with self.assertRaisesRegex(ValueError, '不完整'):
             self.generate()
+
+    def test_summary_stream_omits_private_channels_and_split_reasoning_markers(self):
+        self.server.deltas_for=lambda payload:([{'content':'{"queries":[]}'}] if '狩猎助手' in payload['messages'][0]['content'] else
+            [{'reasoning_content':'private test reasoning'},{'content':'<thi'},{'content':'nk>private tagged reasoning</th'},
+             {'content':'ink>通信概览：'},{'content':'公开正文。'}])
+        output=[]
+        self.assistant.generate(self.app,'owner',dict(self.body,kind='summary'),lambda item:output.append(item) or True,lambda:False)
+        public=''.join(item.get('delta','') for item in output)
+        self.assertEqual(public,'通信概览：公开正文。');self.assertEqual(output[-1]['result']['text'],public)
+        self.assertNotIn('private',json.dumps(output));self.assertNotIn('queries',public)
+        first=next(index for index,item in enumerate(output) if 'delta' in item)
+        self.assertTrue(output[first-1]['analysis_done'])
+        self.assertTrue(all(payload['enable_thinking'] for payload in self.server.payloads))
+        stream=VisibleText();self.assertEqual(stream.feed('a<analysis>hidden'), 'a')
+        self.assertEqual(stream.feed('</analysis>b',final=True),'b')
+
+    def test_partial_body_arrives_before_completion_and_disconnect_cancels(self):
+        self.server.stream_prefix=True
+        self.server.response_for=lambda payload:'{"queries":[]}' if '狩猎助手' in payload['messages'][0]['content'] else '通信概览：正在逐步输出可见的测试正文。'
+        disconnected=threading.Event();received=threading.Event();output=[];errors=[]
+        def send(item):
+            output.append(item)
+            if 'delta' in item:received.set()
+            return True
+        def run():
+            try:self.assistant.generate(self.app,'owner',dict(self.body,kind='summary'),send,disconnected.is_set)
+            except BaseException as error:errors.append(error)
+        thread=threading.Thread(target=run);thread.start()
+        try:
+            self.assertTrue(received.wait(3));self.assertTrue(thread.is_alive())
+            self.assertFalse(any('result' in item for item in output))
+            disconnected.set();thread.join(1)
+            self.assertFalse(thread.is_alive());self.assertTrue(self.server.cancelled.wait(1))
+            self.assertFalse(errors);self.assertFalse(self.assistant.proposals)
+        finally:disconnected.set();self.server.stream_prefix=False;thread.join(2)
 
     def test_rule_action_is_explicit_and_defaults_to_alert(self):
         self.assertTrue(self.generate()['rule'].startswith('alert '))

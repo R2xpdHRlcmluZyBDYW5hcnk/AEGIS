@@ -36,16 +36,17 @@ def summarize(conn, start, end, *, table='events', push=None, parallel=None):
       FROM '''+table+' WHERE ts>=? AND ts<=?'+suffix+') '
     # Exact engine identities join protocol, alert and lifecycle observations.
     # Unidentified historical records contribute connections only as flow rows.
-    cohort=base+''', candidates AS (SELECT *,
-      ROW_NUMBER() OVER (PARTITION BY CASE WHEN session_id!='' THEN 'session:'||session_id ELSE 'record:'||id END
-        ORDER BY (type='flow') DESC,(type='session') DESC,ts DESC,id DESC) position,
+    cohort=base+''', candidates AS (SELECT src,dst,proto,
+      ROW_NUMBER() OVER representative position,
       FIRST_VALUE(app) OVER (PARTITION BY CASE WHEN session_id!='' THEN 'session:'||session_id ELSE 'record:'||id END
         ORDER BY '''+APP_ORDER+''') application,
-      MAX(volume) OVER (PARTITION BY CASE WHEN session_id!='' THEN 'session:'||session_id ELSE 'record:'||id END) payload,
-      MAX(orig_pkts) OVER (PARTITION BY CASE WHEN session_id!='' THEN 'session:'||session_id ELSE 'record:'||id END) sent,
-      MAX(resp_pkts) OVER (PARTITION BY CASE WHEN session_id!='' THEN 'session:'||session_id ELSE 'record:'||id END) received,
-      MAX(ts) OVER (PARTITION BY CASE WHEN session_id!='' THEN 'session:'||session_id ELSE 'record:'||id END) latest
-      FROM selected WHERE session_id!='' OR type='flow'), connections AS (SELECT * FROM candidates WHERE position=1)
+      MAX(volume) OVER complete payload,MAX(orig_pkts) OVER complete sent,
+      MAX(resp_pkts) OVER complete received,MAX(ts) OVER complete latest
+      FROM selected WHERE session_id!='' OR type='flow'
+      WINDOW representative AS (PARTITION BY CASE WHEN session_id!='' THEN 'session:'||session_id ELSE 'record:'||id END
+        ORDER BY (type='flow') DESC,(type='session') DESC,ts DESC,id DESC),
+        complete AS (representative ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)),
+      connections AS MATERIALIZED (SELECT * FROM candidates WHERE position=1)
       SELECT 'metrics','',COUNT(*),COALESCE(SUM(payload),0),COALESCE(SUM(sent>0 AND received>0),0),
         COALESCE(SUM((sent>0)!=(received>0)),0),MAX(latest),
         (SELECT COUNT(*) FROM (SELECT src ip FROM connections WHERE src!='' UNION SELECT dst ip FROM connections WHERE dst!=''))

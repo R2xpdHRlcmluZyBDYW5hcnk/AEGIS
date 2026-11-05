@@ -294,6 +294,7 @@ class PreviewHandler(m.Handler):
             if self.headers.get('X-Requested-With')!='ips-web':return self._error(400,'missing header')
             body=json.loads(self._read_body(1024) or b'{}')
             ai_provider.stall=bool(body.get('stall'))
+            ai_provider.stream_prefix=bool(body.get('prefix'))
             if body.get('stage'):ai_provider.stall_stage=body['stage']
             elif hasattr(ai_provider,'stall_stage'):del ai_provider.stall_stage
             return self._json({'ok':True})

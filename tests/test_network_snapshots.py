@@ -184,7 +184,7 @@ class NetworkSnapshotTests(unittest.TestCase):
         for i in range(20):self.cache.get(low,high,True,push=(['src=?'],[str(i)]))
         self.assertLessEqual(len(self.cache.entries),self.cache.MAX_ENTRIES)
 
-    def test_failed_refresh_retains_success_until_the_staleness_limit(self):
+    def test_failed_refresh_retains_success_beyond_freshness_limit_then_recovers(self):
         self.add()
         self.cache.start()
         first = self.ready()
@@ -196,10 +196,29 @@ class NetworkSnapshotTests(unittest.TestCase):
             self.assertEqual(failed['computed_at'], first['computed_at'])
             self.advance(self.cache.MAX_AGE_SECONDS + 1)
             expired = self.get()
-            self.assertFalse(expired['available'])
-            self.assertIsNone(expired['flows'])
+            self.assertTrue(expired['available'])
+            self.assertEqual((expired['status'],expired['flows']),('stale',1))
+            self.assertEqual(expired['computed_at'],first['computed_at'])
         self.advance()
         self.wait_for(lambda: self.get()['status'] == 'ready')
+
+    def test_retry_is_bounded_and_does_not_discard_another_range_or_filter(self):
+        with mock.patch.object(backend.EventDB,'compute_network_summary',side_effect=TimeoutError('fixture timeout')) as call:
+            self.cache.start()
+            self.wait_for(lambda:self.get()['status']=='error')
+            first=self.get();self.assertGreater(first['retry_seconds'],0)
+            for _ in range(20):self.get()
+            self.assertEqual(call.call_count,1)
+            self.advance(5)
+            self.wait_for(lambda:call.call_count==2)
+            self.wait_for(lambda:self.get()['retry_seconds']>5)
+            self.assertFalse(self.get(start=self.stamp-1,end=self.stamp+1,rolling=False)['available'])
+
+    def test_network_background_never_borrows_foreground_sql_helpers(self):
+        self.add();self.db.query_pool=mock.Mock()
+        result=self.cache._compute(self.cache.DEFAULT_KEY,self.db.network_generation)
+        self.assertEqual(result['flows'],1)
+        self.db.query_pool.snapshot.assert_not_called()
 
     def test_initial_failure_reports_unavailable_instead_of_empty_counts(self):
         with mock.patch.object(backend.EventDB, 'compute_network_summary', side_effect=RuntimeError('fixture error')):

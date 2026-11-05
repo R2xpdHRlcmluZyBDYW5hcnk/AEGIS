@@ -231,6 +231,45 @@ class DataLayerCase(unittest.TestCase):
         self.assertFalse(self.service.queue)
         self.assertEqual(self.service.query(producer,{})['value'],2)
 
+    def test_older_success_is_served_only_for_same_query_and_failed_refresh_has_a_cooldown(self):
+        fail=[False]
+        def producer(reader,params):
+            if fail[0]:raise sqlite3.OperationalError('database is locked')
+            return {'value':params.get('q','original')}
+        first=self.service.query(producer,{})
+        key=self.service.key(producer.__name__,{})
+        with self.cache.lock:
+            payload,stamp,weight=self.cache.entries[key]
+            self.cache.entries[key]=(payload,stamp-120,weight)
+        stale=self.service.query(producer,{})
+        self.assertEqual(stale['value'],'original')
+        self.assertEqual(stale['read_state']['status'],'stale')
+        self.assertEqual(stale['as_of'],first['as_of'])
+        fail[0]=True
+        _,task=self.service.queue.popitem()
+        with self.assertRaises(sqlite3.OperationalError):task[1]()
+        fallback=self.service.query(producer,{})
+        self.assertIn('locked',fallback['read_state']['error'])
+        self.assertFalse(self.service.queue)
+        with self.assertRaises(sqlite3.OperationalError):self.service.query(producer,{'q':'different'})
+        fail[0]=False
+        self.service.query(producer,{},background=True)
+        self.assertNotIn('read_state',self.service.query(producer,{}))
+        self.assertFalse(self.service.retry_after.get(key))
+        self.service.invalidate()
+        self.assertFalse(self.service.retry_after)
+
+    def test_read_errors_and_invalid_queries_are_never_cached_as_success(self):
+        failure=[False]
+        def producer(reader,params):
+            return {'error':'fixture query failure'} if failure[0] else {'total':7}
+        self.service.query(producer,{})
+        failure[0]=True
+        self.service.query(producer,{},background=True)
+        self.assertEqual(self.service.query(producer,{},ttl=-1)['total'],7)
+        self.assertIn('fixture',self.service.query(producer,{},ttl=-1)['read_state']['error'])
+        self.assertEqual(self.service.query(producer,{'q':'invalid'})['error'],'fixture query failure')
+
     def test_cached_read_reports_live_ingestion_failure_and_retry_clears_it(self):
         calls = []
         def producer(reader, params):

@@ -22,6 +22,9 @@ FIELDS = ('ts', 'type', 'sig', 'sig_id', 'src', 'sport', 'dst', 'dport', 'proto'
           'method','rrtype','dns_ttl','sha256','packet_direction','ip_ttl','ip_tos','tcp_flags','tcp_window','data_len',
           'ssh_client','ssh_server','ssh_kex','ssh_cipher','command','reply_code','file','size','magic')
 
+THINKING_OPTIONS=dict(enable_thinking=True,temperature=0.6,top_p=0.95,top_k=20,
+                      presence_penalty=0.0,repeat_penalty=1.0)
+
 
 def compact(row):
     return {k: (v[:100] if isinstance(v, str) else v) for k in FIELDS
@@ -80,7 +83,7 @@ def hunt_plan_payload(context):
             data['facts'][0].pop(optional or next(reversed(data['facts'][0])))
         else:raise ValueError('关键检索证据超过本地模型上下文上限')
         data['fields']=vocabulary(data['facts'])
-    return dict(model='Qwen3.5-2B',stream=True,enable_thinking=False,temperature=0.1,max_tokens=224,
+    return dict(model='Qwen3.5-2B',stream=True,**THINKING_OPTIONS,max_tokens=224,
                 messages=[dict(role='system',content=HUNT_PROMPT),dict(role='user',content=encode())])
 
 
@@ -186,7 +189,7 @@ def summary_payload(context, hunts=()):
                 first_ts=context['first_ts'],last_ts=context['last_ts'],sampled=True)
     if context.get('first_ts') is not None and context.get('last_ts') is not None:
         meta.update({'from':math.floor(context['first_ts']/60)*60,'to':math.ceil(context['last_ts']/60)*60})
-    payload = dict(model='Qwen3.5-2B',stream=True,enable_thinking=False,temperature=0.1,
+    payload = dict(model='Qwen3.5-2B',stream=True,**THINKING_OPTIONS,
                    max_tokens=384,
                    messages=[dict(role='system',content=prompt),dict(role='user',content=encode())])
     return payload,meta
@@ -324,9 +327,37 @@ def prompt_payload(kind, data, choices):
             data['records'][0].pop(key, None)
     if len(encode().encode('utf-8')) > budget:
         raise ValueError('证据摘要超过本地模型上下文上限')
-    return dict(model='Qwen3.5-2B', stream=True, enable_thinking=False, temperature=0.1,
+    return dict(model='Qwen3.5-2B', stream=True, **THINKING_OPTIONS,
                 max_tokens=384, messages=[dict(role='system', content=prompt),
                     dict(role='user', content=encode())])
+
+
+class VisibleText:
+    """Strip tagged private reasoning, including markers split across deltas."""
+    OPEN = {'<think>':'</think>','<thinking>':'</thinking>','<analysis>':'</analysis>'}
+
+    def __init__(self):
+        self.pending='';self.closing=None
+
+    def feed(self, text, final=False):
+        self.pending+=text;visible=[]
+        while self.pending:
+            markers=(self.closing,) if self.closing else tuple(self.OPEN)
+            lowered=self.pending.lower()
+            found=[(lowered.find(marker),marker) for marker in markers if marker in lowered]
+            if found:
+                position,marker=min(found)
+                if not self.closing:visible.append(self.pending[:position])
+                self.pending=self.pending[position+len(marker):]
+                self.closing=None if self.closing else self.OPEN[marker]
+                continue
+            keep=max((size for size in range(1,min(len(self.pending),max(map(len,markers)))+1)
+                      if any(marker.startswith(lowered[-size:]) for marker in markers)),default=0)
+            if not self.closing:visible.append(self.pending[:-keep] if keep else self.pending)
+            self.pending=self.pending[-keep:] if keep else ''
+            if final:self.pending=''
+            break
+        return ''.join(visible)
 
 
 class LocalAssistant:
@@ -374,85 +405,122 @@ class LocalAssistant:
             with lifecycle:
                 if not released:
                     released=True;self.gate.release()
-        def infer(payload, allow_partial_plan=False):
+        def progress(identifier,label,state='running',detail=''):
+            return not disconnected() and send({'progress':dict(id=identifier,label=label,state=state,detail=detail)})
+        def infer(payload, allow_partial_plan=False, stream_content=False):
             nonlocal active_done
-            if disconnected() or stopped.is_set():
-                return None
-            connection = self.connection()
-            messages = queue.Queue(maxsize=1)
-            done = active_done = threading.Event()
-            transport.clear()
-            transport['connection'] = connection
+            if disconnected() or stopped.is_set():return None
+            connection=self.connection();updates=queue.Queue(maxsize=16);outcome=[]
+            done=active_done=threading.Event()
+            transport.clear();transport['connection']=connection
+            def publish(value):
+                while not stopped.is_set():
+                    try:updates.put(value,timeout=.1);return True
+                    except queue.Full:pass
+                return False
             def worker():
-                response = None
-                outcome = None
+                response=None;result=None
                 try:
                     if stopped.is_set():return
-                    connection.connect()
-                    transport['socket'] = connection.sock
+                    connection.connect();transport['socket']=connection.sock
                     connection.sock.settimeout(max(1,deadline-time.monotonic()))
                     if stopped.is_set():return
                     connection.request('POST','/v1/chat/completions',json.dumps(payload).encode(),{'Content-Type':'application/json'})
-                    response = connection.getresponse()
-                    if response.status != 200:
-                        raise ValueError('本地模型繁忙或不可用，请稍后重试')
-                    if 'text/event-stream' not in response.getheader('Content-Type',''):
-                        raise ValueError('本地模型未提供流式响应')
-                    text, finish, complete = '', None, False
+                    response=connection.getresponse()
+                    if response.status!=200:raise ValueError('本地模型繁忙或不可用，请稍后重试')
+                    if 'text/event-stream' not in response.getheader('Content-Type',''):raise ValueError('本地模型未提供流式响应')
+                    text='';finish=None;complete=False;received=0;filtering=VisibleText()
+                    pending='';last_update=0
+                    def accept(value):
+                        nonlocal text,pending,last_update
+                        text+=value
+                        if len(text)>8000:raise ValueError('本地模型响应超过上限')
+                        if stream_content:
+                            pending+=value
+                            if pending and (time.monotonic()-last_update>=.05 or len(pending)>=256):
+                                if not publish(pending):return False
+                                pending='';last_update=time.monotonic()
+                        return True
                     while not stopped.is_set():
-                        line = response.readline(32769)
+                        line=response.readline(32769)
                         if not line:break
                         if len(line)>32768:raise ValueError('本地模型响应超过上限')
                         if not line.startswith(b'data:'):continue
-                        raw = line[5:].strip()
+                        raw=line[5:].strip()
                         if raw==b'[DONE]':complete=True;break
-                        chunk = json.loads(raw)
+                        chunk=json.loads(raw)
                         if chunk.get('error'):raise ValueError('本地模型生成失败')
                         for choice in chunk.get('choices',[]):
-                            text += choice.get('delta',{}).get('content') or ''
-                            finish = choice.get('finish_reason') or finish
-                        if len(text)>8000:raise ValueError('本地模型响应超过上限')
+                            delta=choice.get('delta',{})
+                            content=delta.get('content') or ''
+                            reasoning=delta.get('reasoning_content') or ''
+                            if not isinstance(content,str) or not isinstance(reasoning,str):raise ValueError('模型响应格式无效')
+                            # Private reasoning is neither retained nor sent to the client.
+                            received+=len(content)+len(reasoning)
+                            if received>32768:raise ValueError('本地模型响应超过上限')
+                            if not accept(filtering.feed(content)):return
+                            finish=choice.get('finish_reason') or finish
                     if not stopped.is_set():
+                        if not accept(filtering.feed('',final=True)):return
+                        if pending and not publish(pending):return
                         if not complete or (not allow_partial_plan and (finish=='length' or not text.strip())):
                             raise ValueError('本地模型输出不完整，请重新生成')
-                        outcome=('text',text.strip())
+                        result=('text',text.strip())
                 except Exception as exc:
-                    outcome=('error',str(exc) if isinstance(exc,ValueError) else '本地模型连接失败或超时')
+                    result=('error',str(exc) if isinstance(exc,ValueError) else '本地模型连接失败或超时')
                 finally:
                     if response:response.close()
                     connection.close()
+                    if result:outcome.append(result)
                     done.set()
-                    if stopped.is_set():release()
-                    elif outcome:messages.put(outcome)
-            thread = threading.Thread(target=worker,daemon=True)
+                    if stopped.is_set() and active_done is done:release()
+            thread=threading.Thread(target=worker,daemon=True)
             try:thread.start()
             except BaseException:done.set();raise
+            started=False;last_heartbeat=0
             while time.monotonic()<deadline:
                 if disconnected():return None
-                try:status,value=messages.get(timeout=.2)
+                try:value=updates.get(timeout=.05)
                 except queue.Empty:
-                    if not send({'status':'generating'}):return None
+                    if done.is_set():
+                        if not outcome:raise ValueError('本地模型生成已中断')
+                        status,value=outcome[0]
+                        if status=='error':raise ValueError(value)
+                        return value
+                    if time.monotonic()-last_heartbeat>=.2:
+                        if not send({'status':'generating'}):return None
+                        last_heartbeat=time.monotonic()
                     continue
-                if status=='error':raise ValueError(value)
-                return value
+                if not started:
+                    if not send({'analysis_done':True}):return None
+                    started=True
+                if not send({'delta':value}):return None
             raise ValueError('本地模型生成超时')
         def json_output(value):
             return json.loads(value.removeprefix('```json').removeprefix('```').removesuffix('```').strip())
         try:
             if kind=='summary':
+                if not progress('evidence','读取当前会话证据'):return
                 context=app.summary_context(body['target'])
+                if not progress('evidence','已读取当前会话证据','done'):return
                 hunts=[]
+                if not progress('plan','深度分析关联检索条件'):return
                 value=infer(hunt_plan_payload(context),allow_partial_plan=True)
                 if value is None:return
                 planned,source=select_hunts(value)
                 hunt_status='invalid' if source=='invalid' else 'complete' if planned else 'not_needed'
-                for check in planned:
+                if not progress('plan','已完成检索规划','done' if source=='model' else 'warning','模型提出 '+str(len(planned))+' 项核查' if source=='model' else '未取得有效检索条件'):return
+                for number,check in enumerate(planned):
                     if disconnected():return
+                    identifier='hunt-'+str(number)
+                    if not progress(identifier,'检索关联日志',detail=check['label']):return
                     try:
                         result=app.summary_hunt({'target':body['target'],'query':check['query'],'_cancelled':disconnected})
                         result.update(label=check['label'],source='model');hunts.append(result)
+                        if not progress(identifier,'关联日志检索完成','done','命中 '+str(result['total'])+' 条日志'):return
                     except (ValueError,RuntimeError) as error:
                         hunt_status='partial'
+                        if not progress(identifier,'关联日志检索未完成','warning'):return
                         hunts.append(dict(predicate=check['query'],total=None,label=check['label'],source='model',scope='related',
                                           error='检索条件校验失败' if isinstance(error,ValueError) else '关联检索未完成，请重试',
                                           error_kind='validation' if isinstance(error,ValueError) else 'execution',records=[]))
@@ -461,26 +529,33 @@ class LocalAssistant:
                 latest['anchor']=context['anchor'];context=latest
                 if disconnected():return
                 if context.get('session_id') and hasattr(app,'summary_dns_context'):
+                    if not progress('dns','核对 DNS 候选线索'):return
                     try:context['dns_clues']=app.summary_dns_context({'session_id':context['session_id']})
                     except (ValueError,RuntimeError):context['dns_clues']=dict(status='unavailable',records=[])
+                    if not progress('dns','DNS 线索核对完成','warning' if context['dns_clues'].get('status')=='unavailable' else 'done'):return
                 if disconnected():return
                 context['hunt_status']=hunt_status
                 payload,meta=summary_payload(context,hunts)
-                value=infer(payload)
+                if not progress('compose','深度分析并组织总结'):return
+                value=infer(payload,stream_content=True)
                 if value is None:return
+                if not progress('compose','总结生成完成','done'):return
                 result=dict(text=value,model='Qwen3.5-2B',context=meta,hunt_status=hunt_status,
                             dns_clues=context.get('dns_clues',dict(status='not_applicable',records=[])),
                             hunts=[{k:v for k,v in h.items() if k!='records'} for h in hunts])
             else:
+                if not progress('evidence','读取实际协议与应用特征'):return
                 data,rows=evidence(app,body['target'])
                 context=app.summary_context(body['target'])
                 rows=[*context['records'],*rows]
                 data['records']=[compact(row) for row in rows[:8]]
                 choices=candidates(rows)
+                if not progress('evidence','协议特征读取完成','done'):return
                 if not choices:
                     send({'result':dict(unavailable=True,reason='缺少可用于检测的协议、应用或异常报头特征，未生成规则')});return
                 payload=prompt_payload(kind,data,choices)
                 choices=json.loads(payload['messages'][1]['content'])['candidates']
+                if not progress('rule','深度分析规则条件与误报限制'):return
                 value=infer(payload)
                 if value is None:return
                 try:result=rule_from_choice(json_output(value),choices)
@@ -496,7 +571,10 @@ class LocalAssistant:
                         while len(self.proposals)>=16:self.proposals.pop(next(iter(self.proposals)))
                         self.proposals[token]=dict(owner=owner,rule=result['rule'],created=time.monotonic())
                     result['proposal']=token
-            if not disconnected():send({'result':result})
+            if not disconnected():
+                if kind=='rule' and not progress('rule','规则建议整理完成','done'):return
+                if not send({'analysis_done':True}):return
+                send({'result':result})
         finally:
             stopped.set()
             upstream = transport.get('socket')
