@@ -29,24 +29,26 @@ def summarize(conn, start, end, *, table='events', push=None, parallel=None):
     response='resp_pkts' if table=='facts' else 'pkts_toclient'
     suffix=' AND '+' AND '.join(push[0]) if push and push[0] else ''
     args=[start*1000,end*1000,*(push[1] if push and push[0] else [])]
-    base='''WITH selected AS MATERIALIZED (SELECT id,ts,type,COALESCE(src,'') src,COALESCE(dst,'') dst,
-      COALESCE(app,'') app,COALESCE(proto,'') proto,COALESCE(dnsname,'') dnsname,COALESCE(sni,'') sni,
+    selection=' FROM '+table+' WHERE ts>=? AND ts<=?'+suffix
+    # Only identified records need session sorting. Each unidentified flow
+    # already represents its own connection.
+    cohort='''WITH selected AS MATERIALIZED (SELECT id,ts,type,COALESCE(src,'') src,COALESCE(dst,'') dst,
+      COALESCE(app,'') app,COALESCE(proto,'') proto,
       COALESCE(session_id,'') session_id, CASE WHEN type='flow' THEN '''+volume+''' END volume,
-      COALESCE('''+origin+''',0) orig_pkts,COALESCE('''+response+''',0) resp_pkts
-      FROM '''+table+' WHERE ts>=? AND ts<=?'+suffix+') '
-    # Exact engine identities join protocol, alert and lifecycle observations.
-    # Unidentified historical records contribute connections only as flow rows.
-    cohort=base+''', candidates AS (SELECT src,dst,proto,
+      COALESCE('''+origin+''',0) orig_pkts,COALESCE('''+response+''',0) resp_pkts'''+selection+'''),
+      candidates AS (SELECT src,dst,proto,
       ROW_NUMBER() OVER representative position,
-      FIRST_VALUE(app) OVER (PARTITION BY CASE WHEN session_id!='' THEN 'session:'||session_id ELSE 'record:'||id END
-        ORDER BY '''+APP_ORDER+''') application,
+      FIRST_VALUE(app) OVER (PARTITION BY session_id ORDER BY '''+APP_ORDER+''') application,
       MAX(volume) OVER complete payload,MAX(orig_pkts) OVER complete sent,
       MAX(resp_pkts) OVER complete received,MAX(ts) OVER complete latest
-      FROM selected WHERE session_id!='' OR type='flow'
-      WINDOW representative AS (PARTITION BY CASE WHEN session_id!='' THEN 'session:'||session_id ELSE 'record:'||id END
+      FROM selected WHERE session_id!=''
+      WINDOW representative AS (PARTITION BY session_id
         ORDER BY (type='flow') DESC,(type='session') DESC,ts DESC,id DESC),
         complete AS (representative ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)),
-      connections AS MATERIALIZED (SELECT * FROM candidates WHERE position=1)
+      connections AS MATERIALIZED (
+        SELECT src,dst,proto,application,payload,sent,received,latest FROM candidates WHERE position=1
+        UNION ALL SELECT src,dst,proto,app,volume,orig_pkts,resp_pkts,ts
+        FROM selected WHERE session_id='' AND type='flow')
       SELECT 'metrics','',COUNT(*),COALESCE(SUM(payload),0),COALESCE(SUM(sent>0 AND received>0),0),
         COALESCE(SUM((sent>0)!=(received>0)),0),MAX(latest),
         (SELECT COUNT(*) FROM (SELECT src ip FROM connections WHERE src!='' UNION SELECT dst ip FROM connections WHERE dst!=''))
@@ -57,10 +59,13 @@ def summarize(conn, start, end, *, table='events', push=None, parallel=None):
         (SELECT UPPER(proto) name,COUNT(*) n FROM connections GROUP BY UPPER(proto) ORDER BY n DESC,name LIMIT 8)
       UNION ALL SELECT 'connection_source',src,n,payload,NULL,NULL,latest,NULL FROM
         (SELECT src,COUNT(*) n,SUM(payload) payload,MAX(latest) latest FROM connections WHERE src!='' GROUP BY src ORDER BY n DESC,src LIMIT 8)'''
-    logs=base+''' SELECT 'type',type,COUNT(*),MAX(ts) FROM selected GROUP BY type
-      UNION ALL SELECT 'source',src,n,NULL FROM (SELECT src,COUNT(*) n FROM selected WHERE src!='' GROUP BY src ORDER BY n DESC,src LIMIT 8)
-      UNION ALL SELECT 'destination',dst,n,NULL FROM (SELECT dst,COUNT(*) n FROM selected WHERE dst!='' GROUP BY dst ORDER BY n DESC,dst LIMIT 8)
-      UNION ALL SELECT 'address_counts','',COUNT(DISTINCT NULLIF(src,'')),COUNT(DISTINCT NULLIF(dst,'')) FROM selected
+    logs='''WITH selected AS MATERIALIZED (SELECT ts,type,src,dst,dnsname,sni'''+selection+'''),
+      source_counts AS MATERIALIZED (SELECT src,COUNT(*) n FROM selected WHERE src!='' GROUP BY src),
+      destination_counts AS MATERIALIZED (SELECT dst,COUNT(*) n FROM selected WHERE dst!='' GROUP BY dst)
+      SELECT 'type',type,COUNT(*),MAX(ts) FROM selected GROUP BY type
+      UNION ALL SELECT 'source',src,n,NULL FROM (SELECT src,n FROM source_counts ORDER BY n DESC,src LIMIT 8)
+      UNION ALL SELECT 'destination',dst,n,NULL FROM (SELECT dst,n FROM destination_counts ORDER BY n DESC,dst LIMIT 8)
+      UNION ALL SELECT 'address_counts','',(SELECT COUNT(*) FROM source_counts),(SELECT COUNT(*) FROM destination_counts)
       UNION ALL SELECT 'dns',dnsname,n,NULL FROM (SELECT dnsname,COUNT(*) n FROM selected WHERE type='dns' AND dnsname!='' GROUP BY dnsname ORDER BY n DESC,dnsname LIMIT 8)
       UNION ALL SELECT 'tls',sni,n,NULL FROM (SELECT sni,COUNT(*) n FROM selected WHERE type='tls' AND sni!='' GROUP BY sni ORDER BY n DESC,sni LIMIT 8)'''
     connection_rows,log_rows=fetch_many(conn,[(cohort,args),(logs,args)],parallel)

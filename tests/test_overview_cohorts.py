@@ -67,6 +67,23 @@ class OverviewCohortTests(unittest.TestCase):
         direct=self.summary();cached=stats.aggregate(projection,self.low,self.high)
         direct.pop('as_of');cached.pop('as_of');self.assertEqual(cached,direct)
 
+    def test_unidentified_flows_count_separately_from_each_other_and_identified_sessions(self):
+        rows = [
+            ('flow', 'http', self.ids['a'], 20, 5, 1, 0),
+            ('session', 'tls', self.ids['a'], None, None, 0, 3),
+            ('flow', 'http', None, 7, 3, 2, 2),
+            ('flow', 'http', '', 8, 2, 1, 0),
+            ('dns', 'dns', '', None, None, 0, 0),
+        ]
+        self.db.conn.executemany('''INSERT INTO events (ts,src,dst,proto,type,app,session_id,
+            bytes_toserver,bytes_toclient,pkts_toserver,pkts_toclient) VALUES (?,?,?,?,?,?,?,?,?,?,?)''',
+            [((self.low+i)*1000,'192.0.2.99','198.51.100.1','TCP',*row)
+             for i,row in enumerate(rows,100)])
+        result = self.summary()
+        self.assertEqual((result['flows'],result['bidirectional'],result['one_way']), (5,3,1))
+        self.assertIn(dict(name='tls',count=1),result['applications'])
+        self.assertEqual(result['bytes'], 1880)
+
     def test_rolling_cohort_cache_keys_do_not_change_with_each_clock_tick(self):
         snapshots=m.NetworkSnapshots(self.db);self.addCleanup(snapshots.close)
         push=m.App._overview_push(dict(dns='example.test'),('range','start'),('range','end'))

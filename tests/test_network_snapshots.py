@@ -122,7 +122,7 @@ class NetworkSnapshotTests(unittest.TestCase):
             self.assertIsNot(calls[0], self.db.conn)
             self.assertEqual(self.db.conn.execute('SELECT COUNT(*) FROM events').fetchone()[0], 2)
 
-    def test_default_is_prewarmed_without_a_page_request_and_refreshes_periodically(self):
+    def test_default_is_prewarmed_once_and_refreshes_when_requested(self):
         self.add()
         completed = threading.Event()
         original = backend.EventDB.compute_network_summary
@@ -312,7 +312,7 @@ class NetworkSnapshotTests(unittest.TestCase):
         self.assertLessEqual(len(self.cache.entries), self.cache.MAX_ENTRIES)
         self.assertIn(self.cache.DEFAULT_KEY, self.cache.entries)
 
-    def test_inactive_custom_ranges_stop_refreshing_while_default_keeps_running(self):
+    def test_inactive_default_and_custom_ranges_pause_and_resume_on_request(self):
         bounds = dict(start=int(self.stamp) - 1, end=int(self.stamp) + 2, rolling=False)
         original = backend.EventDB.compute_network_summary
         calls = []
@@ -323,12 +323,32 @@ class NetworkSnapshotTests(unittest.TestCase):
             self.get(**bounds)
             self.cache.start()
             self.ready(**bounds)
-            # Advance the fake clock only after both initial snapshots are published.
             self.ready()
-            self.assertEqual(calls.count('custom'), 1)
             self.advance(self.cache.IDLE_SECONDS + 1)
-            self.wait_for(lambda: calls.count('default') >= 2)
+            with self.cache.condition:
+                for entry in self.cache.entries.values():
+                    self.assertFalse(self.cache._active(entry, self.tick))
+            self.assertEqual(calls, ['custom', 'default'])
+            self.get()
+            self.wait_for(lambda: calls.count('default') == 2)
             self.assertEqual(calls.count('custom'), 1)
+
+    def test_expensive_snapshot_delays_scheduled_work_but_new_range_can_load(self):
+        original = backend.EventDB.compute_network_summary
+        cpu_samples = iter((0.0, 15.0, 15.0, 16.0, 16.0, 17.0))
+        with mock.patch.object(backend.time, 'thread_time', side_effect=lambda: next(cpu_samples)):
+            with mock.patch.object(backend.EventDB, 'compute_network_summary', wraps=original) as compute:
+                self.cache.start()
+                self.ready()
+                self.assertEqual(compute.call_count, 1)
+                self.advance(self.cache.REFRESH_SECONDS)
+                self.assertAlmostEqual(self.get()['retry_seconds'], 15)
+                self.assertEqual(compute.call_count, 1)
+                self.ready(start=self.stamp-1, end=self.stamp+1, rolling=False)
+                self.assertEqual(compute.call_count, 2)
+                self.assertAlmostEqual(self.get()['retry_seconds'], 15)
+                self.advance(15)
+                self.wait_for(lambda: compute.call_count == 3)
 
     def test_shutdown_interrupts_an_active_query_and_releases_its_connection(self):
         started = threading.Event()

@@ -2122,11 +2122,12 @@ class NetworkSnapshots:
 
     REFRESH_SECONDS = 30
     MAX_AGE_SECONDS = 180
-    IDLE_SECONDS = 300
+    IDLE_SECONDS = 60
     # This is a single background reader, never an HTTP request or a pool lease.
     # A bounded longer pass can finish instead of restarting the same large sort.
     QUERY_SECONDS = 60
     QUERY_GAP_SECONDS = 1
+    CPU_DUTY = 0.25
     MAX_ENTRIES = 8
     DEFAULT_KEY = ('rolling', 86400.0)
 
@@ -2140,11 +2141,28 @@ class NetworkSnapshots:
         self.generation = db.network_generation
         self.entries = OrderedDict()
         self.last_finished = float('-inf')
-        self.entries[self.DEFAULT_KEY] = self._entry()
+        self.next_refresh = float('-inf')
+        self.entries[self.DEFAULT_KEY] = self._entry(prewarm=True)
 
-    def _entry(self):
+    def _entry(self, prewarm=False):
         return dict(result=None, error='', used=self.clock(), due=0.0,
-                    completed=0.0, running=False, failures=0, requested=False, failure_at=None)
+                    completed=0.0, running=False, failures=0, requested=False,
+                    prewarm=prewarm, failure_at=None)
+
+    def _active(self, entry, stamp):
+        return entry['prewarm'] or (entry['requested'] and stamp-entry['used'] <= self.IDLE_SECONDS)
+
+    @staticmethod
+    def _first_requested(entry):
+        return entry['requested'] and not entry['result'] and not entry['failures']
+
+    def _scheduled_at(self, entry):
+        # A newly opened range can get its first result during the refresh cooldown.
+        # Refreshes and retries across all ranges share that cooldown.
+        due = max(entry['due'], self.last_finished + self.QUERY_GAP_SECONDS)
+        if self._first_requested(entry):
+            return due
+        return max(due, self.next_refresh)
 
     def _cache_key(self, key):
         return json.dumps(['network', self.generation, key], separators=(',', ':'))
@@ -2184,9 +2202,11 @@ class NetworkSnapshots:
             snapshot = self.cache.get(self._cache_key(key)) if entry['result'] else None
             if snapshot is None and entry['result']:
                 entry.update(result=None, due=0.0)
-            age = self.clock() - entry['completed'] if snapshot is not None else None
+            stamp = self.clock()
+            age = stamp - entry['completed'] if snapshot is not None else None
             available = snapshot is not None
-            refreshing = entry['running'] or self.clock() >= entry['due']
+            due = self._scheduled_at(entry)
+            refreshing = entry['running'] or stamp >= due
             error = entry['error']
             if self.db.conn is None:
                 error = self.db.last_error or '事件库不可用'
@@ -2199,7 +2219,7 @@ class NetworkSnapshots:
                 result.update(range=None, as_of=None, computed_at=None)
             result.update(available=available, status=status, refreshing=refreshing,
                           requested_range=[start, end], refresh_seconds=self.REFRESH_SECONDS,
-                          retry_seconds=max(0,entry['due']-self.clock()),age_seconds=age, error=error)
+                          retry_seconds=max(0,due-stamp),age_seconds=age, error=error)
             return result
 
     def start(self):
@@ -2214,9 +2234,10 @@ class NetworkSnapshots:
         with self.condition:
             self._invalidate_locked()
             stamp = self.clock()
-            active = [entry for key, entry in self.entries.items()
-                      if key == self.DEFAULT_KEY or stamp - entry['used'] <= self.IDLE_SECONDS]
-            failed = [entry for entry in active if entry['error']]
+            active = [entry for entry in self.entries.values()
+                      if entry['running'] or self._active(entry, stamp)]
+            observed = active or [self.entries[self.DEFAULT_KEY]]
+            failed = [entry for entry in observed if entry['error']]
             if failed:
                 latest = max(failed, key=lambda entry: entry['failure_at'] or 0)
                 message = latest['error']
@@ -2225,6 +2246,8 @@ class NetworkSnapshots:
                 return dict(state='error', message=message, at=latest['failure_at'])
             if any(entry['result'] and stamp-entry['completed'] <= self.MAX_AGE_SECONDS for entry in active):
                 return dict(state='ok', message='已有近期统计结果')
+            if not active and observed[0]['result']:
+                return dict(state='ok', message='已有统计结果，打开概览时刷新')
             if any(entry['result'] for entry in active):
                 return dict(state='warning', message='统计结果更新延迟')
             return dict(state='pending', message='等待首次统计结果')
@@ -2295,24 +2318,30 @@ class NetworkSnapshots:
             with self.condition:
                 self._invalidate_locked()
                 stamp = self.clock()
-                active = [(k, v) for k, v in self.entries.items()
-                          if k == self.DEFAULT_KEY or stamp - v['used'] <= self.IDLE_SECONDS]
-                ready = [(k,v) for k,v in active if v['due']<=stamp]
-                key, entry = (min(ready,key=lambda pair:(not pair[1]['requested'],-pair[1]['used'])) if ready
-                              else min(active, key=lambda pair: pair[1]['due']))
-                wait = max(entry['due'], self.last_finished + self.QUERY_GAP_SECONDS) - stamp
+                active = [(k, v) for k, v in self.entries.items() if self._active(v, stamp)]
+                if not active:
+                    self.condition.wait()
+                    continue
+                ready = [(k,v) for k,v in active if self._scheduled_at(v) <= stamp]
+                key, entry = (min(ready,key=lambda pair:(not self._first_requested(pair[1]),pair[1]['due'],-pair[1]['used'])) if ready
+                              else min(active, key=lambda pair: self._scheduled_at(pair[1])))
+                wait = self._scheduled_at(entry) - stamp
                 if wait > 0:
                     self.condition.wait(timeout=min(wait, 1))
                     continue
-                entry['running'] = True
+                entry.update(running=True, prewarm=False)
                 generation = self.generation
             result, error = None, ''
+            cpu_started = time.thread_time()
             try:
                 result = self._compute(key, generation)
             except Exception as exc:  # Keep serving the last success while a bounded retry waits.
                 error = '网络统计更新失败：' + str(exc)
+            cpu_elapsed = time.thread_time() - cpu_started
             with self.condition:
                 self.last_finished = self.clock()
+                cooldown = cpu_elapsed * (1/self.CPU_DUTY - 1)
+                self.next_refresh = max(self.next_refresh, self.last_finished + cooldown)
                 self._invalidate_locked()
                 if self.stop.is_set():
                     return
