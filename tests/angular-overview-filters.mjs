@@ -55,6 +55,7 @@ try {
   await cdp('Emulation.setDeviceMetricsOverride',{width:1440,height:1100,deviceScaleFactor:1,mobile:false});
   await cdp('Page.navigate',{url:(process.env.NDR_PREVIEW_URL||'http://127.0.0.1:19090')+'/login'});await until(`!!document.querySelector('#password')`);
   await evaluate(`document.querySelector('#password').value='preview-only';document.querySelector('form').submit()`);await until(`!!document.querySelector('ndr-chart')`);
+  assert.equal(await evaluate(`document.querySelector('ndr-overview ndr-range')`),null);
   async function pointerClick(selector){
     await pause(350);const point=await evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(selector)});if(!e)throw new Error('Missing '+${JSON.stringify(selector)});e.scrollIntoView({block:'center',inline:'center'});const r=e.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}})()`);
     await cdp('Input.dispatchMouseEvent',{type:'mouseMoved',...point});
@@ -168,21 +169,21 @@ try {
       readyState = NativeEventSource.CONNECTING;
       constructor(url) {
         super();
-        if (new URL(url, location.href).searchParams.get('topic') !== 'overview') return new NativeEventSource(url);
+        const params = new URL(url, location.href).searchParams;
+        if (params.get('topic') !== 'overview') return new NativeEventSource(url);
+        window.overviewTestParams = Object.fromEntries(params);
         window.overviewTestStream = this;
       }
       close() { this.readyState = NativeEventSource.CLOSED; }
     };
     document.querySelector('[data-page="overview"]').click();
   `);
-  const trendSpinner = "ndr-overview .trend .chart-spinner";
   const redAlert = 'ndr-overview .error[role="alert"]';
-  await until(`!!document.querySelector(${JSON.stringify(trendSpinner)})`);
-  assert.equal(await evaluate(`getComputedStyle(document.querySelector(${JSON.stringify(trendSpinner)})).animationName`),'chart-spin');
+  await until(`!!window.overviewTestStream && !!document.querySelector('ndr-overview')`);
+  assert.deepEqual(await evaluate('window.overviewTestParams'),{window:'1440',view:'panel',topic:'overview'});
+  const waitingText = /正在加载|正在准备网络统计|等待重试|正在重试|更新延迟|正在更新/;
+  assert.doesNotMatch(await evaluate(`document.querySelector('ndr-overview').innerText`),waitingText);
   assert.equal(await evaluate(`document.querySelector(${JSON.stringify(redAlert)})`),null,'waiting for the first chart shows no error');
-  await cdp('Emulation.setEmulatedMedia',{features:[{name:'prefers-reduced-motion',value:'reduce'}]});
-  assert.equal(await evaluate(`getComputedStyle(document.querySelector(${JSON.stringify(trendSpinner)})).animationName`),'none');
-  await cdp('Emulation.setEmulatedMedia',{features:[]});
 
   const emitOverview = payload => execute(`
     window.overviewTestStream.readyState = EventSource.OPEN;
@@ -193,21 +194,23 @@ try {
   await until(`${errorText}?.includes('实时连接中断') && !document.querySelector('ndr-overview .chart-spinner')`);
 
   await emitOverview({...overview,network:{available:false,status:'pending'}});
-  await until(`!!document.querySelector('.network-preparing .chart-spinner') && !(${errorText})`);
+  await until(`!!document.querySelector('ndr-overview .trend ndr-chart') && !(${errorText})`);
+  assert.equal(await evaluate(`document.querySelector('.visibility-heading')`),null);
 
   const networkTimeout = '网络统计更新失败：网络统计计算超时';
   await emitOverview({...overview,network:{available:false,status:'error',error:networkTimeout,retry_seconds:30,refreshing:false}});
-  await until(`document.querySelector('.network-preparing')?.textContent.includes('等待重试') &&
-    !!document.querySelector('.network-preparing .chart-spinner') && !(${errorText})`);
+  assert.equal(await evaluate(`document.querySelector('.visibility-heading')`),null);
+  assert.equal(await evaluate(errorText),undefined);
   await emitOverview({...overview,network:{...overview.network,available:true,status:'stale',error:networkTimeout,retry_seconds:0,refreshing:true}});
-  await until(`document.querySelector('.network-update')?.textContent.includes('正在重试，显示上次结果') &&
-    !!document.querySelector('.network-update .chart-spinner') && !!document.querySelector('.visibility-grid ndr-chart') && !(${errorText})`);
+  await until(`!!document.querySelector('.visibility-grid ndr-chart') && !(${errorText})`);
+  assert.doesNotMatch(await evaluate(`document.querySelector('.network-update').innerText`),waitingText);
   await emitOverview({...overview,network:{available:false,status:'error',error:'事件库不可用'}});
-  await until(`${errorText}?.includes('事件库不可用') && !document.querySelector('.network-preparing .chart-spinner')`);
+  await until(`${errorText}?.includes('事件库不可用')`);
 
   const settledNetwork = {...overview.network,available:true,status:'ready',error:''};
   await emitOverview({...overview,network:settledNetwork,read_state:{status:'stale',as_of:1}});
-  await until(`!!document.querySelector('.trend ndr-chart svg') && !!document.querySelector(${JSON.stringify(trendSpinner)}) && !(${errorText})`);
+  await until(`!!document.querySelector('.trend ndr-chart svg') && !(${errorText})`);
+  assert.doesNotMatch(await evaluate(`document.querySelector('.trend').innerText`),waitingText);
   await emitOverview({...overview,network:settledNetwork,read_state:{status:'stale',error:'读取失败'}});
   await until(`${errorText}?.includes('读取失败') && !document.querySelector('ndr-overview .chart-spinner')`);
   await emitOverview({...overview,network:settledNetwork});

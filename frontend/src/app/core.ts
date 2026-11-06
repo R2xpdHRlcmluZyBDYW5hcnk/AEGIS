@@ -79,7 +79,7 @@ export class Api {
 // Each replacement closes the old stream and ignores in-flight replies from older queries.
 export class LiveQuery {
   private revision=0; private request?:AbortController; private source?:EventSource; private fallback?:ReturnType<typeof setInterval>;private initial?:ReturnType<typeof setTimeout>;private interruption?:ReturnType<typeof setTimeout>;
-  constructor(private api:Api,private receive:(data:any)=>void,private error:(message:string)=>void,private notice:(message:string)=>void=error){}
+  constructor(private api:Api,private receive:(data:any)=>void,private error:(message:string)=>void,private notice:((message:string)=>void)|null=error){}
   start(path:string,params:Record<string,any>,topic?:string):void {
     this.stop();const revision=this.revision;
     const accept=(data:any)=>this.api.zone.run(()=>{
@@ -88,7 +88,7 @@ export class LiveQuery {
       if(revision!==this.revision||read?.status!=='stale')return;
       const message='更新延迟，显示上次结果'+(read.as_of?'（'+date(read.as_of)+'）':'');
       if(read.error)this.error(message+'：'+read.error);
-      else this.notice(message);
+      else this.notice?.(message);
     });
     const interrupted=(message:string)=>{if(this.interruption)return;this.interruption=setTimeout(()=>{this.interruption=undefined;if(revision===this.revision&&this.source?.readyState!==EventSource.OPEN)this.api.zone.run(()=>this.error(message));},6000);};
     const fetch=()=>{if(this.request)return;const request=this.request=new AbortController();return this.api.get(path,params,request.signal).then(data=>{if(revision===this.revision&&!request.signal.aborted){clearTimeout(this.interruption);this.interruption=undefined;accept(data);}}).catch(e=>{if(revision===this.revision&&!request.signal.aborted){if(topic)interrupted(e.message);else this.api.zone.run(()=>this.error(e.message));}}).finally(()=>{if(this.request===request)this.request=undefined;});};

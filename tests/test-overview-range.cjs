@@ -16,11 +16,8 @@ function fixture(storage=new Map()){
 }
 {
  const {page}=fixture();
- assert.match(page.networkStatus({available:false,status:'pending'}),/准备/);
- assert.match(page.networkStatus({available:false,status:'error'}),/暂不可用/);
- assert.match(page.networkStatus({available:true,status:'refreshing'}),/显示上次结果/);
- assert.match(page.networkStatus({available:true,status:'stale'}),/更新延迟/);
- assert.equal(page.networkStatus({available:true,status:'ready'}),'');
+ assert.equal(page.networkRetrying({error:'网络统计更新失败：网络统计计算超时',retry_seconds:5}),true);
+ assert.equal(page.networkRetrying({error:'事件库不可用',retry_seconds:5}),false);
 }
 {
  const {page,investigations}=fixture();
@@ -30,42 +27,16 @@ function fixture(storage=new Map()){
  assert.deepEqual(investigations,['sid: 2021076','type: drop AND sig: "engine drop: flow drop"','src: "2001:db8::1"']);
 }
 {
- const {page,contexts}=fixture();page.rangeChoice='60';page.investigate('type: alert AND level: high');assert.equal(contexts.at(-1).choice,'60');
- page.rangeChoice='custom';page.customFrom='2026-10-01T09:00';page.customTo='2026-10-02T17:00';page.investigateTop({key:'signatures'},{sid:2021076});
- assert.deepEqual(contexts.at(-1),{choice:'custom',from:page.customFrom,to:page.customTo});
+ const {page,requests,storage,contexts}=fixture(new Map([[key,JSON.stringify({choice:'custom',from:'2026-10-01T09:00',to:'2026-10-02T09:00'})]]));
+ page.ngOnInit();
+ assert.deepEqual(JSON.parse(JSON.stringify(requests[0])),{path:'/api/overview',params:{window:'1440',view:'panel'},topic:'overview'});
+ page.investigate('type: alert AND level: high');
+ assert.deepEqual(contexts[0],{choice:'1440',from:'',to:''});
+ assert.deepEqual([...storage.keys()],[key],'legacy range preferences are ignored');
 }
 {
- const {page,requests,storage}=fixture();page.ngOnInit();
- assert.equal(page.rangeChoice,'1440');assert.equal(requests[0].params.window,'1440');
- page.rangeChoice='10080';page.setRange(core.timeRange(page.rangeChoice,'',''));
- const restored=fixture(storage);restored.page.ngOnInit();
- assert.equal(restored.page.rangeChoice,'10080');assert.equal(restored.requests[0].params.window,'10080');
- assert.deepEqual([...storage.keys()],[key],'only the overview preference is persisted');
- page.rangeChoice='custom';page.customFrom='2026-10-01T09:00';page.customTo='2026-10-02T17:00';
- page.setRange(core.timeRange(page.rangeChoice,page.customFrom,page.customTo));
- const custom=fixture(storage);custom.page.ngOnInit();
- assert.equal(custom.page.customFrom,page.customFrom);assert.equal(custom.page.customTo,page.customTo);
- assert.equal(custom.requests[0].params.from,String(+new Date(page.customFrom)/1000));
- assert.equal(custom.requests[0].params.to,String(+new Date(page.customTo)/1000));
- page.rangeChoice='1440';page.setRange({window:'1440'});
- const reset=fixture(storage);reset.page.ngOnInit();assert.equal(reset.requests[0].params.window,'1440');
- assert.equal(JSON.parse(storage.get(key)).from,undefined,'reset removes the custom interval');
-}
-for(const saved of ['{broken',JSON.stringify({choice:'all'}),JSON.stringify({choice:'custom',from:'invalid',to:'invalid'}),JSON.stringify({choice:'custom',from:'2026-11-02T00:00',to:'2026-11-01T00:00'})]){
- const {page,requests}=fixture(new Map([[key,saved]]));page.ngOnInit();assert.equal(requests[0].params.window,'1440');
-}
-{
- const storage={get(){throw new Error('storage blocked');},set(){throw new Error('storage blocked');}};
- const {page,requests}=fixture(storage);page.ngOnInit();assert.equal(requests[0].params.window,'1440');
- page.rangeChoice='60';page.setRange({window:'60'});assert.equal(requests[1].params.window,'60');
-}
-for(const choice of ['today','yesterday']){
- const {page,requests}=fixture(new Map([[key,JSON.stringify({choice})]]));page.ngOnInit();
- const expected=core.timeRange(choice,'','');assert.equal(requests[0].params.from,expected.from);assert.equal(requests[0].params.to,expected.to);
-}
-{
- const {page,requests,investigations}=fixture();page.ngOnInit();page.rangeChoice='15';
- page.filterKind('alerts','检测告警');assert.equal(requests.at(-1).params.detection,'alerts');assert.equal(requests.at(-1).params.window,'15');
+ const {page,requests,investigations}=fixture();page.ngOnInit();
+ page.filterKind('alerts','检测告警');assert.equal(requests.at(-1).params.detection,'alerts');assert.equal(requests.at(-1).params.window,'1440');
  page.filterTop({key:'sources',field:'src'},{ip:'2001:db8::1'});assert.equal(requests.at(-1).params.src,'2001:db8::1');
  page.filterKind('high','高危告警');assert.equal(requests.at(-1).params.detection,'high');assert.equal(page.filters.filter(f=>f.key==='kind').length,1);
  page.filterTop({key:'signatures'},{sid:498});assert.equal(requests.at(-1).params.sid,'498');
@@ -77,7 +48,7 @@ for(const choice of ['today','yesterday']){
  page.clearFilters();page.data={bucket:1};const t=Math.floor(Date.now()/1000)-120;
  page.filterTrend({point:{t},kind:'drops'});assert.equal(requests.at(-1).params.from,String(t));assert.equal(requests.at(-1).params.to,String(t+60-.001));
  assert.equal(requests.at(-1).params.detection,'drops');page.removeFilter('period');assert.equal(requests.at(-1).params.from,undefined);
- page.data={bucket:1};page.filterTrend({point:{t},kind:'alerts'});page.rangeChoice='60';page.setRange({window:'60'});
- assert.equal(requests.at(-1).params.from,undefined,'changing range clears the selected time bucket');assert.equal(requests.at(-1).params.detection,'alerts');
+ page.clearFilters();
+ assert.deepEqual({...requests.at(-1).params},{window:'1440',view:'panel'},'clearing filters restores the resident overview request');
 }
-console.log('ok - overview defaults, persistence, custom ranges, calendar presets, reset and unavailable storage');
+console.log('ok - resident overview request, investigation context and chart filters');

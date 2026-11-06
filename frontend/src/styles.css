@@ -145,7 +145,6 @@ dialog.wide{width:min(1400px,calc(100vw - 64px))}.chart-expanded{padding:4px}.ch
 .table-scroll{scrollbar-gutter:auto}
 
 .app-header{justify-content:flex-end}
-.overview-toolbar{justify-content:flex-end}
 .attack-mapping .section-heading{align-items:center;gap:16px}.attack-mapping .attack-intro{margin:0;padding:16px 18px 0;font-size:13px;color:#b3b3b3;line-height:1.7}.attack-groups{margin:0;padding:18px;display:grid;gap:20px}.attack-groups>div{display:grid;grid-template-columns:110px minmax(0,1fr);gap:20px}.attack-groups dt{font-size:13px;color:#e0e0e0;padding-top:10px}.attack-groups dt>span{display:block;margin-top:5px;font-size:12px;color:#9e9e9e}.attack-groups dd{margin:0;min-width:0;display:grid;gap:8px}.attack-entry{border:1px solid #363636;border-radius:8px;background:#1e1e1e}.attack-entry summary{cursor:pointer;display:flex;align-items:baseline;gap:12px;padding:10px 12px;font-size:13px;list-style:none}.attack-chevron{display:block;width:16px;height:16px;margin-left:auto;flex:0 0 16px;align-self:center;color:#b3b3b3;transition:transform .15s}.attack-entry[open] .attack-chevron{transform:rotate(180deg)}.attack-entry summary:hover{background:#353b35}.attack-entry summary:focus-visible{outline:2px solid #89b97c;outline-offset:-2px;border-radius:8px}.attack-code{color:#a3c79b;font-variant-numeric:tabular-nums;flex-shrink:0}.attack-entry small{font-size:12px;color:#9e9e9e}.attack-description{border-top:1px solid #303030;padding:12px;font-size:13px;line-height:1.7}.attack-description p{margin:0 0 10px;color:#b3b3b3}.attack-description a{display:inline-block;color:#9dc5e2}.attack-entry summary>span{overflow-wrap:anywhere}
 .sidebar{padding-top:24px}.sidebar .brand{margin:0 12px 32px;justify-content:flex-start;min-height:40px}.sidebar .brand-icon{width:40px;height:40px}.content-viewport{margin:8px}
 .attack-groups dd{align-self:start}.attack-entry{overflow:hidden}.attack-entry summary{min-height:44px;align-items:center;border-radius:7px}.attack-entry[open] summary{border-radius:7px 7px 0 0}
@@ -154,11 +153,8 @@ dialog.wide{width:min(1400px,calc(100vw - 64px))}.chart-expanded{padding:4px}.ch
 .card{box-shadow:var(--panel-shadow)}
 
 .chart-zoom-reset{position:absolute;top:4px;right:22px;z-index:3;padding:4px 10px;font-size:11px;min-height:26px}
-.chart-status{display:inline-flex;align-items:center;gap:8px}
-.chart-spinner{display:inline-block;flex:none;width:1em;height:1em;border:2px solid var(--line);border-top-color:#89b97c;border-radius:50%;animation:chart-spin .8s linear infinite}
-@keyframes chart-spin{to{transform:rotate(1turn)}}
 .echarts-surface{width:100%;height:280px;min-width:0}.chart-wrap .echarts-surface svg{min-height:0;overflow:hidden}.chart-expanded .echarts-surface{height:min(60vh,520px);min-height:320px}.rank-chart{padding:0 12px 12px}.chart-view-toggle{font-size:12px;padding:4px 10px}.chart-empty{position:absolute;inset:0;display:grid;place-items:center;background:var(--surface);color:var(--muted);font-size:13px}.chart-empty~button{z-index:1}
-.visibility-heading{margin:12px 0 18px}.network-update{display:flex;flex-wrap:wrap;gap:6px 18px;min-width:0}.network-preparing{margin-bottom:20px}.visibility-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px}.network-summary .stat-card{min-height:114px}.capture-directions{display:flex;gap:28px;padding:16px 22px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}.capture-directions strong{color:var(--text);font-weight:500;margin-left:8px}
+.visibility-heading{margin:12px 0 18px}.network-update{display:flex;flex-wrap:wrap;gap:6px 18px;min-width:0}.visibility-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px}.network-summary .stat-card{min-height:114px}.capture-directions{display:flex;gap:28px;padding:16px 22px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}.capture-directions strong{color:var(--text);font-weight:500;margin-left:8px}
 .badge.flow-state{font-size:11px;font-weight:400;line-height:1.4}
 
 /* Keep scrollbars within rounded shells while the inner viewport scrolls. */
