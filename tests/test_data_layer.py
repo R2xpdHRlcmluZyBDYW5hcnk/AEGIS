@@ -200,6 +200,115 @@ class DataLayerCase(unittest.TestCase):
         self.assertFalse(cache.put('large',{'data':'x'*5000}))
         self.assertIsNone(cache.get('large'))
 
+    def test_fixed_budget_and_resident_pages_survive_ordinary_lru_pressure(self):
+        self.assertEqual(m.SharedCache.budget({'preload_memory_mib':512,
+                                              'cache_memory_percent':.1,'cache_max_mib':128}),512<<20)
+        cache = m.SharedCache(4096)
+        self.assertTrue(cache.put('first', {'data':'x'*450}, resident=True))
+        for index in range(30):
+            cache.put(str(index), {'data':'x'*450})
+        self.assertEqual(cache.get('first'), {'data':'x'*450})
+        self.assertEqual(cache.stats()['resident_entries'], 1)
+        self.assertLessEqual(cache.stats()['used_bytes'], 4096)
+        cache.clear()
+        self.assertIsNone(cache.get('first'))
+        self.assertEqual(cache.stats()['resident_entries'], 0)
+
+    def wait_for_first_page(self, predicate):
+        deadline = time.monotonic() + 5
+        name = next(iter(self.service.FIRST_PAGES))
+        params = self.service.FIRST_PAGES[name]
+        while time.monotonic() < deadline:
+            result = self.cache.get(self.service.key(name, params))
+            if result is not None and predicate(result):
+                return result
+            time.sleep(.01)
+        self.fail('The background first page did not reach the expected state')
+
+    def test_first_page_updates_after_commits_and_serves_memory_without_periodic_sql(self):
+        service = self.service
+        params = service.FIRST_PAGES['hunt']
+        service.FIRST_PAGES = {'hunt':params}
+        service.FIRST_REFRESH_SECONDS = .1
+        stamp = m.now()-10
+        event = self.add('flow', stamp)
+        with mock.patch.object(service, 'execute', wraps=service.execute) as execute:
+            service.start()
+            self.wait_for_first_page(lambda page:page['total']==1)
+            self.assertEqual(execute.call_count,1)
+            revision = service.ingest_revision
+            self.db.add(*m.EventStore._parse(json.dumps(event)))
+            self.db.flush()
+            self.assertEqual(service.ingest_revision, revision)
+            for _ in range(4):
+                self.assertEqual(self.app.hunt(params)['total'],1)
+                time.sleep(.04)
+            self.assertEqual(execute.call_count,1)
+
+            original = self.db.insert_sql
+            self.db.insert_sql = 'INSERT INTO absent VALUES(?)'
+            try:
+                self.add('flow', stamp+1)
+                self.assertEqual(service.ingest_revision, revision)
+                self.assertIn('入库失败', self.app.hunt(params)['error'])
+                self.assertEqual(execute.call_count,1)
+            finally:
+                self.db.insert_sql = original
+            self.db.flush()
+            self.add('flow', stamp+2)
+            self.wait_for_first_page(lambda page:page['total']==3)
+            self.assertLessEqual(execute.call_count,3)
+            self.assertEqual(self.app.hunt(params)['total'],3)
+            self.assertEqual(self.app.hunt(dict(params, offset=50))['events'], [])
+            self.assertGreaterEqual(execute.call_count,3)
+
+            self.assertTrue(self.app.clear_history())
+            self.wait_for_first_page(lambda page:page['total']==0)
+            self.assertEqual(self.app.hunt(params)['total'],0)
+
+    def test_first_page_removes_expired_rows_without_new_events(self):
+        service = self.service
+        service.FIRST_PAGES = {'hunt':service.FIRST_PAGES['hunt']}
+        service.FIRST_REFRESH_SECONDS = .05
+        self.add('flow', m.now()-86400+.5)
+        service.start()
+        self.wait_for_first_page(lambda page:page['total']==1)
+        revision = service.ingest_revision
+        self.wait_for_first_page(lambda page:page['total']==0)
+        self.assertEqual(service.ingest_revision,revision)
+
+    def test_first_page_stream_keeps_heartbeats_and_pushes_a_committed_update(self):
+        service = self.service
+        params = service.FIRST_PAGES['hunt']
+        service.FIRST_PAGES = {'hunt':params}
+        service.FIRST_REFRESH_SECONDS = .05
+        stamp = m.now()-10
+        self.add('flow', stamp)
+        service.start()
+        self.wait_for_first_page(lambda page:page['total']==1)
+        handler = m.Handler.__new__(m.Handler)
+        handler.app = self.app
+        handler.connection = object()
+        handler.server = types.SimpleNamespace()
+        handler._session = lambda: True
+        handler._sse_start = lambda: None
+        handler.wfile = types.SimpleNamespace(write=mock.Mock(), flush=mock.Mock())
+        sent = []
+        handler._sse_send = lambda value: sent.append(value['total']) or True
+        cycles = 0
+        def wait(*_):
+            nonlocal cycles
+            cycles += 1
+            if cycles == 2:
+                self.add('flow', stamp+1)
+                self.wait_for_first_page(lambda page:page['total']==2)
+            return cycles < 3
+        handler._sse_sleep = wait
+        with mock.patch.object(m, 'disconnected', return_value=False):
+            handler._serve_stream(dict(params, topic='hunt'))
+        self.assertEqual(sent,[1,2])
+        handler.wfile.write.assert_called_once_with(b': heartbeat\n\n')
+
     def test_record_buffers_are_bounded_even_without_row_cap(self):
         records = m.BoundedRecords(100000,4096)
         records.extend({'raw':'x'*1000,'id':index} for index in range(100))

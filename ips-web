@@ -257,11 +257,15 @@ class SharedCache:
         self.limit = max(0, int(limit))
         self.target = self.limit
         self.entries = OrderedDict()
+        self.resident = set()
         self.bytes = 0
         self.lock = threading.RLock()
 
     @staticmethod
     def budget(config):
+        fixed = config.get('preload_memory_mib')
+        if fixed is not None:
+            return max(1, min(1024, int(fixed))) * (1 << 20)
         percent = min(10.0, max(0.1, float(config.get('cache_memory_percent', 2))))
         ceiling = max(1, min(1024, int(config.get('cache_max_mib', 128)))) * (1 << 20)
         try:
@@ -272,7 +276,11 @@ class SharedCache:
 
     def _trim(self):
         while self.entries and self.bytes + sys.getsizeof(self.entries) > self.target:
-            _, (_, _, weight) = self.entries.popitem(last=False)
+            key = next((key for key in self.entries if key not in self.resident), None)
+            if key is None:
+                key = next(iter(self.entries))
+            _, _, weight = self.entries.pop(key)
+            self.resident.discard(key)
             self.bytes -= weight
 
     def get(self, key, max_age=None):
@@ -284,16 +292,18 @@ class SharedCache:
             payload = entry[0]
         return json.loads(payload)
 
-    def put(self, key, value):
+    def put(self, key, value, resident=False):
         payload = json.dumps(value, ensure_ascii=False, separators=(',', ':'), default=str).encode('utf-8')
         weight = sys.getsizeof(payload) + object_bytes(key) + 128
         with self.lock:
+            if weight > min(self.target // 2, 1 << 20):
+                return False
             old = self.entries.pop(key, None)
             if old:
                 self.bytes -= old[2]
-            if weight > min(self.target // 2, 1 << 20):
-                return False
             self.entries[key] = (payload, time.monotonic(), weight)
+            if resident:
+                self.resident.add(key)
             self.bytes += weight
             self._trim()
             return key in self.entries
@@ -301,6 +311,7 @@ class SharedCache:
     def clear(self):
         with self.lock:
             self.entries.clear()
+            self.resident.clear()
             self.bytes = 0
 
     def pressure(self):
@@ -320,7 +331,9 @@ class SharedCache:
     def stats(self):
         with self.lock:
             return dict(limit_bytes=self.limit, target_bytes=self.target,
-                        used_bytes=self.bytes + sys.getsizeof(self.entries), entries=len(self.entries))
+                        used_bytes=self.bytes + sys.getsizeof(self.entries), entries=len(self.entries),
+                        resident_entries=len(self.resident),
+                        resident_bytes=sum(self.entries[key][2] for key in self.resident))
 
 
 class BoundedRecords(deque):
@@ -375,6 +388,14 @@ def data_query(ttl=2, pages=False, cache=True, seconds=20):
 
 class DataService:
     """Shared response cache, bounded read concurrency and first-page prefetch."""
+    FIRST_PAGES = {
+        'overview': {'window': '1440', 'view': 'panel'},
+        'hunt': {'window': '1440', 'limit': '50', 'offset': '0', 'view': 'list', 'icase': '1'},
+        'incidents': {'window': '1440', 'limit': '50', 'offset': '0', 'view': 'list'},
+        'events': {'window': '1440', 'limit': '50', 'offset': '0', 'view': 'list', 'type': 'drop'},
+    }
+    FIRST_REFRESH_SECONDS = 15
+
     def __init__(self, app, cache):
         self.app, self.cache = app, cache
         self.lock = threading.Lock()
@@ -389,9 +410,15 @@ class DataService:
         self.log_slots = threading.BoundedSemaphore(max(1,self.read_workers-1))
         self.background_slots = threading.BoundedSemaphore(1)
         self.stop = threading.Event()
+        self.wake = threading.Event()
         self.thread = None
         self.generation = app.db.network_generation
         self.revision = 0
+        self.ingest_revision = 0
+        self.first_updates = {}
+        self.overview_active_until = 0
+        self.overview_runtime = None
+        app.db.on_insert_commit = self.ingested
 
     @staticmethod
     def normalized(params):
@@ -401,6 +428,62 @@ class DataService:
     def key(self, name, params):
         return json.dumps(['page', self.generation, self.revision, name, self.normalized(params)],
                           sort_keys=True, separators=(',', ':'))
+
+    def first_page(self, name, params):
+        expected = self.FIRST_PAGES.get(name)
+        if expected is None:
+            return None
+        actual = self.normalized(params)
+        if name == 'overview':
+            actual.setdefault('window', '1440')
+        else:
+            actual.setdefault('offset', '0')
+        return expected if actual == expected else None
+
+    def ingested(self):
+        with self.lock:
+            self.ingest_revision += 1
+        self.wake.set()
+
+    def _first_due(self, name):
+        update = self.first_updates.get(name)
+        if update is None:
+            due = 0
+        else:
+            revision, expiry, cooldown = update
+            due = cooldown if revision != self.ingest_revision else max(cooldown, expiry)
+        retry, _ = self.retry_after.get(self.key(name, self.FIRST_PAGES[name]), (0, ''))
+        return max(due, retry)
+
+    @staticmethod
+    def _first_expiry(db, name, result):
+        low, high = result['range']
+        clause = (" AND type='drop'" if name == 'events' else
+                  " AND type IN ('alert','drop')" if name == 'incidents' else '')
+        oldest, = db.conn.execute(
+            'SELECT MIN(ts) FROM events WHERE ts>=? AND ts<=?' + clause,
+            (low * 1000, high * 1000)).fetchone()
+        future, = db.conn.execute('SELECT MIN(ts) FROM events WHERE ts>?' + clause,
+                                  (high * 1000,)).fetchone()
+        expiry = min((oldest + 1)/1000 + high-low if oldest is not None else float('inf'),
+                     future/1000 if future is not None else float('inf'))
+        if name == 'overview':
+            span = result['bucket'] * 60
+            expiry = min(expiry, (int(high // span)+1)*span)
+        return time.monotonic() + max(0, expiry - now())
+
+    def _sync_generation(self):
+        if self.generation != self.app.db.network_generation:
+            with self.lock:
+                if self.generation != self.app.db.network_generation:
+                    self.generation = self.app.db.network_generation
+                    self._clear_cache()
+
+    def _clear_cache(self):
+        self.queue.clear()
+        self.retry_after.clear()
+        self.first_updates.clear()
+        self.cache.clear()
 
     def execute(self, producer, lane='log', background=False, seconds=20, cancelled=None):
         gate=self.background_slots if background else self.panel_slots if lane=='panel' else self.log_slots
@@ -482,28 +565,30 @@ class DataService:
                     or time.monotonic()<self.retry_after.get(key,(0,''))[0]):
                 return
             self.queue[key] = (time.monotonic()+15, task)
+        self.wake.set()
 
     def query(self, function, params, ttl=2, pages=False, background=False):
         if self.stop.is_set():raise RuntimeError('查询服务正在关闭')
-        if self.generation != self.app.db.network_generation:
-            with self.lock:
-                self.generation = self.app.db.network_generation
-                self.queue.clear()
-                self.retry_after.clear()
-                self.cache.clear()
-        requested_generation = (self.app.db.network_generation,self.revision)
-        key = self.key(function.__name__, params)
-        fresh = self.cache.get(key, ttl)
+        self._sync_generation()
+        requested_generation = (self.generation,self.revision)
+        name = function.__name__
+        first = self.first_page(name, params)
+        if first is not None:
+            params = first
+        key = self.key(name, params)
+        fresh = None if background else self.cache.get(key, None if first is not None else ttl)
         # Same query/range/page only. Keep a bounded last success while one
         # background refresh retries; never cache or substitute failed results.
-        stale = fresh if fresh is not None else self.cache.get(key, 900)
-        if stale is not None and not background:
+        stale = fresh if fresh is not None or background else self.cache.get(key, 900)
+        if stale is not None:
             if fresh is None:
                 self.schedule(key, lambda: self.query(function, dict(params), ttl, False, True))
             failure = self.retry_after.get(key,(0,''))[1]
             result = stale if fresh is not None else dict(stale,read_state=dict(
                 status='stale' if failure or self.cache.get(key,30) is None else 'refreshing',
                 as_of=stale.get('as_of'),error=failure))
+            if first is not None and failure:
+                result = dict(result, read_state=dict(status='stale', as_of=result.get('as_of'), error=failure))
         else:
             with self.lock:
                 flight = self.inflight.get(key)
@@ -519,35 +604,56 @@ class DataService:
                     raise RuntimeError(flight['error'])
                 result = copy.deepcopy(flight['result'])
             else:
-                generation = (self.generation,self.revision)
+                generation = requested_generation
+                revision = self.ingest_revision
+                started = time.monotonic()
                 try:
-                    result = self.execute(lambda reader: function(reader, params),
-                                          lane='panel' if function.__name__=='overview' else 'log',background=background)
+                    def produce(reader):
+                        reader._building_first_page = first is not None
+                        value = function(reader, params)
+                        if first is not None and reader.db.last_error and not value.get('error'):
+                            value = dict(value, error=reader.db.last_error)
+                        good = not value.get('error') and not (value.get('security') or {}).get('error')
+                        expiry = self._first_expiry(reader.db, name, value) if first is not None and good else None
+                        return value, expiry
+
+                    result, expiry = self.execute(produce, lane='panel' if name=='overview' else 'log',background=background)
                     result = dict(result, as_of=result.get('as_of') or now())
                     flight['result'] = result
-                    if generation == (self.app.db.network_generation,self.revision) and not result.get('error') and not (result.get('security') or {}).get('error'):
-                        self.cache.put(key, result)
-                        with self.lock:self.retry_after.pop(key,None)
-                    elif generation == (self.app.db.network_generation,self.revision):
-                        with self.lock:
-                            self.retry_after[key]=(time.monotonic()+5,str(result.get('error') or result['security']['error']))
-                            self.retry_after.move_to_end(key)
-                            while len(self.retry_after)>16:self.retry_after.popitem(last=False)
+                    with self.lock:
+                        if generation == (self.app.db.network_generation,self.revision):
+                            error = result.get('error') or (result.get('security') or {}).get('error')
+                            if error:
+                                self._retry(key, error)
+                            elif self.cache.put(key, result, resident=first is not None):
+                                self.retry_after.pop(key,None)
+                                if first is not None:
+                                    completed = time.monotonic()
+                                    cooldown = max(self.FIRST_REFRESH_SECONDS, 4*(completed-started))
+                                    self.first_updates[name] = revision, expiry, completed + cooldown
+                            elif first is not None:
+                                self._retry(key, '首页快照超出缓存容量')
                 except Exception as exc:
                     flight['error'] = str(exc)
                     with self.lock:
                         if generation == (self.app.db.network_generation,self.revision):
-                            self.retry_after[key]=(time.monotonic()+5,str(exc))
-                            self.retry_after.move_to_end(key)
-                            while len(self.retry_after)>16:self.retry_after.popitem(last=False)
+                            self._retry(key, exc)
                     raise
                 finally:
                     with self.lock:
                         self.inflight.pop(key, None)
                         flight['event'].set()
-        if requested_generation != (self.app.db.network_generation,self.revision):
-            raise RuntimeError('历史记录已变更，请重新查询')
-        if pages and not background:
+                    if first is not None:
+                        self.wake.set()
+        if first is not None and name == 'overview' and not background:
+            self.overview_active_until = time.monotonic() + 15
+            if self.overview_runtime is not None:
+                result = dict(result, **self.overview_runtime)
+            if 'range' in result:
+                network = self.app.network.get(*result['range'], rolling=True)
+                result = dict(result, network=network, top=dict(result['top'],
+                    sources=network.get('log_sources', []), destinations=network.get('log_destinations', [])))
+        if pages and not background and first is None:
             offset, limit = int(params.get('offset') or 0), int(params.get('limit') or 50)
             if result.get('total', 0) > offset+limit:
                 following = dict(params, offset=offset+limit)
@@ -562,14 +668,21 @@ class DataService:
         write_error = self.app.db.write_error
         if write_error:
             result = dict(result, error='事件入库失败，查询结果可能未更新：' + write_error)
+        if requested_generation != (self.app.db.network_generation,self.revision):
+            raise RuntimeError('历史记录已变更，请重新查询')
         return result
+
+    def _retry(self, key, error):
+        self.retry_after[key] = (time.monotonic()+5, str(error))
+        self.retry_after.move_to_end(key)
+        while len(self.retry_after)>16:
+            self.retry_after.popitem(last=False)
 
     def invalidate(self):
         with self.lock:
             self.revision += 1
-            self.queue.clear()
-            self.retry_after.clear()
-            self.cache.clear()
+            self._clear_cache()
+        self.wake.set()
 
     def start(self):
         if self.thread is not None and self.thread.is_alive():
@@ -578,29 +691,34 @@ class DataService:
         self.thread.start()
 
     def _run(self):
-        warm_at = 0
+        pressure_at = float('inf') if self.app.config.get('preload_memory_mib') is not None else 0
         while not self.stop.is_set():
+            self.wake.clear()
+            self._sync_generation()
             stamp = time.monotonic()
-            if stamp >= warm_at:
+            if stamp >= pressure_at:
                 self.cache.pressure()
-                for name, extra in [('incidents', {}), ('events', {'type':'drop'}), ('hunt', {'icase':'1'})]:
-                    function = getattr(App, name).__wrapped__
-                    params = dict(window='1440', limit='50', offset='0', view='list', **extra)
-                    self.schedule(self.key(name, params),
-                                  lambda f=function, p=params: self.query(f, p, background=True))
-                warm_at = stamp+15
+                pressure_at = stamp + 30
             with self.lock:
-                task = self.queue.popitem(last=False)[1] if self.queue else None
-            if task and task[0] >= time.monotonic():
+                due, name = min(((self._first_due(name), name) for name, params in self.FIRST_PAGES.items()
+                                 if self.key(name, params) not in self.inflight),
+                                key=lambda item:item[0], default=(float('inf'), ''))
+                task = self.queue.popitem(last=False)[1] if due > stamp and self.queue else None
+            if due <= stamp or task:
                 try:
-                    task[1]()
+                    if due <= stamp:
+                        self.query(getattr(App, name).__wrapped__, self.FIRST_PAGES[name], background=True)
+                    elif task[0] >= stamp:
+                        task[1]()
                 except Exception:
                     pass  # Foreground reads report errors; a failed prefetch must not stop the worker.
             else:
-                self.stop.wait(.1)
+                timeout = min(due, pressure_at) - stamp
+                self.wake.wait(None if math.isinf(timeout) else max(0,timeout))
 
     def close(self):
         self.stop.set()
+        self.wake.set()
         with self.lock:
             self.queue.clear()
             for conn in self.readers:
@@ -963,19 +1081,24 @@ class EventDB:
     def flush(self):
         if self.conn is None or self.write_blocked or not self.buf:
             return
+        inserted = 0
         with self.lock:
             if self.write_blocked or not self.buf:
                 return
             rows, self.buf = self.buf, []
             try:
-                self.conn.executemany(self.insert_sql, rows)
+                cursor = self.conn.executemany(self.insert_sql, rows)
                 self.conn.commit()
+                inserted = cursor.rowcount
                 self.last_error = ""
                 self.write_error = ""
             except sqlite3.Error as exc:  # noqa: BLE001
                 self.buf = rows + self.buf
                 self._rollback_write(exc)
         self.last_flush = now()
+        on_commit = getattr(self, 'on_insert_commit', None)
+        if inserted > 0 and on_commit is not None:
+            on_commit()
 
     # -- 回收 ---------------------------------------------------------
     def _size(self):
@@ -1211,7 +1334,7 @@ class EventDB:
 
     def search_range(self, low, high, types=None, matcher=None, limit=100, offset=0,
                      max_scan=300000, need_raw=False, push=None, fields=None, dedup=False,
-                     list_view=False, matcher_spec=None):
+                     list_view=False, matcher_spec=None, include_total=True):
         self.last_truncated = False
         if self.conn is None:
             return 0, []
@@ -1249,11 +1372,14 @@ class EventDB:
             if matcher is None:
                 try:
                     page = base + " ORDER BY ts DESC LIMIT ? OFFSET ?"
-                    counts, records = self._fetch_many([
-                        ("SELECT COUNT(*)" + source,args),
-                        (page,args+[limit,offset])])
-                    total = counts[0][0] or 0
-                    if not total or offset >= total:
+                    if include_total:
+                        counts, records = self._fetch_many([
+                            ("SELECT COUNT(*)" + source,args), (page,args+[limit,offset])])
+                        total = counts[0][0] or 0
+                    else:
+                        records = self.conn.execute(page, args+[limit,offset]).fetchall()
+                        total = None
+                    if not records:
                         return total, []
                     raw_idx = self.names.index("raw")
                     rows = []
@@ -1738,7 +1864,7 @@ class EventDB:
     BLOCKED_SQL = "(type='drop' OR action='blocked')"
 
     def security_summary(self, window=60, topn=5, etype="all", start=None, end=None, dedup=False,
-                         push=None):
+                         push=None, panel=False):
         """Indexed, unsampled security events; ordinary protocol logs stay in hunting."""
         stamp = now()
         low = int((stamp - window * 60 if start is None else start) * 1000)
@@ -1750,7 +1876,7 @@ class EventDB:
         if self.conn is None:
             return dict(empty, error=self.last_error or "事件库不可用")
         with self.lock:
-            cache_key = (window, topn, etype, start, end, dedup,repr(push))
+            cache_key = (window, topn, etype, start, end, dedup,repr(push),panel)
             cached = self.summary_cache.get(cache_key)
             if cached and stamp - cached[0] < 5:
                 return cached[1]
@@ -1769,33 +1895,35 @@ class EventDB:
                     "SELECT COUNT(*), SUM("+self.DETECTION_SQL+"), SUM("+self.BLOCKED_SQL+
                     "), SUM("+self.DETECTION_SQL+" AND sev=1)" +
                     ", COUNT(DISTINCT NULLIF(src,'')), COUNT(DISTINCT NULLIF(dst,'')), MAX(ts)" +
-                    where, args)]
+                    where, args),
+                    ("SELECT sig, sev, sid, COUNT(*)" + where +
+                     " GROUP BY sig, sev, sid ORDER BY COUNT(*) DESC, sig LIMIT ?", args + (topn,))]
                 dimensions = (("sources", "src", "ip"),("destinations", "dst", "ip"),
                               ("reasons", "reason", "reason"))
-                for _,column,_ in dimensions:
-                    statements.append(("SELECT " + column + ", COUNT(*)" + where +
-                        outer + column + " != '' GROUP BY " + column +
-                        " ORDER BY COUNT(*) DESC, " + column + " LIMIT ?", args + (topn,)))
-                statements.extend([
-                    ("SELECT sig, sev, sid, COUNT(*)" + where +
-                     " GROUP BY sig, sev, sid ORDER BY COUNT(*) DESC, sig LIMIT ?", args + (topn,)),
-                    ("SELECT proto, COUNT(*)" + where + " GROUP BY proto ORDER BY COUNT(*) DESC", args),
-                    ("SELECT dport, proto, COUNT(*)" + where + outer +
-                     "dport IS NOT NULL GROUP BY dport, proto ORDER BY COUNT(*) DESC LIMIT ?",args+(topn,)),
-                    ("SELECT MIN(ts) FROM events",())])
+                if not panel:
+                    for _,column,_ in dimensions:
+                        statements.append(("SELECT " + column + ", COUNT(*)" + where +
+                            outer + column + " != '' GROUP BY " + column +
+                            " ORDER BY COUNT(*) DESC, " + column + " LIMIT ?", args + (topn,)))
+                    statements.extend([
+                        ("SELECT proto, COUNT(*)" + where + " GROUP BY proto ORDER BY COUNT(*) DESC", args),
+                        ("SELECT dport, proto, COUNT(*)" + where + outer +
+                         "dport IS NOT NULL GROUP BY dport, proto ORDER BY COUNT(*) DESC LIMIT ?",args+(topn,)),
+                        ("SELECT MIN(ts) FROM events",())])
                 rows = self._fetch_many(statements)
                 row = rows[0][0]
                 result = dict(empty, total=row[0], alerts=row[1] or 0, drops=row[2] or 0,
                               high=row[3] or 0, sources_count=row[4],
                               destinations_count=row[5], newest=(row[6] or 0) / 1000)
-                for (key,_,label),items in zip(dimensions,rows[1:4]):
-                    result[key] = [{label:value,"count":count} for value,count in items]
                 result["signatures"] = [{"sig": sig, "sev": sev, "sid": sid, "count": count}
-                    for sig, sev, sid, count in rows[4]]
-                result["protocols"] = [{"proto":proto,"count":count} for proto,count in rows[5]]
-                result["ports"] = [{"port": str(port) + '/' + proto.lower(), "count": count}
-                    for port, proto, count in rows[6]]
-                result["oldest"] = (rows[7][0][0] or 0) / 1000
+                    for sig, sev, sid, count in rows[1]]
+                if not panel:
+                    for (key,_,label),items in zip(dimensions,rows[2:5]):
+                        result[key] = [{label:value,"count":count} for value,count in items]
+                    result["protocols"] = [{"proto":proto,"count":count} for proto,count in rows[5]]
+                    result["ports"] = [{"port": str(port) + '/' + proto.lower(), "count": count}
+                        for port, proto, count in rows[6]]
+                    result["oldest"] = (rows[7][0][0] or 0) / 1000
                 self.summary_cache = {key: value for key, value in self.summary_cache.items() if stamp - value[0] < 5}
                 if len(self.summary_cache) >= 64:
                     self.summary_cache.clear()
@@ -3338,11 +3466,13 @@ class SysInfo:
         """后台采样线程算好的最近一次速率，API 只读这个，避免多客户端互相切碎间隔"""
         return dict(getattr(self, "latest_rates", {"pps": 0.0, "mbps": 0.0, "fps": 0.0}))
 
-    def sampler(self, stop=None):
+    def sampler(self, stop=None, after_sample=None):
         stop=stop if stop is not None else threading.Event()
         while not stop.is_set():
             try:
                 self.rates()
+                if after_sample is not None:
+                    after_sample()
             except Exception:  # noqa: BLE001
                 pass
             stop.wait(2)
@@ -5470,13 +5600,6 @@ class App:
         self.started = now()
         self.data = DataService(self,self.cache)
 
-    def warmup(self):
-        """启动后在后台把日志尾部读进来、并预热事件库，避免首个查询等太久"""
-        try:
-            self.data.execute(lambda reader:reader.db.search_range(now() - 3600, now()),background=True)
-        except Exception:  # noqa: BLE001
-            pass
-
     def db_loop(self):
         """Catch up bounded batches promptly; idle and failed writes yield their budget."""
         while not self.stop.is_set():
@@ -5485,7 +5608,10 @@ class App:
                 # 事件库要自己 tail 日志，不能依赖前端有没有请求
                 more=self.store.ingest()
                 self.db.flush()
+                generation = self.db.network_generation
                 self.db.maintain()
+                if generation != self.db.network_generation:
+                    self.data.wake.set()
             except Exception:  # noqa: BLE001
                 pass
             self.stop.wait(.05 if more and not self.db.write_error else .5 if not self.db.write_error else 2)
@@ -5564,6 +5690,42 @@ class App:
             evidence('sid=?',[value])
         return clauses, args
 
+    def overview_runtime(self, panel=False):
+        svc = self.sys.service()
+        counters = self.sys.counters()
+        ruleset = self.sys.ruleset()
+        queue = self.sys.queue()
+        rates = self.sys.current_rates()
+        ips = counters.get("ips", {}) if isinstance(counters, dict) else {}
+        drops = ips.get("drop_reason", {}) if isinstance(ips, dict) else {}
+        if panel:
+            svc = {key:svc.get(key) for key in ('state','memory','uptime')}
+            queue = {key:queue.get(key) for key in ('packets','kernel_drops')}
+        return {
+            'telemetry':self.sys.telemetry(),
+            "service": svc,
+            "rates": rates,
+            "queue": queue,
+            "ips": {
+                "accepted": ips.get("accepted"),
+                "blocked": ips.get("blocked"),
+                "rejected": ips.get("rejected"),
+                "rule_drops": (drops or {}).get("rules"),
+                "engine_drops": sum(v for k, v in (drops or {}).items() if k != "rules"),
+                "drop_reasons": {k: v for k, v in (drops or {}).items() if v},
+            },
+            "rules": {
+                "loaded": ruleset.get("rules_loaded"),
+                "failed": ruleset.get("rules_failed"),
+                "skipped": ruleset.get("rules_skipped"),
+                "reload": self.sys.reload_state(),
+            },
+        }
+
+    def sample_overview_runtime(self):
+        if self.data.overview_runtime is None or time.monotonic() < self.data.overview_active_until:
+            self.data.overview_runtime = self.overview_runtime(panel=True)
+
     @data_query()
     def overview(self, params=None):
         params = params or {}
@@ -5588,41 +5750,23 @@ class App:
             bucket = max(60, math.ceil(window / 720))
         if not hasattr(self,'data'):
             self.store.ingest()
-        svc = self.sys.service()
-        counters = self.sys.counters()
-        ruleset = self.sys.ruleset()
-        queue = self.sys.queue()
-        rates = self.sys.current_rates()
-        ips = counters.get("ips", {}) if isinstance(counters, dict) else {}
-        drops = ips.get("drop_reason", {}) if isinstance(ips, dict) else {}
-        agg = self.db.security_summary(window=window, topn=5, dedup=True, start=low, end=high, push=push)
-        _, recent = self.db.search_range(low, high,limit=10,list_view=True,push=push)
+        building = getattr(self, '_building_first_page', False)
+        panel = params.get('view') == 'panel'
+        runtime = self.data.overview_runtime if building else None
+        if runtime is None:
+            runtime = self.overview_runtime(panel)
+        agg = self.db.security_summary(window=window, topn=5, dedup=True, start=low, end=high, push=push, panel=panel)
+        _, recent = self.db.search_range(low, high, limit=10, list_view=True, push=push, include_total=False)
         network_push=self._overview_push(params,('range','start'),('range','end'))
-        network = self.network.get(low, high, rolling=('fixed_start' if params.get('from') else 'rolling') if not params.get('to') else False, push=network_push)
+        network = (self.db.empty_network(None) if building else
+                   self.network.get(low, high, rolling=('fixed_start' if params.get('from') else 'rolling') if not params.get('to') else False, push=network_push))
         try:
             ingest_lag = max(0, os.stat(EVE).st_size - self.store.offset)
         except OSError:
             ingest_lag = None
         result = {
             "ts": now(),
-            'telemetry':self.sys.telemetry(),
-            "service": svc,
-            "rates": rates,
-            "queue": queue,
-            "ips": {
-                "accepted": ips.get("accepted"),
-                "blocked": ips.get("blocked"),
-                "rejected": ips.get("rejected"),
-                "rule_drops": (drops or {}).get("rules"),
-                "engine_drops": sum(v for k, v in (drops or {}).items() if k != "rules"),
-                "drop_reasons": {k: v for k, v in (drops or {}).items() if v},
-            },
-            "rules": {
-                "loaded": ruleset.get("rules_loaded"),
-                "failed": ruleset.get("rules_failed"),
-                "skipped": ruleset.get("rules_skipped"),
-                "reload": self.sys.reload_state(),
-            },
+            **runtime,
             "series": self.db.security_series(window, bucket, start=low, end=high, push=push),
             "coverage": int(now() - agg["oldest"]) if agg.get("oldest") else 0,
             "security": agg,
@@ -5638,10 +5782,10 @@ class App:
             "recent": recent,
             "events_total": len(self.store.events),
         }
-        if params.get('view') == 'panel':
+        if panel:
             result['security'] = {key:agg[key] for key in ('total','alerts','drops','high','sources_count','destinations_count')}
-            result['service'] = {key:svc.get(key) for key in ('state','memory','uptime')}
-            result['queue'] = {key:queue.get(key) for key in ('packets','kernel_drops')}
+            if agg.get('error'):
+                result['security']['error'] = agg['error']
             for key in ('coverage','sensor','events_total'):
                 result.pop(key,None)
         return result
@@ -5736,8 +5880,12 @@ class App:
         total, rows = self.db.search_range(low, high, types=types, limit=limit,
                                            offset=offset, push=(clauses, args),
                                            list_view=params.get('view')=='list' and params.get('format')!='csv')
-        return {"total": total, "events": rows, "source": "db", "range": [low, high],
-                "error": self.db.last_error or None}
+        result = {"total": total, "events": rows, "source": "db", "range": [low, high],
+                  "error": self.db.last_error or None}
+        if getattr(self, '_building_first_page', False):
+            result['aggregate'] = self.db.security_summary(window=window, topn=8, etype='drop',
+                                                           start=low, end=high)
+        return result
 
     @data_query()
     def aggregate(self, params):
@@ -7327,9 +7475,9 @@ def main(argv=None):
     else:
         Handler.app.rule_schedule = RuleUpdateSchedule(Handler.app.sys)
         workers.append(threading.Thread(target=Handler.app.rule_schedule.run,args=(schedule_stop,),name='rule-schedule',daemon=True))
-    workers.extend([threading.Thread(target=Handler.app.sys.sampler,args=(Handler.app.stop,),name='engine-rates',daemon=True),
-                    threading.Thread(target=Handler.app.db_loop,name='event-ingest',daemon=True),
-                    threading.Thread(target=Handler.app.warmup,name='event-warmup',daemon=True)])
+    workers.extend([threading.Thread(target=Handler.app.sys.sampler,
+                                    args=(Handler.app.stop, Handler.app.sample_overview_runtime),name='engine-rates',daemon=True),
+                    threading.Thread(target=Handler.app.db_loop,name='event-ingest',daemon=True)])
     for worker in workers:worker.start()
     Handler.app.network.start()
     Handler.app.analytics.start()

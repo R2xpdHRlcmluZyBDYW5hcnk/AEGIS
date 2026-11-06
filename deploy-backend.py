@@ -21,7 +21,8 @@ TARGET = Path(layout()['program_dir'])/'ips-web'
 CONFIG = Path(layout()['config'])
 BACKUP_ROOT = Path('/var/backups/ips-console')
 RESOURCE_LIMITS = {'read_workers':(1,8), 'cache_memory_percent':(.1,10),
-                   'cache_max_mib':(1,1024), 'stats_batch_size':(128,8192), 'stats_duty_percent':(5,80),
+                   'cache_max_mib':(1,1024), 'preload_memory_mib':(1,1024),
+                   'stats_batch_size':(128,8192), 'stats_duty_percent':(5,80),
                    'llm_summary_max_tokens':(384,1024)}
 
 

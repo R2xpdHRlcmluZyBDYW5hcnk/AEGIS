@@ -21,7 +21,8 @@ class BackendDeploymentCase(unittest.TestCase):
     def test_resource_validation_and_whitelist(self):
         self.assertEqual(deployer.resource_overrides({'read_workers':4,'password_pbkdf2':'ignored'}),{'read_workers':4})
         self.assertEqual(deployer.resource_overrides({'llm_summary_max_tokens':1024}),{'llm_summary_max_tokens':1024})
-        for values in ({'read_workers':0},{'stats_batch_size':100000},{'cache_memory_percent':float('nan')},{'llm_summary_max_tokens':4096}):
+        self.assertEqual(deployer.resource_overrides({'preload_memory_mib':512}),{'preload_memory_mib':512})
+        for values in ({'read_workers':0},{'stats_batch_size':100000},{'cache_memory_percent':float('nan')},{'llm_summary_max_tokens':4096},{'preload_memory_mib':1025}):
             with self.assertRaises(ValueError):
                 deployer.resource_overrides(values)
 

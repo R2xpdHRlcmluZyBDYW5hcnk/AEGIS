@@ -37,7 +37,9 @@ export class EventsComponent implements OnInit,OnDestroy {
   this.offset=this.requestedOffset;
   this.rows=(data.incidents||data.events||[]).map((r:any)=>({...r,summary:r.sig||r.sni||r.dns||r.host||r.reason||r.type}));
   this.total=total;this.asOf=data.as_of||data.ts||0;this.truncated=!!data.truncated;this.error='';this.busy=false;
-  if(this.mode==='drops'&&(!this.offset||!this.aggregate))void this.loadAggregate(data.range);
+  if(this.mode==='drops'&&data.aggregate){
+   this.aggregateRequest?.abort();this.aggregate=data.aggregate;this.state.viewReady(this.mode);
+  }else if(this.mode==='drops'&&(!this.offset||!this.aggregate))void this.loadAggregate(data.range);
   else this.state.viewReady(this.mode);
  }
  ngOnInit():void{const saved=this.state.views.get('events:'+this.mode);if(saved)Object.assign(this,saved);if(this.mode==='hunt'){if(!saved)this.realtime=false;if(!saved||saved.seenInvestigation!==this.state.investigation())this.applyInvestigation();void this.api.get('/api/hunt/schema').then(d=>this.api.zone.run(()=>this.fields=completeHuntFields(d.fields||[]))).catch(e=>this.state.toast(e.message));}this.initialized=true;this.loadPage(this.offset);}
