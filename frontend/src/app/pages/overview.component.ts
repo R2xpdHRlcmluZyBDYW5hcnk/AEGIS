@@ -21,8 +21,8 @@ import { eventType } from '../event-fields';
   <section class="card engine-card"><header><h2>检测引擎</h2><span class="badge" [class.good]="d.service?.state==='active'">{{d.service?.state==='active'?'运行中':d.service?.state}}</span></header><div class="throughput">{{d.rates?.mbps | number:'1.2-2'}} <small>Mbps</small></div><p class="muted">{{d.rates?.pps | number:'1.0-0'}} packets / sec</p><dl class="key-values"><dt>生效文本规则</dt><dd>{{d.rules?.loaded | number}}</dd><dt>内存占用</dt><dd>{{memory(d.service?.memory)}}</dd><dt>运行时长</dt><dd>{{d.service?.uptime | number}} 秒</dd><dt>NFQUEUE 积压</dt><dd>{{d.queue?.packets | number}}</dd><dt>内核丢包</dt><dd>{{d.queue?.kernel_drops | number}}</dd></dl></section></div>
   <div class="three-grid"><section class="card" *ngFor="let top of tops"><header><h2>{{top.title}}</h2><button class="quiet chart-view-toggle" (click)="top.table=!top.table" [attr.aria-label]="top.title+(top.table?'查看图表':'查看表格')">{{top.table?'图表':'表格'}}</button></header><ndr-chart *ngIf="!top.table" [ranks]="d.top?.[top.key] || []" [labelKey]="top.key==='signatures'?'sig':'ip'" [title]="top.title" (rowOpen)="filterTop(top,$event)"/><ndr-table *ngIf="top.table" [id]="top.key" [columns]="top.columns" [rows]="d.top?.[top.key] || []" [pagination]="false" [fit]="true" [interactive]="true" (rowOpen)="filterTop(top,$event)"/></section></div>
   <ng-container *ngIf="d.network as n">
-   <div class="section-heading visibility-heading"><h2>网络可见性</h2><div class="network-update muted" role="status" aria-live="polite"><span *ngIf="n.computed_at">更新于 {{formatDate(n.computed_at)}}</span><span *ngIf="n.available!==false">已记录连接载荷 {{memory(n.bytes)}}</span><span class="chart-status" *ngIf="n.available!==false && (n.status==='refreshing'||n.status==='stale')"><span *ngIf="n.status==='refreshing' && !error && !n.error && hasNetworkCharts" class="chart-spinner" aria-hidden="true"></span>{{networkStatus(n)}}</span></div></div>
-   <p [class.error]="!n.available" [class.muted]="n.available" [attr.role]="n.available?'status':'alert'" *ngIf="n.error">{{n.error}}</p>
+   <div class="section-heading visibility-heading"><h2>网络可见性</h2><div class="network-update muted" role="status" aria-live="polite"><span *ngIf="n.computed_at">更新于 {{formatDate(n.computed_at)}}</span><span *ngIf="n.available!==false">已记录连接载荷 {{memory(n.bytes)}}</span><span class="chart-status" *ngIf="n.available!==false && (n.status==='refreshing'||n.status==='stale')"><span *ngIf="showNetworkSpinner(n)" class="chart-spinner" aria-hidden="true"></span>{{networkStatus(n)}}</span></div></div>
+   <p [class.error]="!n.available" [class.muted]="n.available" [attr.role]="n.available?'status':'alert'" *ngIf="n.error && !networkRetrying(n)">{{n.error}}</p>
    <ng-container *ngIf="n.available!==false;else networkPreparing">
    <div class="stats-grid network-summary">
     <button class="stat-card" (click)="filterKind('connection','连接记录')" [attr.aria-pressed]="hasKind('connection')"><span>连接记录</span><strong>{{n.flows | number}}</strong></button>
@@ -32,7 +32,7 @@ import { eventType } from '../event-fields';
    </div>
    <div class="visibility-grid"><section class="card" *ngFor="let top of networkTops"><header><h2>{{top.title}}</h2><button class="quiet chart-view-toggle" (click)="top.table=!top.table">{{top.table?'图表':'表格'}}</button></header><ndr-chart *ngIf="!top.table" [ranks]="n[top.key] || []" labelKey="name" [title]="top.title" (rowOpen)="filterNetwork(top,$event)"/><ndr-table *ngIf="top.table" [id]="'network-'+top.key" [columns]="networkColumns" [rows]="n[top.key] || []" [pagination]="false" [fit]="true" [interactive]="true" (rowOpen)="filterNetwork(top,$event)"/></section></div>
    <div class="visibility-grid"><section class="card"><header><h2>高频连接源</h2></header><ndr-table id="network-sources" [columns]="sourceColumns" [rows]="n.sources || []" [pagination]="false" [fit]="true" [interactive]="true" (rowOpen)="filterConnectionSource($event)"/></section><section class="card"><header><h2>采集记录分布</h2><span class="muted">{{n.records | number}} 条记录</span></header><ndr-table id="network-types" [columns]="typeColumns" [rows]="n.event_types || []" [pagination]="false" [fit]="true" [interactive]="true" (rowOpen)="filterRecordType($event)"/><div class="capture-directions"><span>双向连接记录 <strong>{{n.bidirectional | number}}</strong></span><span>单向连接记录 <strong>{{n.one_way | number}}</strong></span></div></section></div>
-   </ng-container><ng-template #networkPreparing><div class="empty card network-preparing" role="status"><span class="chart-status"><span *ngIf="n.status==='pending' && !error && !n.error && hasNetworkCharts" class="chart-spinner" aria-hidden="true"></span>{{networkStatus(n)}}</span></div></ng-template>
+   </ng-container><ng-template #networkPreparing><div class="empty card network-preparing" role="status"><span class="chart-status"><span *ngIf="showNetworkSpinner(n)" class="chart-spinner" aria-hidden="true"></span>{{networkStatus(n)}}</span></div></ng-template>
    </ng-container>
   <section class="card"><header><h2>最新日志</h2></header><ndr-table id="recent" [columns]="recentColumns" [rows]="(d.recent || []).slice(0,10)" [pagination]="false" [interactive]="true" (rowOpen)="details.event($event)"/></section>
   <details class="card telemetry engine-counters"><summary>累计引擎计数</summary><dl class="counter-grid"><div><dt>放行包</dt><dd>{{d.ips?.accepted | number}}</dd></div><div><dt>阻断包</dt><dd>{{d.ips?.blocked | number}}</dd></div><div><dt>规则丢包</dt><dd>{{d.ips?.rule_drops | number}}</dd></div><div><dt>引擎丢包</dt><dd>{{d.ips?.engine_drops | number}}</dd></div></dl></details>
@@ -55,12 +55,23 @@ export class OverviewComponent implements OnInit,OnDestroy {
   this.live=new LiveQuery(api,d=>{this.data=d;this.error='';this.refreshNotice='';this.state.viewReady('overview');},e=>{this.error=e;this.state.viewReady('overview');},message=>{this.refreshNotice=message;});
  }
  networkStatus(network:any):string{
+  if(this.networkRetrying(network)){
+   const status=network.refreshing?'网络统计计算超时，正在重试':'网络统计计算超时，等待重试';
+   return status+(network.available?'，显示上次结果':'…');
+  }
   if(network.available===false)return network.status==='error'?'网络统计暂不可用，稍后重试':'正在准备网络统计…';
   return network.status==='stale'?'更新延迟，显示上次结果':network.status==='refreshing'?'正在更新，显示上次结果':'';
  }
+ networkRetrying(network:any):boolean{
+  // Existing servers send the timeout as text, together with the scheduled retry delay.
+  return network.error==='网络统计更新失败：网络统计计算超时' && Number.isFinite(network.retry_seconds);
+ }
+ showNetworkSpinner(network:any):boolean{
+  if(this.error||!this.networkTops.some(top=>!top.table))return false;
+  return this.networkRetrying(network)||(!network.error&&(network.status==='pending'||network.status==='refreshing'));
+ }
  investigate(query:string):void{this.state.investigate(query,undefined,{choice:this.rangeChoice,from:this.customFrom,to:this.customTo});}
  networkTops=[{key:'applications',title:'连接应用分布',field:'app',type:'flow',table:false},{key:'protocols',title:'连接传输协议',field:'proto',type:'flow',table:false},{key:'dns_names',title:'高频 DNS 域名',field:'dns',type:'dns',table:false},{key:'tls_names',title:'高频 TLS 服务器名称',field:'sni',type:'tls',table:false}];
- get hasNetworkCharts():boolean{return this.networkTops.some(top=>!top.table);}
  trendColumns:Column[]=[{key:'t',label:'时间',kind:'time',width:180},{key:'alerts',label:'告警数',width:110},{key:'drops',label:'阻断数',width:110}];
  networkColumns:Column[]=[{key:'name',label:'名称',width:280},{key:'count',label:'记录数',width:90}];
  sourceColumns:Column[]=[{key:'ip',label:'源地址',width:200},{key:'count',label:'连接记录',width:100},{key:'bytes',label:'流量',kind:'bytes',width:110},{key:'latest',label:'最后出现',kind:'time',width:180}];

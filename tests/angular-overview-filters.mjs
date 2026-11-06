@@ -194,6 +194,14 @@ try {
 
   await emitOverview({...overview,network:{available:false,status:'pending'}});
   await until(`!!document.querySelector('.network-preparing .chart-spinner') && !(${errorText})`);
+
+  const networkTimeout = '网络统计更新失败：网络统计计算超时';
+  await emitOverview({...overview,network:{available:false,status:'error',error:networkTimeout,retry_seconds:30,refreshing:false}});
+  await until(`document.querySelector('.network-preparing')?.textContent.includes('等待重试') &&
+    !!document.querySelector('.network-preparing .chart-spinner') && !(${errorText})`);
+  await emitOverview({...overview,network:{...overview.network,available:true,status:'stale',error:networkTimeout,retry_seconds:0,refreshing:true}});
+  await until(`document.querySelector('.network-update')?.textContent.includes('正在重试，显示上次结果') &&
+    !!document.querySelector('.network-update .chart-spinner') && !!document.querySelector('.visibility-grid ndr-chart') && !(${errorText})`);
   await emitOverview({...overview,network:{available:false,status:'error',error:'事件库不可用'}});
   await until(`${errorText}?.includes('事件库不可用') && !document.querySelector('.network-preparing .chart-spinner')`);
 
