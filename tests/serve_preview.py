@@ -273,6 +273,8 @@ app.db.flush()
 app.analytics = m.StoredNetworkStats(app.db)
 app.db.analytics = app.analytics
 app.network = m.NetworkSnapshots(app.db,cache=app.cache)
+if os.environ.get('NDR_PREVIEW_OVERVIEW') == '1':
+    app.recent_events = m.RecentEvents(app.db, 16 << 20)
 app.data = m.DataService(app,app.cache)
 app.analytics.start()
 app.data.start()

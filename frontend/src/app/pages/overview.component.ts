@@ -1,17 +1,17 @@
 import { ModalComponent } from '../modal.component';
 import { Component, OnDestroy, OnInit, ChangeDetectionStrategy } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { Api, ConsoleState, LiveQuery, bytes, date } from '../core';
+import { Api, ConsoleState, LiveQuery, bytes, date, localDate } from '../core';
 import { ChartComponent } from '../chart.component';
 import { ChartViewport } from '../chart-viewport';
 import { TableComponent, Column } from '../table.component';
 import { Details } from '../details.component';
 import { eventType } from '../event-fields';
-const overviewWindow='1440';
 @Component({changeDetection:ChangeDetectionStrategy.Eager,selector:'ndr-overview',standalone:true,imports:[ModalComponent,CommonModule,ChartComponent,TableComponent],template:`
  <div class="overview-filters" *ngIf="filters.length" aria-label="概览筛选"><span>当前筛选</span><button class="quiet" *ngFor="let filter of filters" (click)="removeFilter(filter.key)" [attr.aria-label]="'移除筛选 '+filter.label">{{filter.label}} ×</button><button class="quiet" (click)="clearFilters()">清除筛选</button></div>
  <p *ngIf="filterPending || showingPrevious" class="muted" data-testid="overview-filter-status" role="status">{{filterPending ? '正在应用筛选' : '当前筛选尚无结果'}}{{showingPrevious ? '，暂显示上一次结果' : ''}}</p>
  <p *ngIf="error" class="error" role="alert">{{error}}</p>
+ <p *ngIf="data?.range as range" class="muted" data-testid="overview-range">统计范围 {{formatDate(range[0])}} 至 {{formatDate(range[1])}}</p>
  <ng-container *ngIf="data as d"><p class="muted telemetry-status" role="status" *ngIf="d.telemetry?.stale||d.telemetry?.updating">{{d.telemetry?.as_of?'引擎指标采样于 '+formatDate(d.telemetry.as_of):'尚未取得引擎指标样本'}} <span class="badge">{{d.telemetry?.updating?'规则任务进行中':'等待新样本'}}</span></p><div class="stats-grid resource-summary"><h2>检测概况</h2>
   <button class="stat-card alert" (click)="filterKind('alerts','检测告警')" [attr.aria-pressed]="hasKind('alerts')"><span>检测告警</span><strong data-testid="alerts-total">{{d.security?.alerts | number}}</strong></button>
   <button class="stat-card critical" (click)="filterKind('high','高危告警')" [attr.aria-pressed]="hasKind('high')"><span>高危告警</span><strong data-testid="high-total">{{d.security?.high | number}}</strong></button>
@@ -57,7 +57,14 @@ export class OverviewComponent implements OnInit,OnDestroy {
   // Existing servers send the timeout as text, together with the scheduled retry delay.
   return network.error==='网络统计更新失败：网络统计计算超时' && Number.isFinite(network.retry_seconds);
  }
- investigate(query:string):void{this.state.investigate(query,undefined,{choice:overviewWindow,from:'',to:''});}
+ investigate(query:string):void{
+  const range=this.data?.range;
+  const local=(stamp:number)=>{
+   const value=new Date(Math.round(stamp*1000));
+   return localDate(value)+':'+String(value.getSeconds()).padStart(2,'0')+'.'+String(value.getMilliseconds()).padStart(3,'0');
+  };
+  this.state.investigate(query,undefined,range?{choice:'custom',from:local(range[0]),to:local(range[1])}:undefined);
+ }
  networkTops=[{key:'applications',title:'连接应用分布',field:'app',type:'flow',table:false},{key:'protocols',title:'连接传输协议',field:'proto',type:'flow',table:false},{key:'dns_names',title:'高频 DNS 域名',field:'dns',type:'dns',table:false},{key:'tls_names',title:'高频 TLS 服务器名称',field:'sni',type:'tls',table:false}];
  trendColumns:Column[]=[{key:'t',label:'时间',kind:'time',width:180},{key:'alerts',label:'告警数',width:110},{key:'drops',label:'阻断数',width:110}];
  networkColumns:Column[]=[{key:'name',label:'名称',width:280},{key:'count',label:'记录数',width:90}];
@@ -93,17 +100,20 @@ export class OverviewComponent implements OnInit,OnDestroy {
  filterConnectionSource(row:any):void{this.applyFilter('src','连接源 '+row.ip,{src:row.ip,connection:'1'});}
  filterRecordType(row:any):void{this.filterKind(row.name,eventType(row.name)+' 相关会话');}
  filterTrend(event:{point:{t:number};kind:'alerts'|'drops'}):void{
-  const step=Number(this.data?.bucket)*60;if(!step||!Number.isFinite(event.point.t))return;
-  this.period={from:event.point.t,to:event.point.t+step-.001};this.expandedChart=false;
+  const step=Number(this.data?.bucket)*60,range=this.data?.range;
+  if(!step||!range||!Number.isFinite(event.point.t))return;
+  const from=Math.max(range[0],event.point.t),to=Math.min(range[1],event.point.t+step-.001);
+  if(to<from)return;
+  this.period={from,to};this.expandedChart=false;
   this.filters=this.filters.filter(f=>f.key!=='kind'&&f.key!=='period');
-  this.filters.push({key:'period',label:date(event.point.t)+' 至 '+date(event.point.t+step),params:{}});
+  this.filters.push({key:'period',label:date(from)+' 至 '+date(to),params:{}});
   this.filterKind(event.kind,event.kind==='alerts'?'检测告警':'阻断事件');
  }
  private refresh():void{
-  const selected:Record<string,string>={window:overviewWindow};
+  const selected:Record<string,string>={scope:'cache'};
   if(this.period){
-   const high=Date.now()/1000,low=high-Number(overviewWindow)*60;
-   selected['from']=String(Math.max(low,this.period.from));selected['to']=String(Math.max(Number(selected['from']),Math.min(high,this.period.to)));
+   selected['from']=String(this.period.from);
+   selected['to']=String(this.period.to);
   }
   for(const filter of this.filters)Object.assign(selected,filter.params);
   this.chartViewport.reset();this.showingPrevious=!!this.data;this.filterPending=this.showingPrevious||this.filters.length>0;

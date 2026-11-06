@@ -200,6 +200,70 @@ class DataLayerCase(unittest.TestCase):
         self.assertFalse(cache.put('large',{'data':'x'*5000}))
         self.assertIsNone(cache.get('large'))
 
+    def test_recent_events_drive_overview_and_choose_source_for_time_ranges(self):
+        self.service.close()
+        recent = self.app.recent_events = m.RecentEvents(self.db, 96 << 10)
+        self.service = self.app.data = m.DataService(self.app, self.cache)
+        self.app.overview_runtime = lambda panel: {}
+        self.app.network = m.NetworkSnapshots(self.db, cache=self.cache)
+        self.app.network.entries[self.app.network.DEFAULT_KEY]['prewarm'] = False
+        self.app.ingest_lag = lambda: 0
+        stamp = int(m.now()) - 60
+        self.assertEqual(self.service.overview_health()['state'], 'pending')
+        self.add('alert', stamp-172800)
+        self.add('drop', stamp)
+        while recent.refresh(self.service.ingest_revision, self.service.stop):
+            pass
+        scope = {'scope':'cache', 'view':'panel'}
+        overview = self.app.overview(scope)
+        self.assertEqual((overview['source'], overview['range']), ('memory', [stamp-172800, stamp]))
+        self.assertEqual(self.service.overview_health()['range'], overview['range'])
+        components = {item['id']:item for item in self.app.component_health({'state':'active','pid':1}, {}, {})}
+        self.assertEqual((components['network']['state'], components['history-network']['state']), ('ok', 'idle'))
+        self.assertEqual(self.app.overview(dict(scope, detection='drops'))['network']['records'], 1)
+
+        generator = random.Random(71)
+        self.db.conn.executemany('INSERT INTO events (ts,type,src,sig,sev,raw) VALUES (?,?,?,?,?,?)', (
+            ((stamp+offset)*1000, 'drop', '192.0.2.1', 'drop fixture', 1,
+             m.zlib.compress(generator.randbytes(7000))) for offset in range(30)))
+        self.db.conn.commit()
+        self.service.ingested()
+        while recent.refresh(self.service.ingest_revision, self.service.stop):
+            pass
+        self.assertGreater(recent.floor, stamp*1000)
+        pages, = recent.conn.execute('PRAGMA page_count').fetchone()
+        size, = recent.conn.execute('PRAGMA page_size').fetchone()
+        self.assertLessEqual(pages*size, 96 << 10)
+        low, high = recent.bounds
+        self.assertLessEqual(low, high)
+        self.assertEqual(self.app.overview(dict(scope, detection='drops', src='192.0.2.1'))['range'], list(recent.bounds))
+
+        for method, field in ((self.app.events,'events'), (self.app.hunt,'events'), (self.app.incidents,'incidents')):
+            with self.subTest(method=method.__name__):
+                selected = {'from':str(low), 'to':str(high), 'view':'list', 'limit':'2'}
+                memory = method(selected)
+                disk = method(dict(selected, source='db'))
+                self.assertEqual((memory['source'], disk['source']), ('memory', 'db'))
+                self.assertEqual(memory['total'], disk['total'])
+                self.assertEqual(memory[field], disk[field])
+                self.assertEqual(method(dict(selected, **{'from':str(stamp-172800)}))['source'], 'db')
+        self.db.conn.executemany('INSERT INTO events (ts,type,raw) VALUES (?,?,?)', (
+            ((stamp+30)*1000, 'alert', m.zlib.compress(generator.randbytes(7000))) for _ in range(30)))
+        self.db.conn.commit()
+        self.service.ingested()
+        self.add('drop', stamp+31)
+        while recent.refresh(self.service.ingest_revision, self.service.stop):
+            pass
+        self.assertEqual(recent.bounds, (stamp+31, stamp+31))
+        self.assertEqual(self.app.hunt({'from':str(stamp+30), 'to':str(stamp+31), 'view':'list'})['total'], 31)
+        self.assertTrue(self.app.clear_history())
+        self.assertEqual(self.service.overview_health()['state'], 'pending')
+        with self.assertRaisesRegex(RuntimeError, '正在准备'):
+            self.app.overview(scope)
+        while recent.refresh(self.service.ingest_revision, self.service.stop):
+            pass
+        self.assertEqual(self.app.overview(scope)['network']['records'], 0)
+
     def test_fixed_budget_and_resident_pages_survive_ordinary_lru_pressure(self):
         self.assertEqual(m.SharedCache.budget({'preload_memory_mib':512,
                                               'cache_memory_percent':.1,'cache_max_mib':128}),512<<20)

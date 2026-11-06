@@ -182,7 +182,7 @@ try {
   `);
   const redAlert = 'ndr-overview .error[role="alert"]';
   await until(`!!window.overviewTestStream && !!document.querySelector('ndr-overview')`);
-  assert.deepEqual(await evaluate('window.overviewTestParams'),{window:'1440',view:'panel',topic:'overview'});
+  assert.deepEqual(await evaluate('window.overviewTestParams'),{scope:'cache',view:'panel',topic:'overview'});
   const waitingText = /正在加载|正在准备网络统计|等待重试|正在重试|更新延迟|正在更新/;
   assert.doesNotMatch(await evaluate(`document.querySelector('ndr-overview').innerText`),waitingText);
   assert.equal(await evaluate(`document.querySelector(${JSON.stringify(redAlert)})`),null,'waiting for the first chart shows no error');

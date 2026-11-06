@@ -13,7 +13,7 @@
 
 import argparse
 import base64
-from contextlib import contextmanager, nullcontext
+from contextlib import closing, contextmanager, nullcontext
 from types import SimpleNamespace
 from itertools import chain
 import math
@@ -378,9 +378,10 @@ def data_query(ttl=2, pages=False, cache=True, seconds=20):
             if service is None or getattr(app, '_data_reader', False):
                 return function(app, params)
             if not cache or params.get('format') == 'csv' or params.get('source') in ('file', 'memory'):
-                return service.execute(lambda reader: function(reader, params),seconds=seconds,cancelled=params.get('_cancelled'))
+                return service.execute(lambda reader: function(reader, params),seconds=seconds,
+                                       cancelled=params.get('_cancelled'),event_query=(function.__name__, params))
             if pages and params.get('view') != 'list':
-                return service.execute(lambda reader: function(reader, params))
+                return service.execute(lambda reader: function(reader, params),event_query=(function.__name__, params))
             return service.query(function, params, ttl, pages)
         return call
     return decorate
@@ -398,6 +399,9 @@ class DataService:
 
     def __init__(self, app, cache):
         self.app, self.cache = app, cache
+        self.recent = getattr(app, 'recent_events', None)
+        if self.recent is not None:
+            self.FIRST_PAGES = dict(self.FIRST_PAGES, overview={'scope':'cache', 'view':'panel'})
         self.lock = threading.Lock()
         self.inflight, self.queue = {}, OrderedDict()
         self.retry_after = OrderedDict()
@@ -434,9 +438,9 @@ class DataService:
         if expected is None:
             return None
         actual = self.normalized(params)
-        if name == 'overview':
+        if name == 'overview' and 'window' in expected:
             actual.setdefault('window', '1440')
-        else:
+        elif name != 'overview':
             actual.setdefault('offset', '0')
         return expected if actual == expected else None
 
@@ -451,7 +455,7 @@ class DataService:
             due = 0
         else:
             revision, expiry, cooldown = update
-            due = cooldown if revision != self.ingest_revision else max(cooldown, expiry)
+            due = cooldown if revision != self._page_revision(name) else max(cooldown, expiry)
         retry, _ = self.retry_after.get(self.key(name, self.FIRST_PAGES[name]), (0, ''))
         return max(due, retry)
 
@@ -472,6 +476,27 @@ class DataService:
             expiry = min(expiry, (int(high // span)+1)*span)
         return time.monotonic() + max(0, expiry - now())
 
+    def _page_revision(self, name):
+        if name == 'overview' and self.recent is not None:
+            return self.recent.version
+        return self.ingest_revision
+
+    def overview_health(self):
+        recent = self.recent
+        if recent.error:
+            return dict(state='error', message='最近事件缓存读取失败：' + recent.error)
+        if recent.bounds is None or recent.generation != self.app.db.network_generation:
+            return dict(state='pending', message='正在预热最近事件缓存')
+        key = self.key('overview', self.FIRST_PAGES['overview'])
+        with self.lock:
+            _, error = self.retry_after.get(key, (0, ''))
+        snapshot = self.cache.get(key)
+        if error and error != '正在准备最近事件缓存，请稍后重试':
+            return dict(state='warning' if snapshot else 'error', message='概览统计更新失败：' + error)
+        if snapshot is None:
+            return dict(state='pending', message='正在生成概览统计')
+        return dict(state='ok', message='已生成内存概览统计', range=snapshot['range'], at=snapshot['as_of'])
+
     def _sync_generation(self):
         if self.generation != self.app.db.network_generation:
             with self.lock:
@@ -485,7 +510,87 @@ class DataService:
         self.first_updates.clear()
         self.cache.clear()
 
-    def execute(self, producer, lane='log', background=False, seconds=20, cancelled=None):
+    def _read_recent(self, producer, event_query, cancelled, seconds):
+        recent = self.recent
+        if recent is None or event_query is None:
+            return False, None
+        name, params = event_query
+        defaults = {'overview':1440, 'incidents':1440, 'hunt':60, 'events':60, 'aggregate':60}
+        if name not in defaults or params.get('source') in ('file','memory','db'):
+            return False, None
+        all_history = name == 'hunt' and params.get('all') == '1'
+        cache_scope = name == 'overview' and params.get('scope') == 'cache' and not (
+            params.get('from') or params.get('to'))
+        stamp = now()
+        if all_history:
+            if recent.warming or recent.floor >= 0 or recent.revision != self.ingest_revision:
+                return False, None
+            bounds = (0, stamp)
+        elif not cache_scope:
+            try:
+                window = int(params.get('window') or defaults[name])
+                if name != 'hunt':
+                    window = max(1, min(43200, window))
+                low = float(params['from']) if params.get('from') else stamp - window*60
+                high = float(params['to']) if params.get('to') else stamp
+            except (TypeError, ValueError, OverflowError):
+                return False, None
+            if not (math.isfinite(low) and math.isfinite(high) and 0 <= low <= high
+                    and recent.covers(low, high, stamp, self.ingest_revision)):
+                return False, None
+            bounds = (low, high)
+        if not recent.lock.acquire(timeout=5):
+            raise RuntimeError('最近事件缓存查询繁忙，请稍后重试')
+        try:
+            source = self.app.db
+            if recent.bounds is None or recent.generation != source.network_generation:
+                if cache_scope:
+                    raise RuntimeError('正在准备最近事件缓存，请稍后重试')
+                return False, None
+            if cache_scope:
+                bounds = recent.bounds
+            elif all_history:
+                if recent.warming or recent.floor >= 0 or recent.revision != self.ingest_revision:
+                    return False, None
+            elif not recent.covers(*bounds, stamp, self.ingest_revision):
+                return False, None
+            deadline = time.monotonic() + min(20, max(.01, seconds))
+            def interrupted():
+                return cancelled() or time.monotonic() > deadline or recent.generation != source.network_generation
+            if interrupted():
+                raise RuntimeError('查询已取消或历史记录已变更')
+            conn = recent.conn
+            db = copy.copy(source)
+            db.conn, db.lock, db.query_state = conn, recent.lock, threading.local()
+            db.summary_cache, db.visibility_cache, db.last_error, db.read_health = {}, {}, '', {}
+            db.parallel, db.cpu_cancelled = None, interrupted
+            if hasattr(db, 'summary_cursor'):
+                del db.summary_cursor
+            reader = copy.copy(self.app)
+            reader.db, reader._data_reader = db, True
+            reader._event_read_stamp, reader._recent_bounds = stamp, bounds
+            conn.set_progress_handler(interrupted, 10000)
+            with self.lock:
+                self.readers.add(conn)
+            try:
+                value = producer(reader)
+                if interrupted():
+                    raise RuntimeError('最近事件缓存查询中断或超时')
+                return True, value
+            except sqlite3.OperationalError as exc:
+                if getattr(exc, 'sqlite_errorcode', None) == sqlite3.SQLITE_INTERRUPT:
+                    raise RuntimeError('最近事件缓存查询中断或超时') from exc
+                raise
+            finally:
+                conn.set_progress_handler(None, 0)
+                if conn.in_transaction:
+                    conn.rollback()
+                with self.lock:
+                    self.readers.discard(conn)
+        finally:
+            recent.lock.release()
+
+    def execute(self, producer, lane='log', background=False, seconds=20, cancelled=None, event_query=None):
         gate=self.background_slots if background else self.panel_slots if lane=='panel' else self.log_slots
         gates=[gate] if background else [gate,self.slots]
         acquired=[];conn = None;attached_summary=False
@@ -503,6 +608,9 @@ class DataService:
             source = self.app.db
             if source.conn is None:
                 raise RuntimeError(source.last_error or '事件库不可用')
+            handled, result = self._read_recent(producer, event_query, is_cancelled, seconds)
+            if handled:
+                return result
             conn = sqlite3.connect(Path(source.path).resolve().as_uri()+'?mode=ro', uri=True, timeout=1)
             conn.execute('PRAGMA query_only=ON')
             conn.execute('PRAGMA cache_size=-2048')
@@ -572,6 +680,9 @@ class DataService:
         self._sync_generation()
         requested_generation = (self.generation,self.revision)
         name = function.__name__
+        if name == 'overview' and self.recent is not None and not any(
+                params.get(key) for key in ('scope','window','from','to')):
+            params = dict(params, scope='cache')
         first = self.first_page(name, params)
         if first is not None:
             params = first
@@ -605,7 +716,7 @@ class DataService:
                 result = copy.deepcopy(flight['result'])
             else:
                 generation = requested_generation
-                revision = self.ingest_revision
+                revision = self._page_revision(name)
                 started = time.monotonic()
                 try:
                     def produce(reader):
@@ -614,10 +725,13 @@ class DataService:
                         if first is not None and reader.db.last_error and not value.get('error'):
                             value = dict(value, error=reader.db.last_error)
                         good = not value.get('error') and not (value.get('security') or {}).get('error')
-                        expiry = self._first_expiry(reader.db, name, value) if first is not None and good else None
+                        expiry = None
+                        if first is not None and good:
+                            expiry = float('inf') if params.get('scope') == 'cache' else self._first_expiry(reader.db, name, value)
                         return value, expiry
 
-                    result, expiry = self.execute(produce, lane='panel' if name=='overview' else 'log',background=background)
+                    result, expiry = self.execute(produce, lane='panel' if name=='overview' else 'log',
+                                                  background=background,event_query=(name, params))
                     result = dict(result, as_of=result.get('as_of') or now())
                     flight['result'] = result
                     with self.lock:
@@ -649,7 +763,7 @@ class DataService:
             self.overview_active_until = time.monotonic() + 15
             if self.overview_runtime is not None:
                 result = dict(result, **self.overview_runtime)
-            if 'range' in result:
+            if 'range' in result and result.get('source') != 'memory':
                 network = self.app.network.get(*result['range'], rolling=True)
                 result = dict(result, network=network, top=dict(result['top'],
                     sources=network.get('log_sources', []), destinations=network.get('log_destinations', [])))
@@ -692,10 +806,17 @@ class DataService:
 
     def _run(self):
         pressure_at = float('inf') if self.app.config.get('preload_memory_mib') is not None else 0
+        recent_at = 0 if self.recent is not None else float('inf')
         while not self.stop.is_set():
             self.wake.clear()
             self._sync_generation()
             stamp = time.monotonic()
+            if stamp >= recent_at:
+                try:
+                    pending = self.recent.refresh(self.ingest_revision, self.stop)
+                    recent_at = time.monotonic() + (.05 if pending else 1)
+                except sqlite3.Error:
+                    recent_at = time.monotonic() + 2
             if stamp >= pressure_at:
                 self.cache.pressure()
                 pressure_at = stamp + 30
@@ -713,7 +834,7 @@ class DataService:
                 except Exception:
                     pass  # Foreground reads report errors; a failed prefetch must not stop the worker.
             else:
-                timeout = min(due, pressure_at) - stamp
+                timeout = min(due, pressure_at, recent_at) - stamp
                 self.wake.wait(None if math.isinf(timeout) else max(0,timeout))
 
     def close(self):
@@ -726,6 +847,9 @@ class DataService:
         if self.thread is not None:
             self.thread.join(timeout=5)
         self.sql.close()
+        if self.recent is not None:
+            with self.recent.lock:
+                self.recent.conn.close()
 
 
 def iso(ts):
@@ -922,6 +1046,13 @@ class EventDB:
                        "dns_ttl", "wire_bytes_toserver", "wire_bytes_toclient", *__import__('snort_engine').PACKET_NUMBER_FIELDS,
                        *["appid_"+name+"_id" for name in ("service","client","payload","misc","referred")]}
 
+    @classmethod
+    def event_schema(cls):
+        columns = ['id INTEGER PRIMARY KEY']
+        columns.extend(name + (' INTEGER' if name in cls.NUMERIC_COLUMNS else ' TEXT')
+                       for name, _ in cls.COLUMNS if name != 'id')
+        return 'CREATE TABLE IF NOT EXISTS events (' + ', '.join(columns) + ')'
+
     def __init__(self, path, cap=None, retention_days=None):
         self.path = path
         self.conn = None
@@ -960,16 +1091,9 @@ class EventDB:
             self.conn.execute("PRAGMA synchronous=FULL")
             self.conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
             self.conn.execute("PRAGMA journal_size_limit=67108864")
-            defs = []
-            for column, _ in self.COLUMNS:
-                if column == "id":
-                    continue
-                sql_type = "INTEGER" if column in self.NUMERIC_COLUMNS else "TEXT"
-                defs.append("%s %s" % (column, sql_type))
-            defs.insert(0, "id INTEGER PRIMARY KEY")
             # Only an identical source record is a duplicate. Timestamp, tuple
             # and SID can coincide across generators, packets and sessions.
-            self.conn.execute("CREATE TABLE IF NOT EXISTS events (%s)" % ", ".join(defs))
+            self.conn.execute(self.event_schema())
             self.conn.execute('CREATE TABLE IF NOT EXISTS event_state (key TEXT PRIMARY KEY,value TEXT NOT NULL)')
             self.conn.execute('INSERT OR IGNORE INTO event_state VALUES(?,?)',('clear_epoch',secrets.token_hex(16)))
             floor=self.conn.execute("SELECT value FROM event_state WHERE key='stream_cutoff'").fetchone()
@@ -1983,6 +2107,153 @@ class EventDB:
                 return False
 
 
+class RecentEvents:
+    """A byte-bounded, timestamp-ordered suffix of the committed event database."""
+
+    BATCH = 128
+
+    def __init__(self, source, budget):
+        self.source = source
+        self.lock = threading.RLock()
+        self.conn = sqlite3.connect(':memory:', check_same_thread=False)
+        self.conn.execute('PRAGMA temp_store=MEMORY')
+        self.page_size, = self.conn.execute('PRAGMA page_size').fetchone()
+        self.conn.execute('PRAGMA max_page_count=' + str(budget // self.page_size))
+        self.conn.execute(source.event_schema())
+        self.conn.execute('CREATE INDEX idx_events_ts ON events(ts)')
+        self.conn.execute('CREATE INDEX idx_events_type_ts ON events(type,ts)')
+        self.conn.execute('CREATE INDEX idx_events_session_ts ON events(session_id,ts) WHERE session_id IS NOT NULL')
+        self.conn.execute('CREATE TEMP TABLE overview_matches (id INTEGER PRIMARY KEY)')
+        self.columns = ['id', *source.names]
+        self.ts_index = self.columns.index('ts')
+        self.select = 'SELECT ' + ','.join(self.columns) + ' FROM events'
+        self.insert = 'INSERT INTO events VALUES (' + ','.join('?' for _ in self.columns) + ')'
+        self.generation = None
+        self.version = 0
+        self.as_of = None
+        self.revision = None
+        self.floor = -1
+        self.before = None
+        self.cursor = 0
+        self.warming = True
+        self.bounds = None
+        self.future = None
+        self.bytes = 0
+        self.error = ''
+
+    def _insert(self, rows):
+        try:
+            with self.conn:
+                self.conn.executemany(self.insert, rows)
+        except sqlite3.OperationalError as exc:
+            if getattr(exc, 'sqlite_errorcode', None) != sqlite3.SQLITE_FULL:
+                raise
+            return False
+        return True
+
+    def _warm(self, disk):
+        where, args = ' WHERE ts>=0 AND id<=?', [self.cursor]
+        if self.before is not None:
+            where += ' AND (ts,id)<(?,?)'
+            args.extend(self.before)
+        rows = disk.execute(self.select + where + ' ORDER BY ts DESC,id DESC LIMIT ?',
+                            [*args, self.BATCH]).fetchall()
+        count = len(rows)
+        if rows and not self._insert(rows):
+            count = 0
+            for row in rows:
+                if not self._insert((row,)):
+                    break
+                count += 1
+        if count < len(rows):
+            self.floor, self.warming = rows[count][self.ts_index], False
+            with self.conn:
+                self.conn.execute('DELETE FROM events WHERE ts<=?', (self.floor,))
+        elif len(rows) < self.BATCH:
+            self.floor, self.warming = -1, False
+        else:
+            self.floor = rows[-1][self.ts_index]
+            self.before = (self.floor, rows[-1][0])
+        return bool(rows)
+
+    def _advance(self, disk, stamp, revision):
+        rows = disk.execute(self.select + ' WHERE id>? ORDER BY id LIMIT ?',
+                            (self.cursor, self.BATCH)).fetchall()
+        incoming = [row for row in rows if row[self.ts_index] is not None and row[self.ts_index] > self.floor]
+        if incoming and not self._insert(incoming):
+            # Keep the newest suffix even when a whole ingestion batch cannot fit.
+            for row in sorted(incoming, key=lambda item: item[self.ts_index]):
+                timestamp = row[self.ts_index]
+                while timestamp > self.floor and not self._insert((row,)):
+                    removed = self.conn.execute('SELECT ts FROM events WHERE ts<? ORDER BY ts LIMIT 8',
+                                                (timestamp,)).fetchall()
+                    self.floor = removed[-1][0] if removed else timestamp
+                    with self.conn:
+                        self.conn.execute('DELETE FROM events WHERE ts<=?', (self.floor,))
+        if rows:
+            self.cursor = rows[-1][0]
+        if len(rows) < self.BATCH:
+            self.as_of, self.revision = stamp, revision
+        return bool(rows)
+
+    def refresh(self, revision, stopped):
+        if self.source.conn is None or not self.lock.acquire(blocking=False):
+            return False
+        try:
+            generation = self.source.network_generation
+            if generation == self.generation and not self.warming and self.revision == revision:
+                stamp = now()
+                if self.future is not None and stamp >= self.future:
+                    self.as_of = stamp
+                    self._update_bounds()
+                    self.version += 1
+                return False
+            uri = Path(self.source.path).resolve().as_uri() + '?mode=ro'
+            with closing(sqlite3.connect(uri, uri=True, timeout=1)) as disk:
+                disk.set_progress_handler(lambda: stopped.is_set() or generation != self.source.network_generation, 10000)
+                stamp = now()
+                disk.execute('BEGIN')
+                if generation != self.generation:
+                    with self.conn:
+                        self.conn.execute('DELETE FROM events')
+                    self.cursor, = disk.execute('SELECT COALESCE(MAX(id),0) FROM events').fetchone()
+                    self.generation = generation
+                    self.as_of, self.revision = stamp, revision
+                    self.floor, self.before, self.warming = -1, None, True
+                    self.bounds = None
+                    self.version += 1
+                was_warming = self.warming
+                changed = self._warm(disk) if was_warming else self._advance(disk, stamp, revision)
+            if changed or was_warming:
+                self.version += 1
+            self._update_bounds()
+            self.error = ''
+            return self.warming or self.revision != revision
+        except sqlite3.Error as exc:
+            # A failed refresh must not advertise a partially updated range.
+            self.generation, self.bounds = None, None
+            self.version += 1
+            if not stopped.is_set() and generation == self.source.network_generation:
+                self.error = str(exc)
+            raise
+        finally:
+            self.lock.release()
+
+    def _update_bounds(self):
+        args = (self.floor, self.as_of * 1000)
+        low, = self.conn.execute('SELECT MIN(ts) FROM events WHERE ts>? AND ts<=?', args).fetchone()
+        high, = self.conn.execute('SELECT MAX(ts) FROM events WHERE ts>? AND ts<=?', args).fetchone()
+        future, = self.conn.execute('SELECT MIN(ts) FROM events WHERE ts>?', (max(args),)).fetchone()
+        self.bounds = (low / 1000, high / 1000) if low is not None else (self.as_of, self.as_of)
+        self.future = future / 1000 if future is not None else None
+        self.bytes = self.conn.execute('PRAGMA page_count').fetchone()[0] * self.page_size
+
+    def covers(self, low, high, stamp, revision):
+        upper = stamp if self.revision == revision else self.as_of
+        # Round the excluded edge conservatively before reusing SQLite's seconds-to-ms conversion.
+        return self.bounds is not None and upper is not None and low * 1000 >= self.floor + 1 and high <= upper
+
+
 class StoredNetworkStats:
     """Rebuildable disk projection: time buckets and frequencies, never raw evidence."""
     COLUMNS = ('id','ts','type','event_key','b','src','dst','app','proto','dnsname','sni',
@@ -2358,12 +2629,14 @@ class NetworkSnapshots:
             self.thread = threading.Thread(target=self._run, name='network-snapshots', daemon=True)
             self.thread.start()
 
-    def health(self):
+    def health(self, on_demand=False):
         with self.condition:
             self._invalidate_locked()
             stamp = self.clock()
             active = [entry for entry in self.entries.values()
                       if entry['running'] or self._active(entry, stamp)]
+            if on_demand and not active:
+                return dict(state='idle', message='查询历史范围时生成')
             observed = active or [self.entries[self.DEFAULT_KEY]]
             failed = [entry for entry in observed if entry['error']]
             if failed:
@@ -5587,8 +5860,10 @@ class App:
         self.db = EventDB(config.get("event_db") or EVENT_DB)
         self.db.cpu = shared_cpu()
         self.cache_budget = SharedCache.budget(config)
-        self.cache = SharedCache(self.cache_budget*3//4)
+        self.cache = SharedCache(self.cache_budget//8)
+        self.recent_events = RecentEvents(self.db, self.cache_budget*5//8)
         self.network = NetworkSnapshots(self.db,cache=self.cache)
+        self.network.entries[self.network.DEFAULT_KEY]['prewarm'] = False
         self.analytics = StoredNetworkStats(self.db,config.get('stats_batch_size',1024),
                                             config.get('stats_duty_percent',20))
         self.db.analytics = self.analytics
@@ -5745,16 +6020,24 @@ class App:
     def overview(self, params=None):
         params = params or {}
         try:
-            stamp = now()
+            stamp = self._event_read_time()
             window = max(1, min(43200, int(params.get('window') or 1440)))
-            low = float(params['from']) if params.get('from') else stamp - window * 60
-            high = float(params['to']) if params.get('to') else stamp
+            if hasattr(self, '_recent_bounds'):
+                low, high = self._recent_bounds
+            else:
+                low = float(params['from']) if params.get('from') else stamp - window * 60
+                high = float(params['to']) if params.get('to') else stamp
             if not (math.isfinite(low) and math.isfinite(high)) or low < 0 or high < low:
                 raise ValueError('invalid time range')
         except (TypeError, ValueError, OverflowError):
             raise ValueError('时间参数无效')
         window = max(1, math.ceil((high - low) / 60))
         push = self._overview_push(params, low, high)
+        if hasattr(self, '_recent_bounds') and push[0]:
+            # Evaluate session membership once for all aggregates and the recent rows.
+            self.db.conn.execute('INSERT INTO overview_matches SELECT id FROM events WHERE ts>=? AND ts<=? AND '
+                                 + ' AND '.join(push[0]), [low*1000, high*1000, *push[1]])
+            push = (['id IN (SELECT id FROM overview_matches)'], [])
         if window <= 15:
             bucket = 1      # 15 分钟视图：1 分钟一个点
         elif window <= 60:
@@ -5772,15 +6055,22 @@ class App:
             runtime = self.overview_runtime(panel)
         agg = self.db.security_summary(window=window, topn=5, dedup=True, start=low, end=high, push=push, panel=panel)
         _, recent = self.db.search_range(low, high, limit=10, list_view=True, push=push, include_total=False)
-        network_push=self._overview_push(params,('range','start'),('range','end'))
-        network = (self.db.empty_network(None) if building else
-                   self.network.get(low, high, rolling=('fixed_start' if params.get('from') else 'rolling') if not params.get('to') else False, push=network_push))
+        if hasattr(self, '_recent_bounds'):
+            network = dict(self.db.compute_network_summary(self.db.conn, low, high, push=push),
+                           available=True, status='ready', computed_at=self.recent_events.as_of)
+        elif building:
+            network = self.db.empty_network(None)
+        else:
+            network_push = self._overview_push(params, ('range','start'), ('range','end'))
+            rolling = not params.get('to') and ('fixed_start' if params.get('from') else 'rolling')
+            network = self.network.get(low, high, rolling=rolling, push=network_push)
         try:
             ingest_lag = max(0, os.stat(EVE).st_size - self.store.offset)
         except OSError:
             ingest_lag = None
         result = {
             "ts": now(),
+            "source": self._event_source(),
             **runtime,
             "series": self.db.security_series(window, bucket, start=low, end=high, push=push),
             "coverage": int(now() - agg["oldest"]) if agg.get("oldest") else 0,
@@ -5805,12 +6095,19 @@ class App:
                 result.pop(key,None)
         return result
 
+    def _event_read_time(self):
+        return getattr(self, '_event_read_stamp', None) or now()
+
+    def _event_source(self):
+        return 'memory' if hasattr(self, '_recent_bounds') else 'db'
+
     @staticmethod
-    def _incident_range(params):
+    def _incident_range(params, stamp=None):
         try:
+            stamp = now() if stamp is None else stamp
             window = max(1, min(43200, int(params.get("window") or 1440)))
-            low = float(params["from"]) if params.get("from") else now() - window * 60
-            high = float(params["to"]) if params.get("to") else now()
+            low = float(params["from"]) if params.get("from") else stamp - window * 60
+            high = float(params["to"]) if params.get("to") else stamp
             if not (math.isfinite(low) and math.isfinite(high)) or low < 0 or high < low:
                 raise ValueError("invalid time range")
             return low, high
@@ -5821,7 +6118,7 @@ class App:
     def incidents(self, params):
         if not hasattr(self,'data'):
             self.store.ingest()
-        low, high = self._incident_range(params)
+        low, high = self._incident_range(params, self._event_read_time())
         try:
             offset = max(0, int(params.get("offset") or 0))
             limit = min(500, max(1, int(params.get("limit") or 50)))
@@ -5833,7 +6130,7 @@ class App:
         total, incidents = self.db.security_incidents(
             low, high, sev=sev, proto=params.get("proto") or None,
             q=(params.get("q") or "").strip(), offset=offset, limit=limit)
-        return {"total": total, "incidents": incidents, "source": "db", "range": [low, high],
+        return {"total": total, "incidents": incidents, "source": self._event_source(), "range": [low, high],
                 "error": self.db.last_error or None}
 
     @data_query(cache=False)
@@ -5862,9 +6159,10 @@ class App:
         if not hasattr(self,'data'):
             self.store.ingest()
         try:
+            stamp = self._event_read_time()
             window = max(1, min(43200, int(params.get("window") or 60)))
-            low = float(params["from"]) if params.get("from") else now() - window * 60
-            high = float(params["to"]) if params.get("to") else now()
+            low = float(params["from"]) if params.get("from") else stamp - window * 60
+            high = float(params["to"]) if params.get("to") else stamp
             limit = min(CSV_EXPORT_LIMIT if params.get("format") == "csv" else 500,
                         max(1, int(params.get("limit") or 100)))
             offset = max(0, int(params.get("offset") or 0))
@@ -5895,7 +6193,7 @@ class App:
         total, rows = self.db.search_range(low, high, types=types, limit=limit,
                                            offset=offset, push=(clauses, args),
                                            list_view=params.get('view')=='list' and params.get('format')!='csv')
-        result = {"total": total, "events": rows, "source": "db", "range": [low, high],
+        result = {"total": total, "events": rows, "source": self._event_source(), "range": [low, high],
                   "error": self.db.last_error or None}
         if getattr(self, '_building_first_page', False):
             result['aggregate'] = self.db.security_summary(window=window, topn=8, etype='drop',
@@ -5907,10 +6205,11 @@ class App:
         if not hasattr(self,'data'):
             self.store.ingest()
         try:
+            stamp = self._event_read_time()
             window = max(1, min(43200, int(params.get("window") or 60)))
-            start = float(params["from"]) if params.get("from") else None
-            end = float(params["to"]) if params.get("to") else None
-            low, high = now() - window * 60 if start is None else start, now() if end is None else end
+            start = float(params["from"]) if params.get("from") else stamp - window * 60
+            end = float(params["to"]) if params.get("to") else stamp
+            low, high = start, end
             if not (math.isfinite(low) and math.isfinite(high)) or low < 0 or high < low:
                 raise ValueError("invalid time range")
         except (ValueError, TypeError, OverflowError):
@@ -6127,7 +6426,10 @@ class App:
                        for key,value in [line.split(':',1)] if key in ('VmRSS','VmHWM')}
         except (OSError,ValueError):
             process = {}
+        recent = getattr(self, 'recent_events', None)
         return dict(responses=self.cache.stats(),budget_bytes=self.cache_budget,
+                    recent_events_bytes=recent.bytes if recent is not None else 0,
+                    recent_events_range=recent.bounds if recent is not None and recent.generation == self.db.network_generation else None,
                     read_workers=self.data.read_workers,statistics_batch_size=self.analytics.batch_size,
                     statistics_duty_percent=self.analytics.duty_percent,
                     record_buffer_bytes=sum(getattr(pool,'bytes',0) for pool in (self.store.events,self.store.strong)),
@@ -6138,6 +6440,7 @@ class App:
 
     @data_query(pages=True)
     def hunt(self, params):
+        stamp = self._event_read_time()
         try:
             window = int(params.get("window") or 60)
         except (TypeError, ValueError):
@@ -6159,8 +6462,8 @@ class App:
         raw_to = params.get("to")
         if raw_from or raw_to:
             try:
-                low_ts = float(raw_from) if raw_from else now() - window * 60
-                high_ts = float(raw_to) if raw_to else now()
+                low_ts = float(raw_from) if raw_from else stamp - window * 60
+                high_ts = float(raw_to) if raw_to else stamp
             except (TypeError, ValueError):
                 return {"error": "时间区间参数无法解析（应为 Unix 秒）", "total": 0,
                         "events": [], "query": query}
@@ -6168,7 +6471,7 @@ class App:
                 return {"error": "时间区间无效", "total": 0, "events": [], "query": query}
             window = max(1, int((high_ts - low_ts) / 60) + 1)
         else:
-            low_ts, high_ts = now() - window * 60, now()
+            low_ts, high_ts = stamp - window * 60, stamp
 
         query = (params.get("q") or "").strip()
         matcher = None
@@ -6216,7 +6519,7 @@ class App:
                                                      fields=used,
                                                      list_view=params.get('view')=='list',
                                                      push=(push_sql, push_args) if push_sql else None,matcher_spec=matcher_spec)
-            return {"total": total, "events": rows, "query": query, "source": "db",
+            return {"total": total, "events": rows, "query": query, "source": self._event_source(),
                     "range": [low_ts, high_ts], "truncated": self.db.last_truncated}
         # 默认走事件库（有索引、覆盖完整）；库为空时退回内存缓冲
         if source != "memory":
@@ -6226,7 +6529,7 @@ class App:
                                                      list_view=params.get('view')=='list',
                                                      push=(push_sql, push_args) if push_sql else None,matcher_spec=matcher_spec)
             if total or source == "db" or params.get('view')=='list':
-                return {"total": total, "events": rows, "query": query, "source": "db",
+                return {"total": total, "events": rows, "query": query, "source": self._event_source(),
                         "range": [low_ts, high_ts], "truncated": self.db.last_truncated}
         # 显式勾选"检索日志"时才扫文件（扫 200MB 要几秒，不默认做）
         extra = dict(matcher_spec=query_spec,cancelled=getattr(self.db,'cpu_cancelled',None)) if getattr(self.store,'cpu',None) is not None else {}
@@ -6623,8 +6926,14 @@ class App:
             projection = ('ok', '已生成统计索引')
         else:
             projection = ('pending', '正在生成统计索引')
-        components.append(item('projection', '网络统计索引', *projection))
-        components.append(dict(id='network', name='网络统计结果', **self.network.health()))
+        recent = getattr(self, 'recent_events', None)
+        if recent is None:
+            components.append(item('projection', '网络统计索引', *projection))
+            components.append(dict(id='network', name='网络统计结果', **self.network.health()))
+        else:
+            components.append(dict(id='network', name='概览网络统计', **self.data.overview_health()))
+            components.append(item('projection', '磁盘统计索引', *projection))
+            components.append(dict(id='history-network', name='历史网络统计', **self.network.health(on_demand=True)))
         return components
 
     def system_payload(self, params=None):
