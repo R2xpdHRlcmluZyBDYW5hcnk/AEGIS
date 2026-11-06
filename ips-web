@@ -1855,9 +1855,9 @@ class EventDB:
                     sources=[], event_types=[],log_sources=[],log_destinations=[])
 
     @staticmethod
-    def compute_network_summary(conn, start, end, push=None, parallel=None):
+    def compute_network_summary(conn, start, end, push=None, parallel=None, publish_base=None):
         from overview_metrics import summarize
-        return summarize(conn,start,end,push=push,parallel=parallel)
+        return summarize(conn,start,end,push=push,parallel=parallel,publish_base=publish_base)
 
     # Detection and enforcement are overlapping facts, not exclusive log types.
     DETECTION_SQL = "(type='alert' OR (type='drop' AND sid>0 AND alert_suppressed IS NULL))"
@@ -2209,7 +2209,7 @@ class StoredNetworkStats:
         if self.thread is not None:
             self.thread.join(timeout=5)
 
-    def summary(self, start, end, cancelled, parallel=True):
+    def summary(self, start, end, cancelled, parallel=True, publish_base=None):
         if not self.ready or self.generation != self.db.network_generation:
             return None
         conn = None
@@ -2226,7 +2226,7 @@ class StoredNetworkStats:
                 state = self.state(conn)
                 if state.get('ready') != '1' or now()-float(state.get('as_of',0))>30:
                     return None
-                result = self.aggregate(conn,start,end,parallel=parallel)
+                result = self.aggregate(conn,start,end,parallel=parallel,publish_base=publish_base)
                 result['as_of'] = float(state['as_of'])
                 return result
         except (sqlite3.Error,ValueError,TypeError) as exc:
@@ -2239,9 +2239,9 @@ class StoredNetworkStats:
                 conn.close()
 
     @staticmethod
-    def aggregate(conn,start,end,parallel=None):
+    def aggregate(conn,start,end,parallel=None,publish_base=None):
         from overview_metrics import summarize
-        return summarize(conn,start,end,table='facts',parallel=parallel)
+        return summarize(conn,start,end,table='facts',parallel=parallel,publish_base=publish_base)
 
 
 
@@ -2273,7 +2273,7 @@ class NetworkSnapshots:
         self.entries[self.DEFAULT_KEY] = self._entry(prewarm=True)
 
     def _entry(self, prewarm=False):
-        return dict(result=None, error='', used=self.clock(), due=0.0,
+        return dict(result=None, partial=False, error='', used=self.clock(), due=0.0,
                     completed=0.0, running=False, failures=0, requested=False,
                     prewarm=prewarm, failure_at=None)
 
@@ -2372,9 +2372,9 @@ class NetworkSnapshots:
                 if len(failed) > 1:
                     message = str(len(failed)) + ' 个统计范围更新失败。' + message
                 return dict(state='error', message=message, at=latest['failure_at'])
-            if any(entry['result'] and stamp-entry['completed'] <= self.MAX_AGE_SECONDS for entry in active):
+            if any(entry['result'] and not entry['partial'] and stamp-entry['completed'] <= self.MAX_AGE_SECONDS for entry in active):
                 return dict(state='ok', message='已有近期统计结果')
-            if not active and observed[0]['result']:
+            if not active and observed[0]['result'] and not observed[0]['partial']:
                 return dict(state='ok', message='已有统计结果，打开概览时刷新')
             if any(entry['result'] for entry in active):
                 return dict(state='warning', message='统计结果更新延迟')
@@ -2389,7 +2389,7 @@ class NetworkSnapshots:
         if self.thread is not None:
             self.thread.join(timeout=5)
 
-    def _compute(self, key, generation):
+    def _compute(self, key, generation, publish_base=None):
         if self.db.conn is None:
             raise RuntimeError(self.db.last_error or '事件库不可用')
         push = None
@@ -2417,11 +2417,10 @@ class NetworkSnapshots:
             conn.set_progress_handler(cancelled, 10000)
             conn.execute('BEGIN')
             analytics = getattr(self.db, 'analytics', None)
-            result = analytics.summary(start,end,cancelled,parallel=False) if analytics is not None and not push else None
+            result = analytics.summary(start,end,cancelled,parallel=False,publish_base=publish_base) if analytics is not None and not push else None
             if result is None:
                 try:
-                    result = (EventDB.compute_network_summary(conn,start,end,push=push) if push
-                              else EventDB.compute_network_summary(conn,start,end))
+                    result = EventDB.compute_network_summary(conn,start,end,push=push,publish_base=publish_base)
                 except sqlite3.Error as exc:
                     self.db.note_read_failure(exc)
                     raise
@@ -2441,6 +2440,14 @@ class NetworkSnapshots:
                     self.connection = None
                 conn.close()
 
+    def _publish_base(self, key, generation, entry, result):
+        with self.condition:
+            self._invalidate_locked()
+            if self.stop.is_set() or generation != self.generation or self.entries.get(key) is not entry:
+                return
+            if self.cache.put(self._cache_key(key),dict(result,computed_at=now())):
+                entry.update(result=True,partial=True,completed=self.clock())
+
     def _run(self):
         while not self.stop.is_set():
             with self.condition:
@@ -2459,10 +2466,13 @@ class NetworkSnapshots:
                     continue
                 entry.update(running=True, prewarm=False)
                 generation = self.generation
+                publish_base = None
+                if not entry['result'] or entry['partial']:
+                    publish_base = lambda value: self._publish_base(key, generation, entry, value)
             result, error = None, ''
             cpu_started = time.thread_time()
             try:
-                result = self._compute(key, generation)
+                result = self._compute(key, generation, publish_base)
             except Exception as exc:  # Keep serving the last success while a bounded retry waits.
                 error = '网络统计更新失败：' + str(exc)
             cpu_elapsed = time.thread_time() - cpu_started
@@ -2479,8 +2489,8 @@ class NetworkSnapshots:
                                  failure_at=now() if error else None,
                                  failures=failures,due=self.clock() + (min(60,5*2**min(failures-1,4)) if error else self.REFRESH_SECONDS))
                     if result is not None:
-                        self.cache.put(self._cache_key(key), result)
-                        entry.update(result=True, completed=self.clock())
+                        if self.cache.put(self._cache_key(key), result):
+                            entry.update(result=True, partial=False, completed=self.clock())
 
 
 MITRE_FIELDS = ('mitre_tactic_id', 'mitre_technique_id', 'mitre_tactic_name', 'mitre_technique_name')

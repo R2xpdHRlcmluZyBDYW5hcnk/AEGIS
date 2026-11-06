@@ -57,7 +57,7 @@ class NetworkSnapshotTests(unittest.TestCase):
         return self.cache.get(low, high, rolling)
 
     def ready(self, **kwargs):
-        return self.wait_for(lambda: (r if (r := self.get(**kwargs))['available'] else None))
+        return self.wait_for(lambda: (r if (r := self.get(**kwargs))['available'] and not r.get('partial') else None))
 
     def advance(self, seconds=31):
         self.tick += seconds
@@ -86,13 +86,13 @@ class NetworkSnapshotTests(unittest.TestCase):
         entered, release = threading.Event(), threading.Event()
         original = backend.EventDB.compute_network_summary
         calls = []
-        def blocked(conn, start, end):
+        def blocked(conn, start, end, **kwargs):
             calls.append(conn)
             conn.execute('SELECT COUNT(*) FROM events').fetchone()
             entered.set()
             if not release.wait(5):
                 raise RuntimeError('Test gate was not released')
-            return original(conn, start, end)
+            return original(conn, start, end, **kwargs)
         app = backend.App.__new__(backend.App)
         app.db, app.network = self.db, self.cache
         app.store = types.SimpleNamespace(ingest=lambda: None, offset=0, events=[], last_error='')
@@ -126,8 +126,8 @@ class NetworkSnapshotTests(unittest.TestCase):
         self.add()
         completed = threading.Event()
         original = backend.EventDB.compute_network_summary
-        def observed(*args):
-            value = original(*args)
+        def observed(*args, **kwargs):
+            value = original(*args, **kwargs)
             completed.set()
             return value
         with mock.patch.object(backend.EventDB, 'compute_network_summary', side_effect=observed):
@@ -228,6 +228,29 @@ class NetworkSnapshotTests(unittest.TestCase):
             self.assertIsNone(failed['records'])
             self.assertIn('fixture error', failed['error'])
 
+    def test_first_snapshot_retains_base_when_connection_details_time_out(self):
+        self.add()
+        original = backend.EventDB.compute_network_summary
+
+        def timeout_after_base(conn, start, end, *, push, publish_base):
+            def publish_then_timeout(result):
+                publish_base(result)
+                raise TimeoutError('网络统计计算超时')
+            return original(conn, start, end, push=push, publish_base=publish_then_timeout)
+
+        with mock.patch.object(backend.EventDB, 'compute_network_summary', side_effect=timeout_after_base):
+            self.cache.start()
+            self.wait_for(lambda: self.get()['error'])
+            partial = self.get()
+            self.assertTrue(partial['available'] and partial['partial'])
+            self.assertEqual((partial['flows'], partial['tls']), (1, 0))
+            self.assertEqual(partial['log_sources'], [{'ip': '192.0.2.1', 'count': 1}])
+            self.assertIsNone(partial['bytes'])
+
+        self.advance()
+        complete = self.ready()
+        self.assertEqual((complete['flows'], complete['bytes']), (1, 300))
+
     def test_system_health_separates_read_corruption_from_ingestion_and_queue_state(self):
         app = backend.App.__new__(backend.App)
         app.db, app.network = self.db, self.cache
@@ -258,8 +281,8 @@ class NetworkSnapshotTests(unittest.TestCase):
         captured, release = threading.Event(), threading.Event()
         original = backend.EventDB.compute_network_summary
         calls = []
-        def blocked(*args):
-            value = original(*args)
+        def blocked(*args, **kwargs):
+            value = original(*args, **kwargs)
             calls.append(value)
             if len(calls) == 1:
                 captured.set()
@@ -284,13 +307,13 @@ class NetworkSnapshotTests(unittest.TestCase):
 
     def test_readonly_worker_cannot_write_even_if_query_only_is_disabled(self):
         original = backend.EventDB.compute_network_summary
-        def checked(conn, start, end):
+        def checked(conn, start, end, **kwargs):
             self.assertEqual(conn.execute('PRAGMA query_only').fetchone()[0], 1)
             conn.execute('PRAGMA query_only=OFF')
             with self.assertRaises(sqlite3.OperationalError):
                 conn.execute('DELETE FROM events')
             conn.execute('PRAGMA query_only=ON')
-            return original(conn, start, end)
+            return original(conn, start, end, **kwargs)
         self.add()
         with mock.patch.object(backend.EventDB, 'compute_network_summary', side_effect=checked):
             self.cache.start()
@@ -298,7 +321,7 @@ class NetworkSnapshotTests(unittest.TestCase):
 
     def test_query_deadline_interrupts_expensive_sql(self):
         self.cache.QUERY_SECONDS = .02
-        def expensive(conn, *_):
+        def expensive(conn, *_, **kwargs):
             conn.execute('WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000000) SELECT SUM(x) FROM n').fetchone()
         with mock.patch.object(backend.EventDB, 'compute_network_summary', side_effect=expensive):
             self.cache.start()
@@ -316,9 +339,9 @@ class NetworkSnapshotTests(unittest.TestCase):
         bounds = dict(start=int(self.stamp) - 1, end=int(self.stamp) + 2, rolling=False)
         original = backend.EventDB.compute_network_summary
         calls = []
-        def counted(conn, start, end):
+        def counted(conn, start, end, **kwargs):
             calls.append('custom' if [start, end] == [bounds['start'], bounds['end']] else 'default')
-            return original(conn, start, end)
+            return original(conn, start, end, **kwargs)
         with mock.patch.object(backend.EventDB, 'compute_network_summary', side_effect=counted):
             self.get(**bounds)
             self.cache.start()
@@ -352,7 +375,7 @@ class NetworkSnapshotTests(unittest.TestCase):
 
     def test_shutdown_interrupts_an_active_query_and_releases_its_connection(self):
         started = threading.Event()
-        def expensive(conn, *_):
+        def expensive(conn, *_, **kwargs):
             started.set()
             conn.execute('WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000000) SELECT SUM(x) FROM n').fetchone()
         with mock.patch.object(backend.EventDB, 'compute_network_summary', side_effect=expensive):

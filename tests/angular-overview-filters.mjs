@@ -100,6 +100,7 @@ try {
   assert.equal(await evaluate('location.hash'),'#overview');
   await evaluate(`[...document.querySelectorAll('.overview-filters button')].find(b=>b.textContent==='清除筛选').click()`);
   await until(`!document.querySelector('.overview-filters')&&!!document.querySelector('.three-grid .chart-view-toggle')`);
+  await until(`document.querySelector('.visibility-grid h2')?.textContent==='连接应用分布'`);
   await evaluate(`document.querySelector('.visibility-grid ndr-chart')?.scrollIntoView({block:'center'})`);
   await until(`!!document.querySelector('.visibility-grid ndr-chart path[fill="#4c8157"]')`);
   await pointerBar('.visibility-grid ndr-chart','#4c8157');
@@ -195,14 +196,20 @@ try {
 
   await emitOverview({...overview,network:{available:false,status:'pending'}});
   await until(`!!document.querySelector('ndr-overview .trend ndr-chart') && !(${errorText})`);
-  assert.equal(await evaluate(`document.querySelector('.visibility-heading')`),null);
+  assert.equal(await evaluate(`document.querySelector('.network-summary strong').textContent.trim()`),'—');
+  assert.ok(await evaluate(`document.querySelector('.network-summary').compareDocumentPosition(document.querySelector('ndr-overview .three-grid')) & Node.DOCUMENT_POSITION_FOLLOWING`));
 
   const networkTimeout = '网络统计更新失败：网络统计计算超时';
   await emitOverview({...overview,network:{available:false,status:'error',error:networkTimeout,retry_seconds:30,refreshing:false}});
-  assert.equal(await evaluate(`document.querySelector('.visibility-heading')`),null);
+  assert.equal(await evaluate(`document.querySelector('.network-summary strong').textContent.trim()`),'—');
   assert.equal(await evaluate(errorText),undefined);
-  await emitOverview({...overview,network:{...overview.network,available:true,status:'stale',error:networkTimeout,retry_seconds:0,refreshing:true}});
+  await emitOverview({...overview,network:{...overview.network,available:true,partial:true,flows:37,tls:12,
+    status:'stale',error:networkTimeout,retry_seconds:0,refreshing:true}});
   await until(`!!document.querySelector('.visibility-grid ndr-chart') && !(${errorText})`);
+  const counts = await evaluate(`[...document.querySelectorAll('.network-summary strong')].map(e=>e.textContent.trim())`);
+  assert.equal(counts[0],'37');
+  assert.equal(counts[3],'12');
+  assert.equal(await evaluate(`[...document.querySelectorAll('.visibility-grid h2')].some(e=>e.textContent==='连接应用分布')`),false);
   assert.doesNotMatch(await evaluate(`document.querySelector('.network-update').innerText`),waitingText);
   await emitOverview({...overview,network:{available:false,status:'error',error:'事件库不可用'}});
   await until(`${errorText}?.includes('事件库不可用')`);

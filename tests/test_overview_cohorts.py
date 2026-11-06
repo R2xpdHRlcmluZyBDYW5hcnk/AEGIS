@@ -60,12 +60,18 @@ class OverviewCohortTests(unittest.TestCase):
         self.assertEqual(result['applications'],[dict(name='http',count=1)])
 
     def test_projection_and_main_database_return_identical_log_and_connection_statistics(self):
+        self.add('tls','b',tls=dict(sni='example.test'))
         stats=m.StoredNetworkStats(self.db)
         import sqlite3
         projection=sqlite3.connect(':memory:');self.addCleanup(projection.close);stats.install(projection)
         stats.sync(self.db.conn,projection,initial=True,batch=1024)
-        direct=self.summary();cached=stats.aggregate(projection,self.low,self.high)
+        base=[]
+        direct=self.summary();cached=stats.aggregate(projection,self.low,self.high,publish_base=base.append)
         direct.pop('as_of');cached.pop('as_of');self.assertEqual(cached,direct)
+        for key in ('flows','dns','tls','source_count','destination_count','log_sources','log_destinations'):
+            self.assertEqual(base[0][key],direct[key],key)
+        self.assertEqual(base[0]['tls'],1)
+        self.assertIsNone(base[0]['addresses'])
 
     def test_unidentified_flows_count_separately_from_each_other_and_identified_sessions(self):
         rows = [
