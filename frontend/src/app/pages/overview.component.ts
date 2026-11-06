@@ -10,6 +10,7 @@ import { eventType } from '../event-fields';
 const overviewWindow='1440';
 @Component({changeDetection:ChangeDetectionStrategy.Eager,selector:'ndr-overview',standalone:true,imports:[ModalComponent,CommonModule,ChartComponent,TableComponent],template:`
  <div class="overview-filters" *ngIf="filters.length" aria-label="概览筛选"><span>当前筛选</span><button class="quiet" *ngFor="let filter of filters" (click)="removeFilter(filter.key)" [attr.aria-label]="'移除筛选 '+filter.label">{{filter.label}} ×</button><button class="quiet" (click)="clearFilters()">清除筛选</button></div>
+ <p *ngIf="filterPending || showingPrevious" class="muted" data-testid="overview-filter-status" role="status">{{filterPending ? '正在应用筛选' : '当前筛选尚无结果'}}{{showingPrevious ? '，暂显示上一次结果' : ''}}</p>
  <p *ngIf="error" class="error" role="alert">{{error}}</p>
  <ng-container *ngIf="data as d"><p class="muted telemetry-status" role="status" *ngIf="d.telemetry?.stale||d.telemetry?.updating">{{d.telemetry?.as_of?'引擎指标采样于 '+formatDate(d.telemetry.as_of):'尚未取得引擎指标样本'}} <span class="badge">{{d.telemetry?.updating?'规则任务进行中':'等待新样本'}}</span></p><div class="stats-grid resource-summary"><h2>检测概况</h2>
   <button class="stat-card alert" (click)="filterKind('alerts','检测告警')" [attr.aria-pressed]="hasKind('alerts')"><span>检测告警</span><strong data-testid="alerts-total">{{d.security?.alerts | number}}</strong></button>
@@ -42,11 +43,15 @@ const overviewWindow='1440';
 `})
 export class OverviewComponent implements OnInit,OnDestroy {
  filters:{key:string;label:string;params:Record<string,string>}[]=[];private period?:{from:number;to:number};
- data:any;expandedChart=false;showTrendTable=false;error='';private live:LiveQuery;memory=bytes;formatDate=date;chartViewport=new ChartViewport();
+ data:any;expandedChart=false;showTrendTable=false;error='';filterPending=false;showingPrevious=false;private live:LiveQuery;memory=bytes;formatDate=date;chartViewport=new ChartViewport();
  recentColumns:Column[]=[{key:'ts',label:'时间',kind:'time',width:180},{key:'type',label:'类型',kind:'eventType',width:110},{key:'sig',label:'网络事件摘要',kind:'eventSummary',width:340},{key:'src',label:'源地址',kind:'mono',width:160},{key:'dst',label:'目的地址',kind:'mono',width:160},{key:'proto',label:'协议',width:90},{key:'action',label:'动作',kind:'action',width:100}];
  tops=[{key:'signatures',title:'高频检测签名',field:'sid',table:false,columns:[{key:'sig',label:'签名',width:250},{key:'count',label:'次数',width:80}]},{key:'sources',title:'高频源地址',field:'src',table:false,columns:[{key:'ip',label:'地址',width:190},{key:'count',label:'次数',width:80}]},{key:'destinations',title:'高频目的地址',field:'dst',table:false,columns:[{key:'ip',label:'地址',width:190},{key:'count',label:'次数',width:80}]}];
  constructor(api:Api,public state:ConsoleState,public details:Details){
-  this.live=new LiveQuery(api,d=>{this.data=d;this.error='';this.state.viewReady('overview');},e=>{this.error=e;this.state.viewReady('overview');},null);
+  const failed=(error:string)=>{this.error=error;this.filterPending=false;this.state.viewReady('overview');};
+  this.live=new LiveQuery(api,d=>{
+   if(d.security?.error){failed('读取概览失败：'+d.security.error);return;}
+   this.data=d;this.error='';this.filterPending=false;this.showingPrevious=false;this.state.viewReady('overview');
+  },failed,null);
  }
  networkRetrying(network:any):boolean{
   // Existing servers send the timeout as text, together with the scheduled retry delay.
@@ -101,7 +106,8 @@ export class OverviewComponent implements OnInit,OnDestroy {
    selected['from']=String(Math.max(low,this.period.from));selected['to']=String(Math.max(Number(selected['from']),Math.min(high,this.period.to)));
   }
   for(const filter of this.filters)Object.assign(selected,filter.params);
-  this.chartViewport.reset();this.data=undefined;this.error='';this.live.start('/api/overview',{...selected,view:'panel'},'overview');
+  this.chartViewport.reset();this.showingPrevious=!!this.data;this.filterPending=this.showingPrevious||this.filters.length>0;
+  this.error='';this.live.start('/api/overview',{...selected,view:'panel'},'overview');
  }
  ngOnDestroy():void{this.live.stop();}
 }
