@@ -254,12 +254,17 @@ def native_event(envelope, metadata=None):
                    rule_metadata().get((gid,sid),{}))
         actual = str(data.get('action') or '').lower()
         blocked = actual in ('drop', 'block', 'reject', 'reset', 'blacklist')
+        suppressed = data.get('alert_suppressed') == 1
+        if suppressed and not blocked:
+            return {}
         obj['alert'] = dict(gid=gid, signature_id=sid, rev=data.get('rev'),
             signature=data.get('msg') or '', severity=data.get('priority',details.get('severity', 0)),
             category=data.get('class',details.get('category', '')), action='blocked' if blocked else 'allowed',
             metadata=details.get('metadata', {}))
         if blocked:
             obj.update(event_type='drop', drop={'reason':actual})
+            if suppressed:
+                obj['drop']['alert_suppressed'] = True
     elif kind == 'weird':
         obj['anomaly'] = dict(type=data.get('source', ''), event=data.get('msg', ''))
     elif kind == 'conn':

@@ -174,7 +174,7 @@ def check_pulledpork(root,online):
     print('PulledPork3 official archive, offline cache, native validation and failure preservation verified')
 
 
-def check_inline(root,config,workers=4,ipv6=False):
+def check_inline(root,config,workers=4,ipv6=False,suppressed=False):
     # The outer command must create a new network namespace. Never touch host nft.
     if os.geteuid()!=0 or os.readlink('/proc/self/ns/net')==os.readlink('/proc/1/ns/net'):
         raise RuntimeError('Run inline checks with: unshare -n python3 -B tests/check_snort_native.py --inline')
@@ -194,8 +194,15 @@ def check_inline(root,config,workers=4,ipv6=False):
     server=Server((target_ip,18080),Handler)
     thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
     rule=root/'rules/local.rules'
-    rule.write_text('block http any any -> any any (msg:"inline block"; http_uri; content:"/blocked"; sid:9000011; rev:1;)\n'
-                    'reject http any any -> any any (msg:"inline reject"; http_uri; content:"/rejected"; sid:9000012; rev:1;)\n')
+    rules = ('block http any any -> any any (msg:"inline block"; http_uri; content:"/blocked"; sid:9000011; rev:1;)\n'
+             'reject http any any -> any any (msg:"inline reject"; http_uri; content:"/rejected"; sid:9000012; rev:1;)\n')
+    quiet = {9000013: ('block', '/quiet-block'), 9000014: ('reject', '/quiet-reject'),
+             9000015: ('alert', '/quiet-alert'), 9000016: ('drop', '/quiet-drop')}
+    if suppressed:
+        rules += ''.join(f'{action} http any any -> any any (msg:"quiet {action}"; http_uri; '
+                         f'content:"{path}"; sid:{sid}; rev:1;)\n' for sid,(action,path) in quiet.items())
+        (root/'suppress.lua').write_text('suppress = {'+','.join(f'{{gid=1, sid={sid}}}' for sid in quiet)+'}\n')
+    rule.write_text(rules)
     logs=root/'inline';logs.mkdir();control_path=root/'inline.sock'
     with (logs/'process.log').open('wb') as log:
         inputs=[part for index in range(workers) for part in ('-i',str(index))]
@@ -227,14 +234,27 @@ def check_inline(root,config,workers=4,ipv6=False):
                     return connection.getresponse().read()
                 finally: connection.close()
             assert request('/allowed')==b'native-inline-ok'
-            for path in ('/blocked','/rejected'):
+            blocked = ['/blocked','/rejected']
+            if suppressed:
+                assert request('/quiet-alert')==b'native-inline-ok'
+                blocked.extend(['/quiet-block','/quiet-reject'])
+            for path in blocked:
                 try: request(path)
                 except (OSError,http.client.HTTPException) as exc:
-                    if path=='/rejected' and isinstance(exc,TimeoutError):
+                    if path in ('/rejected','/quiet-reject') and isinstance(exc,TimeoutError):
                         raise AssertionError('Native reject timed out instead of resetting the connection') from exc
                 else:
                     counters=SnortControl(str(control_path)).call(['dump-counters'])
                     raise AssertionError('Inline rule did not stop '+path+'\n'+json.dumps(counters)+'\n'+json.dumps(records(logs))+'\n'+(logs/'process.log').read_text()[-3000:])
+            if suppressed:
+                def dropped_packets():
+                    counters=SnortControl(str(control_path)).call(['dump-counters'])['dump-counters']
+                    return counters['native']['daq'].get('block',0)
+                before=dropped_packets()
+                # A packet-level drop need not prevent a successful TCP retransmission.
+                try: request('/quiet-drop')
+                except TimeoutError: pass
+                assert dropped_packets()>before
             assert request('/allowed-again')==b'native-inline-ok'
             counters=SnortControl(str(control_path)).call(['dump-counters'])
             assert counters['dump-counters']['ips']['rejected']>0,counters
@@ -248,7 +268,36 @@ def check_inline(root,config,workers=4,ipv6=False):
     for sid in (9000011,9000012):
         hit=[event for event in events if event.get('sid')==sid]
         assert hit and native_event(dict(engine='snort3',data=hit[0]))['alert']['action']=='blocked',hit
+        assert not any(event.get('alert_suppressed') for event in hit),hit
+    if suppressed:
+        for sid,(action,_) in quiet.items():
+            hits=[event for event in events if event.get('sid')==sid]
+            if action=='alert':
+                assert not hits,hits
+                continue
+            assert hits and len({event['pkt_num'] for event in hits})==len(hits),hits
+            for hit in hits:
+                event=native_event(dict(engine='snort3',data=hit,rule_metadata={}))
+                assert hit['ips_action']==action and event['session_id'] and event['drop']['alert_suppressed'],hit
+        alerts=[json.loads(line) for path in logs.glob('*alert_json.txt') for line in path.read_text().splitlines()]
+        assert all(event.get('sid') not in quiet for event in alerts),alerts
+        print('Suppressed block, reject and drop retain verdict records; suppressed alerts stay silent')
     print(('IPv6' if ipv6 else 'IPv4')+' four NFQ workers: allowed traffic, actual block/reject and recovery verified in isolated namespace')
+
+
+def check_suppressed_passive(root,config):
+    (root/'rules/local.rules').write_text('block http any any -> any any (msg:"passive block"; '
+                                         'http_uri; content:"/ndr-smoke"; sid:9000013; rev:1;)\n')
+    logs=root/'passive';logs.mkdir()
+    pcap=logs/'fixture.pcap';capture(pcap)
+    command=engine()+['-c',str(config),'-r',str(pcap),'-l',str(logs)]
+    execute(command,timeout=90)
+    assert any(row.get('sid')==9000013 and row.get('action','').startswith('would_') for row in records(logs))
+    (root/'suppress.lua').write_text('suppress = {{gid=1, sid=9000013}}\n')
+    quiet=root/'passive-suppressed';quiet.mkdir()
+    execute(command[:-1]+[str(quiet)],timeout=90)
+    assert not any(row.get('sid')==9000013 for row in records(quiet))
+    print('Suppressed would-block in passive mode produces no block record')
 
 
 def main():
@@ -256,12 +305,14 @@ def main():
     parser.add_argument('--inline',action='store_true')
     parser.add_argument('--ipv6',action='store_true')
     parser.add_argument('--online-rules',action='store_true')
+    parser.add_argument('--suppressed-blocks',action='store_true')
     parser.add_argument('--workers',type=int,choices=(1,4),default=4)
     args=parser.parse_args()
     binary=Path(PREFIX)/'bin/snort';before=hashlib.sha256(binary.read_bytes()).hexdigest()
     with tempfile.TemporaryDirectory(prefix='ips-snort-native-') as temporary:
         root=Path(temporary);config=prepare(root)
-        if args.inline: check_inline(root,config,args.workers,args.ipv6)
+        if args.suppressed_blocks: check_suppressed_passive(root,config)
+        if args.inline: check_inline(root,config,args.workers,args.ipv6,args.suppressed_blocks)
         else:
             check_offline(root,config)
             check_pulledpork(root,args.online_rules)

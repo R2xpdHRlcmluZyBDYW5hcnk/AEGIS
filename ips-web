@@ -787,6 +787,7 @@ class EventDB:
         ("subject", "subject"), ("issuer", "issuer"), ("anom", "anom"),
         ("tier", None),
         ("event_key", None),
+        ("alert_suppressed", "alert_suppressed"),
         ("bytes_toserver", "bytes_toserver"), ("bytes_toclient", "bytes_toclient"),
         ("pkts_toserver", "pkts_toserver"), ("pkts_toclient", "pkts_toclient"),
         ("flow_start", "flow_start"), ("flow_end", "flow_end"), ("flow_age", "flow_age"),
@@ -796,7 +797,7 @@ class EventDB:
         "dns": "dnsname", "file": "fname", "size": "fsize", "sig_id": "sid",
         "level": None,
     }
-    NUMERIC_COLUMNS = {"ts", "sev", "sid", "tier", "sport", "dport", "ip_version", "status",
+    NUMERIC_COLUMNS = {"ts", "sev", "sid", "tier", "alert_suppressed", "sport", "dport", "ip_version", "status",
                        "clen", "fsize", "flow_id", "vlan", "gid", "rev", "tx",
                        "icmp_type", "icmp_code", "bytes_toserver", "bytes_toclient",
                        "pkts_toserver", "pkts_toclient", "flow_start", "flow_end", "flow_age", "observed_first", "observed_last",
@@ -1445,7 +1446,7 @@ class EventDB:
         columns = 'id,type,session_id,community,flow_id,event_key,ts,sev,sid,sig,src,dst,sport,dport,proto,app,action,cat,gid'
         kinds = ('type IN ('+','.join('?' for _ in types)+') AND ') if types else ''
         scope,args = candidates or ('',[])
-        where=' WHERE '+kinds+'ts>=? AND ts<=?'+(" AND (type='alert' OR sid>0)" if signed else '')+(' AND ('+scope+')' if scope else '')
+        where=' WHERE '+kinds+'ts>=? AND ts<=?'+(' AND '+self.DETECTION_SQL if signed else '')+(' AND ('+scope+')' if scope else '')
         sql = 'WITH incident_events AS MATERIALIZED (SELECT '+columns+','+self._incident_key()+ ' AS incident_id'+self._security_from(where,dedup=signed)+') '
         return sql,list(types or ())+[low_ms,high_ms]+args
 
@@ -1651,7 +1652,7 @@ class EventDB:
                 return None
             incident = complete[0]
         alert_push = self.incident_filter(incident_id)
-        alert_push=(alert_push[0]+["(type='alert' OR sid>0)"],alert_push[1])
+        alert_push=(alert_push[0]+[self.DETECTION_SQL],alert_push[1])
         alert_total, alerts = self.search_range(
             low, high, types=["alert","drop"], push=alert_push, limit=500,dedup=True)
         attack = {}
@@ -1733,7 +1734,7 @@ class EventDB:
         return summarize(conn,start,end,push=push,parallel=parallel)
 
     # Detection and enforcement are overlapping facts, not exclusive log types.
-    DETECTION_SQL = "(type='alert' OR (type='drop' AND sid>0))"
+    DETECTION_SQL = "(type='alert' OR (type='drop' AND sid>0 AND alert_suppressed IS NULL))"
     BLOCKED_SQL = "(type='drop' OR action='blocked')"
 
     def security_summary(self, window=60, topn=5, etype="all", start=None, end=None, dedup=False,
@@ -2534,6 +2535,8 @@ class EventStore:
             "reason": reason,
             "iif": obj.get("in_iface") or "",
         }
+        if etype == 'drop' and drop.get('alert_suppressed') is True:
+            rec['alert_suppressed'] = 1
         if etype in ('flow','session') or (etype=='quic' and obj.get('observer_fields')):
             flow = obj.get('flow') or {}
             for key in ('bytes_toserver', 'bytes_toclient', 'pkts_toserver', 'pkts_toclient'):

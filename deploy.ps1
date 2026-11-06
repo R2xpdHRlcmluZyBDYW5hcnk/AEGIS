@@ -203,14 +203,15 @@ try {
         & scp @options $EnginePackage "$EnginePackage.sha256" "${Target}:$stage/"
         if ($LASTEXITCODE -ne 0) { throw 'Engine upload failed' }
         $engineDeployer = if ($UpdateEngine) { 'deploy-session-engine.py' } else { 'deploy-snort3.py' }
-        $backendStep = "sha256sum -c '$engineFileName.sha256' && python3 snort-ndr/$engineDeployer --release snort-ndr --engine-package '$engineFileName' && "
+        $engineExtension = if ($UpdateEngine -and $SessionLoggerDirectory) { ' --session-logger-directory session-logger' } else { '' }
+        $backendStep = "sha256sum -c '$engineFileName.sha256' && python3 snort-ndr/$engineDeployer --release snort-ndr --engine-package '$engineFileName'$engineExtension && "
     }
     $staticStep = if ($InstallSnort3 -or $UpdateEngine) { 'true' } else { 'bash snort-ndr/deploy.sh --web-only' }
     if ($MigrateLogs) { $backendStep = 'python3 snort-ndr/deploy-log-storage.py --release snort-ndr && ' + $backendStep }
     if ($RemoveLegacySuricata) { $staticStep += ' && python3 snort-ndr/cleanup-legacy-suricata.py --apply' }
     if ($ClearNativeLogs) { $staticStep += ' && python3 snort-ndr/cleanup-native-logs.py --apply'; if ($ClearEventStream) { $staticStep += ' --event-stream' } }
     if ($QuicInterface) { $staticStep += " && python3 snort-ndr/deploy-quic-observer.py --release snort-ndr --interface '$QuicInterface'" }
-    if ($SessionLoggerDirectory) { $staticStep += ' && python3 snort-ndr/deploy-session-logger.py --release snort-ndr --plugin session-logger' }
+    if ($SessionLoggerDirectory -and -not $UpdateEngine) { $staticStep += ' && python3 snort-ndr/deploy-session-logger.py --release snort-ndr --plugin session-logger' }
     & ssh @options $Target "cd '$stage' && sha256sum -c '$fileName.sha256' && tar -xzf '$fileName' && ${backendStep}$staticStep"
     if ($LASTEXITCODE -ne 0) { throw 'Deployment or health check failed' }
 } finally {

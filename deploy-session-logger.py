@@ -28,15 +28,34 @@ def install(data, path, mode=0o644):
     staged.chmod(mode); staged.replace(path)
 
 
-def deploy(release, plugin):
-    release, plugin = Path(release), Path(plugin)
+def verified_plugin(release, plugin, engine):
+    plugin = Path(plugin)
     manifest = json.loads((plugin/'session-logger.json').read_text())
     library = (plugin/'ndr_session.so').read_bytes()
-    if (manifest.get('session_patch') != 'ndr-session-1' or manifest.get('version') != 1
-            or hashlib.sha256(Path(BINARY).read_bytes()).hexdigest() != manifest['engine_sha256']
+    if (manifest.get('session_patch') not in ('ndr-session-1', 'ndr-session-2') or manifest.get('version') != 1
+            or hashlib.sha256(Path(engine).read_bytes()).hexdigest() != manifest['engine_sha256']
             or hashlib.sha256(library).hexdigest() != manifest['sha256']
             or hashlib.sha256((release/'native_session_logger.cc').read_bytes()).hexdigest() != manifest['source_sha256']):
         raise ValueError('Native extension source, binary or engine ABI differs')
+    return manifest, library
+
+
+def extension_config(config):
+    marker = b"if get_module_version('ndr_session', 'inspector') >= 1 then"
+    if marker in config:
+        return config
+    return config + b"\n"+marker+b"\n    ndr_session = { snapshot_interval = 30, state_limit = 32 }\nend\n"
+
+
+def extension_rotation(rotation):
+    if rotation and b'*ndr_session.json' not in rotation:
+        return rotation.replace(b'*alert_json.txt', b'*alert_json.txt '+str(log_paths()[0]/'*ndr_session.json').encode(), 1)
+    return rotation
+
+
+def deploy(release, plugin):
+    release = Path(release)
+    manifest, library = verified_plugin(release, plugin, BINARY)
     for name in ('session_logger.py', 'runtime_status.py'):
         if (PROGRAM/name).read_bytes() != (release/name).read_bytes():
             raise ValueError('Deploy the matching console backend first')
@@ -48,10 +67,7 @@ def deploy(release, plugin):
         with configuration_lock(CONFIG):
             control = SnortControl('/run/snort/control.sock')
             pid = session_logger.process_key()
-            config = CONFIG.read_bytes()
-            marker = b"if get_module_version('ndr_session', 'inspector') >= 1 then"
-            if marker not in config:
-                config += b"\n"+marker+b"\n    ndr_session = { snapshot_interval = 30, state_limit = 32 }\nend\n"
+            config = extension_config(CONFIG.read_bytes())
             paths = [CONFIG, session_logger.RECEIPT, PROGRAM/'ips-supervisor', ROTATION]
             before = {path:path.read_bytes() if path.exists() else None for path in paths}
             token = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
@@ -71,9 +87,8 @@ def deploy(release, plugin):
                 install(config, CONFIG)
                 install(json.dumps(receipt).encode()+b'\n', session_logger.RECEIPT)
                 install((release/'ips-supervisor').read_bytes(), PROGRAM/'ips-supervisor', 0o755)
-                rotation = before[ROTATION]
-                if rotation and b'*ndr_session.json' not in rotation:
-                    rotation = rotation.replace(b'*alert_json.txt', b'*alert_json.txt '+str(log_paths()[0]/'*ndr_session.json').encode(), 1)
+                rotation = extension_rotation(before[ROTATION])
+                if rotation != before[ROTATION]:
                     install(rotation, ROTATION)
                 reloaded = True
                 session_logger.reload_extension(control, CONFIG)

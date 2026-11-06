@@ -669,6 +669,42 @@ class NDRRegressionCase(unittest.TestCase):
         self.assertEqual(hunted['total'], 123)
         self.assertEqual(hunted['source'], 'db')
 
+    def test_suppressed_blocks_stay_in_drop_queries_and_out_of_alert_evidence(self):
+        from event_processing import decode_bridge
+
+        stamp = int(ips_web.now()) - 10
+        native = dict(ts=stamp, uid='10', gid=1, sid=101, rev=1, msg='Suppressed block',
+                      action='block', ips_action='block', proto='TCP', alert_suppressed=1,
+                      session_id=self.session(1))
+        records = [native, dict(native, session_id=self.session(2)),
+                   dict(native, action='would_block', session_id=self.session(3)),
+                   dict(native, sid=102, msg='Ordinary block', alert_suppressed=0)]
+        encoded = [json.dumps(record).encode() for record in records]
+        segments, rejected, written = decode_bridge((encoded, 'fixture', False))
+        self.assertEqual((rejected, written), (0, 4))
+        self.store.initial_tail = 1 << 20
+        with open(self.store.path, 'wb') as handle:
+            for record in segments:
+                handle.write(json.dumps(dict(record, rule_metadata={})).encode() + b'\n')
+        self.store.ingest()
+        self.db.flush()
+
+        params = {'from': str(stamp - 5), 'to': str(stamp + 5), 'view': 'list'}
+        drops = self.app.events(dict(params, type='drop'))
+        self.assertEqual(drops['total'], 3)
+        self.assertEqual({row['sig_id'] for row in drops['events']}, {101, 102})
+        incidents = self.app.incidents(params)
+        self.assertEqual(incidents['total'], 1)
+        incident = incidents['incidents'][0]
+        self.assertEqual((incident['session_id'], incident['alert_count']), (self.session(1), 1))
+        detail = self.app.incident(dict(params, id=incident['id']))
+        self.assertEqual([row['sig_id'] for row in detail['alerts']], [102])
+        self.assertEqual(self.app.incidents(dict(params, q='Suppressed block'))['total'], 0)
+        exported = self.app.events(dict(params, format='csv', detection='alerts'))
+        self.assertEqual([row['sig_id'] for row in exported['events']], [102])
+        totals = self.app.aggregate(params)
+        self.assertEqual((totals['alerts'], totals['drops']), (1, 3))
+
     def test_flow_pushdown_and_alert_drop_only_timeline(self):
         stamp = int(ips_web.now()) - 10
         self.add(ts=stamp, flow_id=144611493630868)

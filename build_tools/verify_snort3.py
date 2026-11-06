@@ -13,8 +13,11 @@ def verify(sources_path, prefix):
     if prefix.parent != Path('/opt/ips-snort3'):
         raise ValueError('Unexpected engine prefix')
     binary = prefix / 'bin/snort'
-    if b'NDR session sequence exhausted' not in binary.read_bytes():
+    compiled = binary.read_bytes()
+    if b'NDR session sequence exhausted' not in compiled:
         raise ValueError('Engine session identity patch missing')
+    if b'alert_suppressed' not in compiled:
+        raise ValueError('Engine suppressed block logging patch missing')
     subprocess.run(['patchelf', '--set-rpath', '$ORIGIN/../lib', str(binary)], check=True)
     architecture = subprocess.check_output(['aarch64-linux-gnu-readelf', '-h', str(binary)], text=True)
     if 'AArch64' not in architecture:

@@ -2,15 +2,15 @@
 # Snort 3.12.4.0 matching fragments: https://github.com/snort3/snort3/tree/3.12.4.0
 # NDR session changes maintained by this project, 2026-11-04.
 # Upstream terms and notices: ../LICENSES/Snort-COPYING.txt.
-"""Add an engine-owned, process-scoped connection identity to the pinned Snort."""
+"""Add connection identities and suppressed block records to the pinned Snort."""
 from pathlib import Path
 
-REVISION = 'ndr-session-1'
+REVISION = 'ndr-session-2'
 
 
 def replace_once(text, old, new):
     if text.count(old) != 1:
-        raise ValueError('Snort session patch does not match the pinned source: '+old[:80])
+        raise ValueError('Snort patch does not match the pinned source: '+old[:80])
     return text.replace(old,new,1)
 
 
@@ -101,7 +101,59 @@ void Flow::end_ndr_session()
 
     template<typename T, class... Context>
     void log(''')
+    patch_suppressed_blocks(edit)
     (root.parent/'ndr-session-patch.txt').write_text(REVISION+'\n')
+
+
+def patch_suppressed_blocks(edit):
+    edit('detection/ips_context.h', 'struct OtnxMatchData;', 'struct OtnxMatchData;\nstruct OptTreeNode;')
+    edit('detection/ips_context.h', '    std::vector<MatchedBuffer> matched_buffers;', '''    std::vector<MatchedBuffer> matched_buffers;
+
+    const OptTreeNode* suppressed_block_rule = nullptr;
+    const char* suppressed_block_action = nullptr;''')
+    edit('main/analyzer.cc', '    p->context->wire_packet = p;', '''    p->context->wire_packet = p;
+    p->context->suppressed_block_rule = nullptr;''')
+    edit('detection/fp_detect.cc', '        ActInfo ai(otn, false);\n        act->exec(p, ai);', '''        const bool already_dropping = p->active && p->active->packet_was_dropped();
+        ActInfo ai(otn, false);
+        act->exec(p, ai);
+
+        // Reassembled packets share the wire packet's eventual DAQ verdict.
+        auto* wire = p->context->wire_packet;
+        if (filterEvent < 0 && wire && p->flow && p->active && !already_dropping &&
+            p->active->packet_was_dropped() && p->active->can_act() &&
+            !wire->context->suppressed_block_rule)
+        {
+            wire->context->suppressed_block_rule = otn;
+            wire->context->suppressed_block_action = act->get_name();
+        }''')
+    edit('detection/detect.h', 'void CallAlertFuncs(snort::Packet*, const OptTreeNode*, ListHead*);', '''void CallAlertFuncs(snort::Packet*, const OptTreeNode*, ListHead*);
+void publish_suppressed_block(snort::Packet*, const OptTreeNode*, const char* action);''')
+    edit('detection/detect.cc', 'void CallLogFuncs(Packet* p, const OptTreeNode* otn, ListHead* head)', '''void publish_suppressed_block(Packet* p, const OptTreeNode* otn, const char* action)
+{
+    Event event(p->pkth->ts.tv_sec, p->pkth->ts.tv_usec, otn->sigInfo, otn->buffer_setters, action);
+    IpsRuleEvent record(event, true);
+    DataBus::publish(DetectionEngine::get_pub_id(), DetectionEventIds::SUPPRESSED_BLOCK, record, p->flow);
+}
+
+void CallLogFuncs(Packet* p, const OptTreeNode* otn, ListHead* head)''')
+    edit('main/analyzer.cc', '            p->active->send_reason_to_daq(*p);', '''        {
+            p->active->send_reason_to_daq(*p);
+            if (p->flow && p->context->suppressed_block_rule)
+                publish_suppressed_block(p, p->context->suppressed_block_rule,
+                    p->context->suppressed_block_action);
+        }''')
+    edit('pub_sub/detection_events.h', '        MAX\n', '        SUPPRESSED_BLOCK, // a suppressed rule caused an inline block verdict\n        MAX\n')
+    edit('pub_sub/detection_events.h', '    IpsRuleEvent(const Event& e) : Event(e) {}', '''    IpsRuleEvent(const Event& e, bool suppressed = false) : Event(e), alert_suppressed(suppressed) {}
+    const bool alert_suppressed;''')
+    edit('network_inspectors/extractor/extractor.cc', '        INSAPI_VERSION,\n        0,', '        INSAPI_VERSION,\n        1,')
+    edit('network_inspectors/extractor/extractor_service.cc', '        "ips_action",', '        "ips_action",\n        "alert_suppressed",')
+    edit('network_inspectors/extractor/extractor_detection.cc', '    {"rev", get_rev},', '''    {"rev", get_rev},
+    {"alert_suppressed", [](const DataEvent* event, const Flow*) -> uint64_t
+        { return static_cast<const IpsRuleEvent*>(event)->alert_suppressed; }},''')
+    edit('network_inspectors/extractor/extractor_detection.cc', '    DataBus::subscribe_global(de_pub_key, event, new IpsUser(*this, S_NAME), i.get_snort_config());', '''    DataBus::subscribe_global(de_pub_key, event, new IpsUser(*this, S_NAME), i.get_snort_config());
+    if (!contextual && find(fields.begin(), fields.end(), "alert_suppressed") != fields.end())
+        DataBus::subscribe_global(de_pub_key, DetectionEventIds::SUPPRESSED_BLOCK,
+            new IpsUser(*this, S_NAME), i.get_snort_config());''')
 
 
 if __name__=='__main__':

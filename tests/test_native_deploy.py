@@ -71,6 +71,19 @@ class ArchiveTests(unittest.TestCase):
 
 
 class ConsoleUpdateTests(unittest.TestCase):
+    def test_engine_upgrade_enables_suppressed_block_field_on_existing_notice(self):
+        with mock.patch.dict(sys.modules,{'fcntl':types.SimpleNamespace()} if sys.platform=='win32' else {}):
+            module=load('deploy-session-engine')
+        previous="local common = 'ts uid session_id '\n" \
+                 "{ service = 'notice', on_events = 'ips_logging', fields = common .. 'sid rev' }\n"
+        candidate=module.extractor_config(previous,'ndr-session-2')
+        self.assertIn("get_module_version('extractor', 'inspector') >= 1 and 'alert_suppressed '",candidate)
+        self.assertTrue(candidate.endswith(".. common .. 'sid rev' }\n"))
+        self.assertEqual(module.extractor_config(candidate,'ndr-session-2'),candidate)
+        self.assertEqual(module.extractor_config(previous,'ndr-session-1'),previous)
+        with self.assertRaisesRegex(ValueError,'notice'):
+            module.extractor_config("local common = 'ts uid session_id '\n",'ndr-session-2')
+
     def test_session_engine_rollback_restores_engine_modules_static_and_keeps_data(self):
         with mock.patch.dict(sys.modules,{'fcntl':types.SimpleNamespace()} if sys.platform=='win32' else {}):
             module=load('deploy-session-engine')
@@ -78,16 +91,18 @@ class ConsoleUpdateTests(unittest.TestCase):
             root=Path(temporary);backups=root/'backups';backup=backups/'session-fixture';backup.mkdir(parents=True)
             program=root/'program';program.mkdir();prefix=root/'runtime';(prefix/'bin').mkdir(parents=True)
             config=root/'snort.lua';web=root/'web.json';layout=root/'layout.json'
+            receipt=root/'session-logger.json';rotation=root/'logrotate.conf'
             static=root/'static';static.mkdir();(static/'index.html').write_text('new-ui')
             previous=backup/'static-before';previous.mkdir();(previous/'index.html').write_text('old-ui')
             data=root/'events.db';data.write_bytes(b'untouched database')
             files={}
-            targets=[config,web,layout,prefix/'bin/snort',prefix/'engine-manifest.json',program/'ips-web']
+            targets=[config,web,layout,receipt,rotation,prefix/'bin/snort',prefix/'engine-manifest.json',program/'ips-web',program/'ips-supervisor']
             for i,path in enumerate(targets):
                 path.write_text('new');name='saved-'+str(i);(backup/name).write_text('old');files[str(path)]=name
             extra=program/'native_rules.py';extra.write_text('added');files[str(extra)]=None
             (backup/'state.json').write_text(json.dumps(dict(files=files,home_timer=True)))
-            with mock.patch.multiple(module,BACKUPS=backups,PROGRAM=program,PREFIX=prefix,CONFIG=config,WEB_CONFIG=web,LAYOUT=layout,STATIC=static), \
+            with mock.patch.multiple(module,BACKUPS=backups,PROGRAM=program,PREFIX=prefix,CONFIG=config,WEB_CONFIG=web,LAYOUT=layout,STATIC=static,
+                                     SESSION_RECEIPT=receipt,ROTATION=rotation), \
                     mock.patch.object(module,'run'),mock.patch.object(module.subprocess,'run'), \
                     mock.patch.object(module,'ready_engine'),mock.patch.object(module,'resume_manager'):
                 module.rollback(backup)

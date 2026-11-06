@@ -16,6 +16,10 @@ PulledPork3 独立安装。面板仅通过 `IPS_PULLEDPORK` 指定的入口传�
 
 面板保留原生 uid，但只按完整 session_id 关联。没有 ID 的事件独立保留，不用五元组、时间窗或 UID 猜测归属。使用其他 Snort 版本或缺少扩展时，先核对日志字段和原生校验结果。
 
+`ndr-session-2` 在告警抑制命中并触发会话阻断时，等待原始包的 DAQ `BLOCK` 或 `BLACKLIST` 判定，再通过 notice extractor 写入带 `alert_suppressed` 的记录。原生 `alert_json` 仍遵守告警抑制。每个被处置的原始包最多保留一条这类规则记录；检测模式的模拟阻断和没有会话的解码事件沿用原有路径。
+
+已有实例通过 `deploy.ps1 -UpdateBackend -UpdateEngine -EnginePackage <归档>` 同时更新引擎和控制台。已启用可选会话扩展时，使用与新引擎摘要匹配的扩展目录并传入 `-SessionLoggerDirectory`。`build_tools/check_arm64_inline.py --suppressed-blocks` 验证被抑制的 block、drop、reject，以及普通告警和检测模式下的模拟阻断。
+
 ## 验证
 
 `tests/check_snort_native.py` 提供本地合成流量回放；`build_tools/check_arm64_inline.py` 提供完整 ARM64 内核下的 NFQUEUE 测试。用户态 QEMU 的结果不能替代内核内联测试。引擎、测试虚拟机和规则归档均单独准备，不随源码分发。
@@ -114,7 +118,7 @@ OpenAppID 自动更新来源核查：[官方下载目录](https://www.snort.org/
 
 日志句柄保存在 Inspector 的线程存储中，遵循 Snort 的 copy_thread_storage 重载约定；不能按 Inspector 对象地址保存在线程局部映射，因为配置重载可能更换对象并跳过 tinit。旧插件迁移时可在数据线程延迟打开追加日志，模块创建确保 FlowData 身份已初始化。原生回归覆盖冷启动、首次热启用、带存活 TCP 会话的配置重载和共享库替换，并检查握手日志保留、会话身份连续及重载后的更新输出。
 
-扩展只适配固定 Snort 源码与 `ndr-session-1` 布局。Debian 构建环境由 `build_tools/build-snort3-arm64.sh` 准备，使用 `build_tools/build_session_logger.py --engine <匹配的二进制> --output <源码目录外>` 导出扩展及清单。构建器获取校验过的官方源码并应用匹配头文件补丁；发行清单绑定源码、扩展和引擎 SHA-256。不得拿同版未打补丁的 SDK 代替。
+扩展使用与固定 Snort 源码和当前补丁修订匹配的头文件。Debian 构建环境由 `build_tools/build-snort3-arm64.sh` 准备，使用 `build_tools/build_session_logger.py --engine <匹配的二进制> --output <源码目录外>` 导出扩展及清单。构建器获取校验过的官方源码并应用匹配头文件补丁；发行清单绑定源码、扩展和引擎 SHA-256。不得拿同版未打补丁的 SDK 代替。
 
 部署采用 `deploy.ps1 -Target root@sensor.example -UpdateBackend -SessionLoggerDirectory <扩展目录>`。先备份和 Snort 配置校验，再通过 `snort.reload_config(filename, plugin_path)` 热加载，确认配置代数推进与进程身份不变。失败恢复配置、安装收据、启动程序与轮转设置。启动器从只读收据验证扩展；过渡期间已运行的启动器若重建引擎，配置可安全省略尚未加载的可选模块，管理器按进程身份自动恢复热加载。无需替换主程序或清理历史日志。
 

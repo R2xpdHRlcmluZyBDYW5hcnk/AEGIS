@@ -23,10 +23,14 @@ file_id = { }
 file_policy = { enable_type = true, enable_signature = true }
 file_connector = { { connector = 'ndr', name = 'ndr', direction = 'transmit', text_format = true } }
 local common = 'ts uid session_id id.orig_h id.orig_p id.resp_h id.resp_p pkt_num tenant_id '
+local notice_fields = common .. 'gid sid rev msg proto action ips_action ids_reason refs'
+if get_module_version('extractor', 'inspector') >= 1 then
+    notice_fields = notice_fields .. ' alert_suppressed'
+end
 extractor = {
     formatting = 'json', connector = 'ndr', time = 'unix',
     protocols = {
-        { service = 'notice', on_events = 'ips_logging', fields = common .. 'gid sid rev msg proto action ips_action ids_reason refs' },
+        { service = 'notice', on_events = 'ips_logging', fields = notice_fields },
         { service = 'weird', on_events = 'builtin', fields = common .. 'gid sid msg proto source' },
         { service = 'conn', on_events = 'eof', fields = common .. 'duration proto service orig_pkts resp_pkts orig_bytes resp_bytes conn_state history' },
         { service = 'http', on_events = 'eot', fields = common .. 'method host uri user_agent referrer origin version status_code status_msg trans_depth request_body_len response_body_len resp_mime_types orig_filenames resp_filenames' },

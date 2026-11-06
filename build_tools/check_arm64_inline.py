@@ -113,9 +113,11 @@ result=$?
 echo ARM64_INLINE_RESULT=$result
 busybox dmesg | busybox tail -n 12
 ''')
-    if test=='nat':
+    if test!='native':
         path=root/'run-test.sh'
-        path.write_text(path.read_text().replace('tests/check_snort_native.py --inline','tests/check_nfq_nat.py'))
+        command={'nat':'tests/check_nfq_nat.py',
+                 'suppressed':'tests/check_snort_native.py --inline --suppressed-blocks'}[test]
+        path.write_text(path.read_text().replace('tests/check_snort_native.py --inline',command))
     names=subprocess.check_output(['find','.','-print0'],cwd=init)
     archive=subprocess.run(['cpio','--null','-o','--format=newc'],input=names,cwd=init,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,check=True).stdout
     (WORK/'initrd.gz').write_bytes(gzip.compress(archive,compresslevel=1))
@@ -124,10 +126,13 @@ busybox dmesg | busybox tail -n 12
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--nat',action='store_true');args=parser.parse_args()
+    tests=parser.add_mutually_exclusive_group()
+    tests.add_argument('--nat',action='store_true')
+    tests.add_argument('--suppressed-blocks',action='store_true')
+    args=parser.parse_args()
     if WORK.parent!=Path('/var/tmp') or not WORK.name.startswith('ips-snort3-vm'):
         raise ValueError('Unexpected VM workspace')
-    root=prepare('nat' if args.nat else 'native')
+    root=prepare('nat' if args.nat else 'suppressed' if args.suppressed_blocks else 'native')
     command=['qemu-system-aarch64','-machine','virt','-cpu','max','-smp','4','-m','2048','-nographic','-no-reboot',
              '-kernel',str(root/'boot'/('vmlinuz-'+KERNEL)),'-initrd',str(WORK/'initrd.gz'),
              '-append','console=ttyAMA0 panic=-1','-virtfs','local,path='+str(root)+',mount_tag=rootfs,security_model=none',
