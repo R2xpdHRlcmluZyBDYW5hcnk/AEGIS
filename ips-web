@@ -5849,15 +5849,20 @@ class App:
                     event_counts={anchor.get('type','unknown'):1}, action_counts={},
                     records=[anchor], anchor=anchor)
 
-    @data_query(cache=False)
+    @data_query(cache=False,seconds=3)
     def summary_dns_context(self, params):
-        session=params.get('session_id')
-        if not isinstance(session,str) or not re.fullmatch(r'[0-9a-f]{32}:[0-9a-f]{16}',session):
-            raise ValueError('DNS 关联需要引擎会话 ID')
-        context=self.db.session_context(session)
-        if not context:return dict(status='not_found',records=[])
         from dns_context import candidates
-        return candidates(self.db,context)
+        try:
+            if 'target' in params:
+                context = self.summary_context(params['target'])
+            else:
+                session = params.get('session_id')
+                if not isinstance(session,str) or not re.fullmatch(r'[0-9a-f]{32}:[0-9a-f]{16}',session):
+                    raise ValueError('DNS 关联需要事件标识或引擎会话 ID')
+                context = self.db.session_context(session)
+            return candidates(self.db,context) if context else dict(status='not_found',records=[])
+        except sqlite3.Error:
+            raise RuntimeError('DNS 关联检索未完成') from None
 
     @data_query(cache=False,seconds=3)
     def summary_hunt(self, params):
@@ -5896,6 +5901,12 @@ class App:
         if session:
             conditions.append("COALESCE(session_id,'')<>?");bound.append(session)
             display+=' AND NOT session_id:'+json.dumps(session)
+        else:
+            # Without session identity, exclude the anchor's event type and timestamp.
+            anchor_type = context['anchor']['type']
+            conditions.append('NOT (type=? AND ts/1000.0=?)')
+            bound.extend([anchor_type, first])
+            display += ' AND NOT (type:'+json.dumps(anchor_type)+' AND time:'+str(first)+')'
         condition=' AND '.join(conditions)
         with self.db.lock:
             self.db._hunt_functions()

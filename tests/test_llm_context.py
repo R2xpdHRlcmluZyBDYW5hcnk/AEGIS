@@ -8,7 +8,7 @@ import unittest
 from unittest import mock
 
 from tests import test_data_layer as fixture
-from tests.test_llm_assistant import Provider
+from tests.test_llm_assistant import Provider, model_stage
 from llm_assistant import LocalAssistant, summary_payload, SUMMARY_PROMPT, hunt_plan_payload, select_hunts
 
 m = fixture.m
@@ -55,7 +55,7 @@ class SessionContextTests(unittest.TestCase):
         self.assertNotIn('Different session',payload['messages'][1]['content'])
         self.assertNotIn('private-fixture',payload['messages'][1]['content'])
         self.assertEqual(meta['scope'],'session')
-        self.assertIn('没有威胁证据时说明通信情况',SUMMARY_PROMPT)
+        self.assertIn('Simplified Chinese',SUMMARY_PROMPT)
         self.assertLessEqual(sum(len(v['content'].encode()) for v in payload['messages']),1500)
 
     def test_no_session_never_merges_by_shared_endpoints_community_or_flow(self):
@@ -90,6 +90,22 @@ class SessionContextTests(unittest.TestCase):
         self.assertEqual(data['actions']['blocked'],1)
         self.assertIn('Observed command',payload['messages'][1]['content'])
 
+    def test_summary_keeps_reset_action_and_protocol_anomaly_as_separate_evidence(self):
+        signature = 'Synthetic shellcode signature with a complete rule name'
+        self.fixture.add('drop', self.stamp, snort_native=dict(session_id=FIRST, ips_action='reject'),
+                         drop=dict(reason='reset'),
+                         alert=dict(signature=signature, signature_id=650, severity=1, action='blocked'))
+        self.add('anomaly', 1, anomaly=dict(type='ssl', event='TCP max queued reassembly bytes exceeded threshold'))
+        context = self.app.summary_context(self.target('drop'))
+        payload, _ = summary_payload(context)
+        data = json.loads(payload['messages'][1]['content'])
+        self.assertEqual(data['focus']['sig'], signature)
+        self.assertEqual((data['focus']['type'], data['focus']['action'], data['focus']['ips_action'],
+                          data['focus']['reason']), ('drop', 'blocked', 'reject', 'reset'))
+        anomaly = next(row for row in data['records'] if row['type'] == 'anomaly')
+        self.assertIn('TCP max queued reassembly bytes exceeded threshold', anomaly['anom'])
+        self.assertNotIn('reason', anomaly)
+
 
 class SummaryPipelineTests(unittest.TestCase):
     setUp=SessionContextTests.setUp
@@ -114,7 +130,7 @@ class SummaryPipelineTests(unittest.TestCase):
         self.add('http',4,SECOND,src_ip='192.0.2.99',dest_ip='198.51.100.99',http=dict(status=403))
         assistant,server=self.provider()
         def respond(payload):
-            return json.dumps({'checks':[{'terms':[['status','>=',400]],'reason':'比较其他连接的响应'}]}) if '狩猎助手' in payload['messages'][0]['content'] else '通信概览：HTTP 返回403。研判依据：尚未证实攻击。'
+            return json.dumps({'checks':[{'terms':[['status','>=',400]],'reason':'比较其他连接的响应'}]}) if model_stage(payload)=='hunt' else '通信概览：HTTP 返回403。研判依据：尚未证实攻击。'
         server.response_for=respond
         output=[]
         assistant.generate(self.app,'owner',dict(kind='summary',target=self.target()),lambda v:output.append(v) or True,lambda:False)
@@ -150,7 +166,7 @@ class SummaryPipelineTests(unittest.TestCase):
         natural='检查 type:alert 或 action:blocked，同时验证 sni 是否包含 alpha 或 beta。'
         for bad in (natural,json.dumps({'queries':[natural]}),json.dumps({'checks':[natural]}),'```json\n{"checks":[',json.dumps({'checks':['unknown']})):
             with self.subTest(response=bad):
-                server.response_for=lambda payload:bad if '狩猎助手' in payload['messages'][0]['content'] else '通信概览：已取得检索结果。'
+                server.response_for=lambda payload:bad if model_stage(payload)=='hunt' else '通信概览：已取得检索结果。'
                 output=[]
                 assistant.generate(self.app,'owner',dict(kind='summary',target=self.target()),lambda v:output.append(v) or True,lambda:False)
                 result=output[-1]['result']
@@ -160,8 +176,8 @@ class SummaryPipelineTests(unittest.TestCase):
     def test_partial_model_plan_falls_back_without_failing_final_summary(self):
         self.add('tls',0,tls=dict(sni='alpha.example.test'))
         assistant,server=self.provider()
-        server.response_for=lambda payload:'{"checks":[' if '狩猎助手' in payload['messages'][0]['content'] else '通信概览：普通通信，暂无攻击依据。'
-        server.finish_for=lambda payload:'length' if '狩猎助手' in payload['messages'][0]['content'] else 'stop'
+        server.response_for=lambda payload:'{"checks":[' if model_stage(payload)=='hunt' else '通信概览：普通通信，暂无攻击依据。'
+        server.finish_for=lambda payload:'length' if model_stage(payload)=='hunt' else 'stop'
         output=[]
         assistant.generate(self.app,'owner',dict(kind='summary',target=self.target()),lambda v:output.append(v) or True,lambda:False)
         self.assertEqual(output[-1]['result']['hunt_status'],'invalid')
@@ -171,7 +187,7 @@ class SummaryPipelineTests(unittest.TestCase):
         self.add('http',1,SECOND,http=dict(status=502))
         assistant,server=self.provider()
         checks=[dict(terms=[['status','>',499]],reason='比较响应异常'),dict(terms=[['payload','=','secret']],reason='无效字段')]
-        server.response_for=lambda payload:json.dumps(dict(checks=checks)) if '狩猎助手' in payload['messages'][0]['content'] else '通信概览：需进一步核查。'
+        server.response_for=lambda payload:json.dumps(dict(checks=checks)) if model_stage(payload)=='hunt' else '通信概览：需进一步核查。'
         output=[];assistant.generate(self.app,'owner',dict(kind='summary',target=self.target()),lambda v:output.append(v) or True,lambda:False)
         result=output[-1]['result'];self.assertEqual(server.calls,2)
         self.assertEqual(result['hunts'][0]['total'],1)
@@ -180,10 +196,30 @@ class SummaryPipelineTests(unittest.TestCase):
 
     def test_empty_model_plan_does_not_run_a_baseline_search(self):
         self.add('tls',0);assistant,server=self.provider()
-        server.response_for=lambda payload:'{"checks":[]}' if '狩猎助手' in payload['messages'][0]['content'] else '通信概览：普通连接。'
+        server.response_for=lambda payload:'{"checks":[]}' if model_stage(payload)=='hunt' else '通信概览：普通连接。'
         with mock.patch.object(self.app,'summary_hunt',side_effect=AssertionError('No query was proposed')):
             output=[];assistant.generate(self.app,'owner',dict(kind='summary',target=self.target()),lambda v:output.append(v) or True,lambda:False)
         self.assertEqual(output[-1]['result']['hunts'],[]);self.assertEqual(output[-1]['result']['hunt_status'],'not_needed')
+
+    def test_standalone_event_gets_dns_candidate_even_when_hunt_plan_is_invalid(self):
+        self.add('tls', 0, None, tls=dict(sni='observed.example.test'))
+        self.add('dns', -10, None, proto='UDP', dest_ip='198.51.100.53',
+                 dns=dict(rrname='observed.example.test', answers=[dict(rdata='198.51.100.2')]))
+        _, rows = self.db.search_range(self.stamp-1, self.stamp+1, types=['tls'], list_view=True)
+        target = dict(kind='record', key=rows[0]['record_id'])
+        assistant, server = self.provider()
+        server.response_for = lambda payload: 'invalid plan' if model_stage(payload) == 'hunt' else '观察到候选域名。'
+        output = []
+        assistant.generate(self.app, 'owner', dict(kind='summary', target=target),
+                           lambda frame: output.append(frame) or True, lambda: False)
+        result = output[-1]['result']
+        self.assertEqual(result['hunt_status'], 'invalid')
+        self.assertEqual(result['context']['scope'], 'event')
+        clue, = result['dns_clues']['records']
+        self.assertTrue(clue['name_matches'])
+        self.assertEqual(self.app.record({'key': clue['record_id']})['record']['type'], 'dns')
+        final = json.loads(server.payloads[-1]['messages'][1]['content'])
+        self.assertEqual(final['dns_hint']['name'], 'observed.example.test')
 
     def test_validation_and_execution_errors_have_distinct_reasons(self):
         self.add('tls',0)

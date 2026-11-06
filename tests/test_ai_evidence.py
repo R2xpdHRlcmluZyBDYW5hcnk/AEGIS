@@ -68,11 +68,14 @@ class EvidenceTests(unittest.TestCase):
         self.add('tls',0,None,tls=dict(sni='anonymous.example.test'))
         _,rows=self.db.search_range(self.stamp-1,self.stamp+1,types=['tls'],list_view=True)
         target=dict(kind='record',key=rows[0]['record_id'])
-        self.add('http',10,fixture.SECOND,http=dict(status=503))
+        self.add('tls',10,fixture.SECOND,tls=dict(sni='anonymous.example.test'))
         context=self.app.summary_context(target);self.assertEqual(context['total_records'],1)
-        result=self.app.summary_hunt(dict(target=target,query='status:>499'))
+        result=self.app.summary_hunt(dict(target=target,query='sni:"anonymous.example.test"'))
         self.assertEqual(result['total'],1);self.assertFalse(result['excluded_current_session'])
         self.assertNotIn('session_id:',result['query'])
+        low, high = result['range']
+        hits = self.app.hunt({'q':result['query'],'from':str(low),'to':str(high),'view':'list'})
+        self.assertEqual([row['record_id'] for row in hits['events']], [result['records'][0]['record_id']])
 
     def test_csv_includes_blocked_native_detections_and_excludes_ruleless_drops(self):
         self.add('drop',0,alert=dict(signature='blocked detection',signature_id=77,severity=1,action='blocked'))

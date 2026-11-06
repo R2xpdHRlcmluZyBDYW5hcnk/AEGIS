@@ -14,9 +14,10 @@ def candidates(db, context):
     if not isinstance(first,(int,float)) or not math.isfinite(first):return dict(status='not_applicable',records=[])
     rows=db.context_records("type='dns' AND src=? AND ts>=? AND ts<=?",[client,(first-300)*1000,(first+2)*1000],128)
     names={str(row.get(field,'')).strip().rstrip('.').lower() for row in context['records'] for field in ('sni','host') if row.get(field)}
+    session = context.get('session_id')
     matches=[];seen=set()
     for row in rows:
-        if row.get('session_id')==context.get('session_id'):continue
+        if session and row.get('session_id') == session:continue
         name=row.get('dns','').rstrip('.')
         if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,252}',name):continue
         answers=set()

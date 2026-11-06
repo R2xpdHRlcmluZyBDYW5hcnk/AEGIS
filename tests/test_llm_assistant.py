@@ -12,9 +12,19 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from llm_assistant import LocalAssistant, VisibleText, candidates, rule_from_choice, validate_rule, prompt_payload
+from llm_assistant import (COMPACT_SUMMARY_PROMPT, HUNT_PROMPT, SUMMARY_PROMPT, LocalAssistant,
+                           VisibleText, candidates, rule_from_choice, validate_rule, prompt_payload)
 
 ROW = dict(src='192.0.2.1', dst='198.51.100.2', dport=80, proto='TCP', app='http', host='example.test', sig='Observed alert')
+
+
+def model_stage(payload):
+    system = payload['messages'][0]['content']
+    if system == HUNT_PROMPT:
+        return 'hunt'
+    if system in (SUMMARY_PROMPT, COMPACT_SUMMARY_PROMPT):
+        return 'summary'
+    return 'rule'
 
 
 class Provider(BaseHTTPRequestHandler):
@@ -30,8 +40,7 @@ class Provider(BaseHTTPRequestHandler):
         self.send_header('Content-Type', 'text/event-stream')
         self.end_headers()
         self.server.entered.set()
-        system=self.server.payload['messages'][0]['content']
-        stage='hunt' if '狩猎助手' in system else 'summary' if '分析助手' in system else 'rule'
+        stage=model_stage(self.server.payload)
         stalled = lambda:(self.server.stall and getattr(self.server,'stall_stage',stage)==stage) or self.server.calls in getattr(self.server,'stall_calls',set())
         if stalled():
             while stalled() and not self.server.stop.is_set():
@@ -45,10 +54,9 @@ class Provider(BaseHTTPRequestHandler):
         if stage=='hunt' and getattr(self.server,'natural_plan',False):
             text=json.dumps({'queries':['检查 type:alert 或 action:blocked，同时验证 sni 是否包含 alpha 或 beta。']})
         if text is None:
-            system=self.server.payload['messages'][0]['content']
-            if '狩猎助手' in system:
+            if stage == 'hunt':
                 text=json.dumps({'checks':[{'terms':[['proto','=','TCP'],['dport','=',443]],'reason':'比较附近的加密连接'}]})
-            elif '分析助手' in system:
+            elif stage == 'summary':
                 text='**通信概览**：当前会话存在通信记录。\n行为与处置：结合检索结果核查。\n研判依据：尚不能确认入侵成功。\n建议核查：查看命中日志。'
             else:
                 text=json.dumps(dict(candidate=0,message='Observed communication',reason='当前事件的通信端点',limitations='可能匹配正常访问'))
@@ -163,12 +171,12 @@ class AssistantTests(unittest.TestCase):
     def test_summary_retries_once_when_thinking_fills_the_generation_budget(self):
         self.assistant.summary_max_tokens=1024
         def thinking_summary(payload):
-            return '分析助手' in payload['messages'][0]['content'] and payload['enable_thinking']
+            return model_stage(payload)=='summary' and payload['enable_thinking']
 
         def deltas(payload):
             if thinking_summary(payload):
                 return [{'reasoning_content':'逐步核对证据，尚未写出正文。'}]
-            if '狩猎助手' in payload['messages'][0]['content']:
+            if model_stage(payload)=='hunt':
                 return [{'content':'{"checks":[]}'}]
             return [{'content':'已观察到连接与告警。'}]
 
@@ -193,14 +201,14 @@ class AssistantTests(unittest.TestCase):
 
     def test_summary_keeps_partial_public_text_on_length_finish(self):
         self.server.text='已观察到连接。'
-        self.server.finish_for=lambda payload:'length' if '分析助手' in payload['messages'][0]['content'] else 'stop'
+        self.server.finish_for=lambda payload:'length' if model_stage(payload)=='summary' else 'stop'
         result=self.generate(dict(self.body,kind='summary'))
         self.assertEqual(result['text'],self.server.text)
         self.assertTrue(result['truncated'])
         self.assertEqual(self.server.calls,3)
 
     def test_summary_replaces_a_clipped_answer_with_a_complete_retry(self):
-        self.server.response_for=lambda payload: ('{"checks":[]}' if '狩猎助手' in payload['messages'][0]['content']
+        self.server.response_for=lambda payload: ('{"checks":[]}' if model_stage(payload)=='hunt'
             else '截断的首稿' if payload['enable_thinking'] else '完整的简明总结。')
         self.server.finish_for=lambda payload:'length' if payload['enable_thinking'] else 'stop'
         output=[]
@@ -211,7 +219,7 @@ class AssistantTests(unittest.TestCase):
         self.assertFalse(output[-1]['result']['truncated'])
 
     def test_summary_stream_separates_reasoning_deltas_from_summary_and_tagged_content(self):
-        self.server.deltas_for=lambda payload:([{'content':'分析说明：先核对相似连接。\n{"checks":[]}'}] if '狩猎助手' in payload['messages'][0]['content'] else
+        self.server.deltas_for=lambda payload:([{'content':'分析说明：先核对相似连接。\n{"checks":[]}'}] if model_stage(payload)=='hunt' else
             [{'reasoning_content':'先核对'},{'reasoning_content':'连接方向。'},{'content':'<thi'},{'content':'nk>tagged reasoning</th'},
              {'content':'ink>分析说'}, {'content':'明：现有证据有限'}, {'content':'。\n通信概览：'}, {'content':'公开正文。'}])
         output=[]
@@ -231,7 +239,7 @@ class AssistantTests(unittest.TestCase):
 
     def test_partial_body_arrives_before_completion_and_disconnect_cancels(self):
         self.server.stream_prefix=True
-        self.server.response_for=lambda payload:'{"checks":[]}' if '狩猎助手' in payload['messages'][0]['content'] else '通信概览：正在逐步输出可见的测试正文。'
+        self.server.response_for=lambda payload:'{"checks":[]}' if model_stage(payload)=='hunt' else '通信概览：正在逐步输出可见的测试正文。'
         disconnected=threading.Event();received=threading.Event();output=[];errors=[]
         def send(item):
             output.append(item)

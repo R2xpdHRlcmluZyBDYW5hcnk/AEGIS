@@ -82,7 +82,7 @@ app.assistant = LocalAssistant({'enabled':False})
 ai_provider = None
 if os.environ.get('NDR_PREVIEW_AI') == '1':
     import http.client
-    from test_llm_assistant import Provider
+    from test_llm_assistant import Provider, model_stage
     ai_provider = ThreadingHTTPServer(('127.0.0.1',0),Provider)
     ai_provider.daemon_threads = True
     ai_provider.entered, ai_provider.cancelled, ai_provider.stop = threading.Event(), threading.Event(), threading.Event()
@@ -297,7 +297,7 @@ class PreviewHandler(m.Handler):
     def do_GET(self):
         if self.path=='/__test/ai-status' and ai_provider:
             if not self._require():return
-            stages=['hunt' if '狩猎助手' in p['messages'][0]['content'] else 'summary' if '分析助手' in p['messages'][0]['content'] else 'rule' for p in getattr(ai_provider,'payloads',[])]
+            stages=[model_stage(payload) for payload in getattr(ai_provider,'payloads',[])]
             return self._json(dict(calls=ai_provider.calls,cancellations=ai_provider.cancellations,stages=stages))
         if self.path.startswith('/api/rules') or self.path.split('?', 1)[0] in ('/api/incidents', '/api/events', '/api/hunt'):
             delay = min(5, max(0, float(os.environ.get('NDR_PREVIEW_DELAY', '0'))))
