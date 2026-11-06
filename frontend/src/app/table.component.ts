@@ -8,7 +8,7 @@ import { RuleTargetComponent } from './rule-target.component';
 export interface Column {key:string;label:string;kind?:string;width?:number;}
 export function lastPageOffset(total:number,size=50):number{return Math.floor(Math.max(0,total-1)/size)*size;}
 @Component({changeDetection:ChangeDetectionStrategy.Eager,selector:'ndr-table',standalone:true,imports:[CommonModule,FormsModule,ConnectionSummaryComponent,RuleTargetComponent],template:`
-  <form class="table-tools" *ngIf="filterable" (ngSubmit)="submitFilter()"><label class="search"><span>⌕</span><input type="search" name="filter" autocomplete="off" data-1p-ignore="true" [attr.aria-label]="serverFilter?'搜索规则签名':label+'搜索'" [placeholder]="serverFilter?'搜索规则全文 / 分组 / 源 / sid:编号':'搜索完整列表…'" [ngModel]="query" (ngModelChange)="updateFilter($event)"></label><button type="submit" [disabled]="busy">搜索</button></form>
+  <form class="table-tools" *ngIf="filterable" (ngSubmit)="submitFilter()"><label class="search"><span>⌕</span><input type="search" name="filter" autocomplete="off" data-1p-ignore="true" [attr.aria-label]="serverFilter&&label==='表格'?'搜索规则签名':label+'搜索'" [placeholder]="filterPlaceholder || '搜索完整列表…'" [ngModel]="query" (ngModelChange)="updateFilter($event)"></label><button type="submit" [disabled]="busy">搜索</button></form>
   <div class="table-data"><div class="table-progress" *ngIf="busy" role="progressbar" aria-label="正在加载表格"><span></span></div>
   <div class="table-scroll" [attr.aria-busy]="busy"><table [style.min-width.px]="minimumWidth">
     <colgroup><col *ngIf="selectable" style="width:44px"><col *ngFor="let c of columns;let i=index;trackBy:trackColumn" [style.width.px]="fit && !widths.length ? (i===columns.length-1?64:null) : widths[i] || c.width || 150"><col *ngIf="interactive && showDetails" style="width:86px"></colgroup>
@@ -22,7 +22,8 @@ export function lastPageOffset(total:number,size=50):number{return Math.floor(Ma
   <div class="pager" *ngIf="pagination"><span>{{busy&&!count?'正在加载…':(count | number)+' 条 每页 '+size+' 条'}}</span><div><button class="quiet" [disabled]="current===0 || busy" (click)="move(-1)">← 上一页</button><span>{{busy&&!count?'—':(current+1)+' / '+pageCount}}</span><button class="quiet" [disabled]="current+1>=pageCount || busy" (click)="move(1)">下一页 →</button></div></div>
 `})
 export class TableComponent implements OnChanges,OnDestroy {
-  @Input() serverFilter=false;@Input() searchValue='';@Output() searchValueChange=new EventEmitter<string>();@Output() searchRequested=new EventEmitter<string>();@Input() fit=false;@Input() id='table';@Input() label='表格';@Input() columns:Column[]=[];@Input() rows:any[]=[];
+  @Input() serverFilter=false;@Input() searchValue:string|null=null;@Output() searchValueChange=new EventEmitter<string>();@Output() searchRequested=new EventEmitter<string>();@Input() fit=false;@Input() id='table';@Input() label='表格';@Input() columns:Column[]=[];@Input() rows:any[]=[];
+  @Input() filterPlaceholder='';@Input() filterMatch?: (query:string)=>((row:any)=>boolean)|undefined;
   @Input() selectable=false;@Input() interactive=false;@Input() showDetails=true;@Input() filterable=false;@Input() pagination=true;@Input() busy=false;
   @Input() total:number|null=null;@Input() offset=0;@Input() size=50;@Input() keyField='id';@Input() empty='暂无数据';
   @Input() selected=new Set<string>();@Output() selectedChange=new EventEmitter<Set<string>>();@Output() rowOpen=new EventEmitter<any>();@Output() pageChange=new EventEmitter<number>();
@@ -49,18 +50,18 @@ export class TableComponent implements OnChanges,OnDestroy {
   ngOnChanges(changes:SimpleChanges):void {
     if(changes['id'])this.pageAnchor=null;
     if(changes['id']){const previous=changes['id'].previousValue;if(previous)TableComponent.positions.set(previous,{page:this.page,query:this.query});const saved=TableComponent.positions.get(this.id);this.page=saved?.page||0;this.query=saved?.query||'';try{this.widths=JSON.parse(localStorage.getItem('ndr.angular.columns.'+this.id)||'[]');if(!Array.isArray(this.widths)||!this.widths.every(n=>Number.isFinite(n)&&n>=64))this.widths=[];}catch{this.widths=[];}}
-    if(this.serverFilter&&(changes['id']||changes['searchValue']))this.query=this.searchValue;
+    if(this.searchValue!==null&&(changes['id']||changes['searchValue']))this.query=this.searchValue;
     if(this.total===null&&!this.busy){this.page=Math.min(this.page,this.pageCount-1);const valid=new Set(this.rows.filter(r=>!r._disabled).map(r=>this.key(r)));const next=new Set([...this.selected].filter(k=>valid.has(k)));if(next.size!==this.selected.size){this.selected=next;queueMicrotask(()=>this.selectedChange.emit(next));}}
   }
-  updateFilter(value:string):void{this.query=value;this.page=0;if(this.serverFilter)this.searchValueChange.emit(value);}
-  submitFilter():void{this.page=0;if(this.serverFilter)this.searchRequested.emit(this.query);}
+  updateFilter(value:string):void{this.query=value;this.page=0;this.searchValueChange.emit(value);}
+  submitFilter():void{this.page=0;this.searchRequested.emit(this.query);}
   ngOnDestroy():void{TableComponent.positions.set(this.id,{page:this.page,query:this.query});}
   activate(event:Event,row:any):void{if(!this.interactive)return;const target=event.currentTarget as HTMLElement;const tr=target.tagName==='TR'?target:target.closest('tr');tr?.focus({preventScroll:true});this.rowOpen.emit(row);}
   rowKey(event:KeyboardEvent,row:any):void{if(event.target!==event.currentTarget||!['Enter',' '].includes(event.key))return;event.preventDefault();this.activate(event,row);}
   key(row:any):string{return String(row[this.keyField]??JSON.stringify(row));}
   track=(_:number,row:any)=>this.key(row);
   trackColumn=(_:number,column:Column)=>column.key;
-  get filtered():any[]{if(this.serverFilter)return this.rows;const q=this.query.toLowerCase().trim();return q?this.rows.filter(r=>Object.values(r).join(' ').toLowerCase().includes(q)):this.rows;}
+  get filtered():any[]{if(this.serverFilter)return this.rows;const q=this.query.toLowerCase().trim();return q?this.rows.filter(this.filterMatch?.(q)??(r=>Object.values(r).join(' ').toLowerCase().includes(q))):this.rows;}
   get count():number{return this.total??this.filtered.length;}
   get current():number{return this.total!==null?Math.floor(this.offset/this.size):Math.min(this.page,this.pageCount-1);}
   get pageCount():number{return Math.max(1,Math.ceil(this.count/this.size));}

@@ -21,7 +21,7 @@ from collections import deque
 SOCKET = '/run/ips-rule-manager/control.sock'
 REQUEST_LIMIT = 256 * 1024
 RESPONSE_LIMIT = 16 * 1024 * 1024
-FUNCTIONS = ('governance_state', 'rule_group_catalog', 'suppression_group_catalog',
+FUNCTIONS = ('governance_state', 'rule_group_catalog', 'suppression_group_catalog', 'rule_groups_search',
              'rule_group_detail', 'hunt_rules_list')
 APP_READS = ('rules_search', 'sources_catalog', 'rules_payload', 'rule_selection','rules_page')
 SYS_READS = ('reload_state','update_status','service')

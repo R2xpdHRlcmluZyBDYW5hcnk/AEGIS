@@ -4311,6 +4311,30 @@ def rule_group_members(name, source=None):
     return [signature_row(row) for row in _rule_group_rows(name,source)[0]]
 
 
+def rule_search_key(query):
+    """Explicit GID:SID or sid:SID selects one signature; plain text stays searchable."""
+    match = re.fullmatch(r'(?:sid:\s*)?([0-9]+)\s*:\s*([0-9]+)', query, re.IGNORECASE)
+    if match:
+        return signature_key(match.groups())
+    match = re.fullmatch(r'sid:\s*([0-9]+)', query, re.IGNORECASE)
+    return signature_key(match[1]) if match else None
+
+
+@catalog_read
+def matching_rule_groups(groups, query):
+    query = query.strip().casefold()
+    if not query:
+        return groups
+    token = rule_search_key(query)
+    if token is not None:
+        rule_group_catalog()
+        members = _GROUP_CACHE.get('members', {})
+        return [row for row in groups if token in members.get((row['name'], row['source']), ())]
+    return [row for row in groups if query in (' '.join(str(row.get(field, '')) for field in
+            ('name', 'label', 'source', 'selector', 'total', 'compiled')) +
+            (' 可用' if row.get('compiled') else ' 无启用规则')).casefold()]
+
+
 def _rule_group_rows(name, source=None, query='', offset=0, limit=None):
     """Keep undecorated members for filtering; serialize only the requested page."""
     rule_group_catalog()
@@ -4322,8 +4346,10 @@ def _rule_group_rows(name, source=None, query='', offset=0, limit=None):
     records={token:record for (group,origin),values in _GROUP_CACHE.get('group_records',{}).items()
              if group==name and (source is None or source==origin) for token,record in values.items()}
     needle=query.strip().lower()
-    tokens=sorted((token for token in sids if not needle or needle in str(signature_identity(token)[1])
-                   or needle in records.get(token,{}).get('msg',names.get(token,'未识别')).lower()),key=signature_identity)
+    exact = rule_search_key(needle)
+    tokens=sorted((token for token in sids if (token == exact if exact is not None else
+                   not needle or needle in str(signature_identity(token)[1])
+                   or needle in records.get(token,{}).get('msg',names.get(token,'未识别')).lower())),key=signature_identity)
     total=len(tokens)
     tokens=tokens[offset:offset+limit] if limit is not None else tokens[offset:]
     return [dict(records.get(token,_GROUP_CACHE.get('rule_records', {}).get(token, {})),
@@ -5012,8 +5038,10 @@ def hunt_rules_list():
                 text = line.strip()
                 if not text or text.startswith("#"):
                     continue
-                match = re.search(r"\bsid\s*:\s*(\d+)", text)
-                out.append({"sid": int(match.group(1)) if match else None, "line": text})
+                options = re.sub(r'"(?:\\.|[^"\\])*"', '""', text)
+                match = re.search(r"\bsid\s*:\s*(\d+)", options)
+                gid = re.search(r"\bgid\s*:\s*(\d+)", options)
+                out.append({"gid": int(gid[1]) if gid else 1, "sid": int(match[1]) if match else None, "line": text})
     except OSError:
         pass
     return out
@@ -5480,6 +5508,28 @@ def selector_configured(value, configured):
         return any(item.startswith("group:") and (fnmatch.fnmatchcase(value[6:], item[6:]) or
                    fnmatch.fnmatchcase(value[6:] + ".rules", item[6:])) for item in configured)
     return False
+
+
+def manageable_catalog_rule(row, scope):
+    if scope == 'disable':
+        return row.get('builtin') or row.get('policy_managed') is not False
+    if scope == 'action':
+        return not row.get('builtin') and row.get('policy_managed') is not False
+    return True
+
+
+@catalog_read
+def rule_groups_search(query='', scope=''):
+    if scope in ('suppress', 'suppress-remove'):
+        groups = suppression_group_catalog(removable=scope == 'suppress-remove')
+    elif scope in ('disable', 'action'):
+        configured = configured_selectors(scope)
+        groups = [row for row in rule_group_catalog() if row.get('source_enabled') is not False
+                  and manageable_catalog_rule(row, scope)
+                  and not selector_configured(row['selector'], configured)]
+    else:
+        groups = rule_group_catalog()
+    return matching_rule_groups(groups, query)
 
 
 def _selector_marker(value):
@@ -6700,20 +6750,32 @@ class App:
         """Resolve saved selectors against compiled, cached and custom rules, read-only."""
         selector = canonical_selector(selector)
         kind, _, code = selector.partition(":")
-        if kind not in ("sid", "group","group-source", "msg", "re", "ban") or not code or len(selector) > 2000:
+        if kind not in ("sid", "group","group-source", "source", "msg", "re", "ban") or not code or len(selector) > 2000:
             raise ValueError("无效规则范围")
         index = self.rules_index() or {"rules": [], "by_sid": {}}
         rule_group_catalog()
         candidates = dict(_GROUP_CACHE.get("rule_records", {}))
         candidates.update(index["by_sid"])
-        if kind in ("group","group-source"):
-            selected,_pattern=parse_group(selector)
-            if selected is not None:
-                if source is not None and source!=selected:raise ValueError('规则分组来源不一致')
-                source=selected
-            names = {row["name"] for row in rule_group_catalog()
-                     if group_matches(selector,row['name'],row['source']) and (source is None or row["source"] == source)}
-            members = {signature_key(row['sid'], row.get('gid',1)): row for name in sorted(names) for row in _rule_group_rows(name, source)[0]}
+        if kind in ("group", "group-source", "source"):
+            if kind == "source":
+                selected = code
+            else:
+                selected, _ = parse_group(selector)
+            if selected is not None and source is not None and source != selected:
+                raise ValueError('规则来源不一致')
+            source = selected if selected is not None else source
+            groups = [(row['name'], row['source']) for row in rule_group_catalog()
+                      if (source is None or row['source'] == source)
+                      and (kind == 'source' or group_matches(selector, row['name'], row['source']))]
+            members = {}
+            for name, origin in groups:
+                for row in _rule_group_rows(name, origin)[0]:
+                    token = signature_key(row['sid'], row.get('gid',1))
+                    if token not in members:
+                        members[token] = row
+                    else:
+                        known = members[token]
+                        members[token] = dict(known, origins=known.get('origins', []) + row.get('origins', []))
             rows = [dict(candidates.get(sid, {}), **row) for sid, row in members.items()]
         elif kind == "sid":
             token = signature_key(code)
@@ -6739,8 +6801,10 @@ class App:
                 raise ValueError("无效正则表达式：" + str(exc)) from exc
             rows = [row for row in candidates.values() if pattern.search(row.get("line", ""))]
         needle = str(query).strip().casefold()
-        rows = sorted((row for row in rows if not needle or needle in
-                       (str(row["sid"]) + " " + row.get("msg", "") + " " + row.get("line", "")).casefold()),
+        exact = rule_search_key(needle)
+        rows = sorted((row for row in rows if (signature_key(row['sid'], row.get('gid',1)) == exact if exact is not None
+                       else not needle or needle in
+                       (str(row["sid"]) + " " + row.get("msg", "") + " " + row.get("line", "")).casefold())),
                       key=lambda row: signature_identity(row['sid'],row.get('gid',1)))
         offset, limit = max(0, int(offset)), max(1, min(200, int(limit)))
         return dict(selector=selector, rules=rules_with_origins(rows[offset:offset+limit]),
@@ -6759,9 +6823,7 @@ class App:
             if value.startswith('sid:'):return value==included or value not in configured
             return canonical_selector(value) == included or not selector_configured(value, configured)
         def manageable(row):
-            if exclude=='disable': return row.get('builtin') or row.get('policy_managed') is not False
-            if exclude=='action': return not row.get('builtin') and row.get('policy_managed') is not False
-            return True
+            return manageable_catalog_rule(row, exclude)
         limit, offset = max(1, min(200, int(limit))), max(0, int(offset))
         index = self.rules_index()
         if index is None:
@@ -6787,13 +6849,13 @@ class App:
                     "group_search": {name: " ".join(" ".join(str(row.get(field, "")) for field in ("name", "label", "source"))
                                                    for row in _GROUP_CACHE["rows"] if row["name"] == name) for name in groups},
                     "offset": offset, "limit": limit}
-        exact_sid = q.lower().startswith("sid:")
-        if exact_sid:
-            q = q[4:].strip()
-        if exact_sid and re.fullmatch(r'[0-9]+(?::[0-9]+)?', q):
-            hit = index['by_sid'].get(signature_key(q))
+        exact = rule_search_key(q)
+        if exact is not None:
+            hit = index['by_sid'].get(exact)
             rows = [hit] if hit else []
         else:
+            if q.lower().startswith('sid:'):
+                q = q[4:].strip()
             needle = q.casefold()
             catalog = rule_group_catalog()
             matching_origins = {(row["name"], row["source"]) for row in catalog
@@ -6838,11 +6900,18 @@ class App:
             pending=bool(manager and self.sys.owner.drafts.dirty),
             sources_pending=bool(manager and self.sys.owner.drafts.sources_changed()))
         gov={};schedule=None
-        if tab=='catalog':data=self.rules_search(params.get('q',''),limit=params.get('limit',50),offset=params.get('offset',0),browse=True,include_groups=False)
-        elif tab=='groups':data=dict(groups=rule_group_catalog())
+        query=params.get('q','').strip()
+        if tab=='catalog':data=self.rules_search(query,limit=params.get('limit',50),offset=params.get('offset',0),browse=True,include_groups=False)
+        elif tab=='groups':
+            groups=rule_group_catalog()
+            data=dict(groups=groups)
+            if query:data['matching']=[row['selector'] for row in matching_rule_groups(groups,query)]
         elif tab=='manual':
             data=dict(rules=hunt_rules_list());summary['local_rules']=self.rules.local_rules()
-        elif tab=='sources':data=self.sources_catalog();schedule=self.rule_schedule.status()
+        elif tab=='sources':
+            data=self.sources_catalog();schedule=self.rule_schedule.status()
+            if query:
+                data=dict(data,matching=sorted({row['source'] for row in rule_groups_search(query)}))
         elif tab=='bans':data=dict(bans=self.rules.bans())
         else:gov=governance_state(details=True);data=gov
         return dict(summary=summary,governance=gov,data=data,schedule=schedule)
@@ -7477,7 +7546,7 @@ button:disabled{opacity:.4;cursor:not-allowed}
             if path=='/api/rules/page':
                 return self._json(self.app.rules_page(params))
             if path == "/api/rules/groups":
-                return self._json({"groups": suppression_group_catalog(removable=params.get("exclude") == "suppress-remove") if params.get("exclude") in ("suppress", "suppress-remove") else rule_group_catalog()})
+                return self._json({"groups": rule_groups_search(params.get("q", ""), params.get("exclude", ""))})
             if path == "/api/rules/group":
                 return self._json(rule_group_detail(params.get("name", ""), params.get("source"),
                     params.get("q", ""), params.get("offset") or 0, params.get("limit") or 50))

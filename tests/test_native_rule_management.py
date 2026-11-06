@@ -37,8 +37,15 @@ class NativeRuleManagementCase(unittest.TestCase):
         native=app.rules_search('sid:129:15')['rules'][0]
         self.assertEqual((text['gid'],native['gid']),(1,129))
         self.assertTrue(native['builtin'])
+        for query, identity in (('1:15', '1:15'), ('129:15', '129:15'), ('SID: 129 : 015', '129:15')):
+            self.assertEqual([r['signature'] for r in app.rules_search(query)['rules']], [identity])
+        self.assertEqual(app.rules_search('2:15')['total'],0)
+        self.assertEqual(app.rules_search('129:15',exclude='action')['total'],0)
+        self.assertEqual(app.rules_search('129:15',exclude='suppress')['total'],1)
         selected=app.rule_selection('group:snort-builtin-129-stream_tcp')
         self.assertEqual({r['selector'] for r in selected['rules']},{'sid:129:15','sid:129:18'})
+        self.assertEqual(app.rule_selection('group:snort-builtin-129-stream_tcp',query='129:15')['total'],1)
+        self.assertEqual(app.rule_selection('group:snort-builtin-129-stream_tcp',query='1:15')['total'],0)
         self.assertEqual(app.rules_search('stream_tcp',exclude='action')['total'],0)
 
     def test_whole_group_suppression_is_a_draft_and_removal_preserves_other_gid(self):

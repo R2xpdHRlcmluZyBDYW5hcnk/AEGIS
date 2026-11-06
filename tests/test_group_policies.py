@@ -32,9 +32,17 @@ class GroupPoliciesCase(unittest.TestCase):
             rows=app.rule_selection(selector)['rules'];self.assertEqual({r['sid'] for r in rows},ids)
             source=parse_group(selector)[0]
             self.assertTrue(all(r['origins']==[dict(source=source,group='one')] for r in rows))
+            collection=app.rule_selection('source:'+source,query='1:102',limit=1)
+            self.assertEqual(collection['total'],1)
+            self.assertEqual(collection['rules'][0]['origins'],[dict(source=source,group='one')])
+        self.assertEqual(app.rule_selection('source:snort/lightspd',query='1:103')['total'],0)
+        self.assertEqual(app.rule_selection('source:missing')['total'],0)
+        self.assertEqual(app.rules_page({'tab':'groups','q':'1:103'})['data']['matching'],[self.b])
         self.mutate('/api/rules/drop',{'values':[self.a]})
         available={r['selector'] for r in app.rules_search('',browse=True,exclude='action')['group_rows']}
         self.assertNotIn(self.a,available);self.assertIn(self.b,available)
+        picker=self.manager.dispatch(dict(operation='read',name='rule_groups_search',args=['1:102','action'],kwargs={}))
+        self.assertEqual({r['selector'] for r in picker},{self.b})
         self.mutate('/api/rules/reject',{'values':[self.b]})
         self.mutate('/api/rules/batch-delete',{'paths':['/api/rules/drop/'+__import__('urllib.parse',fromlist=['quote']).quote(self.a,safe='')]})
         self.assertEqual({r['value'] for r in self.draft.governance_state()['drop']},{self.b})

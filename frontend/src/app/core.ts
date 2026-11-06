@@ -115,5 +115,9 @@ export function bytes(value:any):string {if(value==null)return '—';const n=Num
 export function severity(value:any):string {return Number(value)===1?'高危':Number(value)===2?'中危':Number(value)===3?'低危':'未评级';}
 export function action(value:any):string {return ['blocked','block','drop','reject'].includes(value)?'已阻断':value==='allowed'||value==='pass'?'已放行':value||'—';}
 export function canonical(value:string):string {const [kind,...rest]=value.split(':');const code=rest.join(':').trim();if(!rest.length && /^\d+$/.test(kind))return 'sid:'+Number(kind);return kind==='sid'?'sid:'+code.split(':').map(n=>/^\d+$/.test(n)?String(Number(n)):n).join(':'):kind==='group'?'group:'+code.replace(/\.rules$/,''):value.trim();}
+export function ruleSignature(value:string):{gid:number;sid:number}|null {
+ const match=/^(?:sid:\s*)?(\d+)\s*:\s*(\d+)$|^sid:\s*(\d+)$/i.exec(value.trim());
+ return match?{gid:Number(match[1]??1),sid:Number(match[2]??match[3])}:null;
+}
 export function groupSelector(name:string,source?:string):string{return source===undefined?'group:'+name:'group-source:'+encodeURIComponent(source)+':'+encodeURIComponent(name);}
 export function groupTarget(value:string):string{if(!value.startsWith('group-source:'))return value.split(':').slice(1).join(':');const [,source,...name]=value.split(':');try{return decodeURIComponent(name.join(':'))+' '+decodeURIComponent(source);}catch{return value;}}

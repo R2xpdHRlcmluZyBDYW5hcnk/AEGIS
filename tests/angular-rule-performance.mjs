@@ -75,8 +75,72 @@ try {
  assert.equal(queries(from).filter(r=>new URL(r.url).pathname==='/api/rules/page').length,1);
  from=requests.length;await click('↻ 刷新');await until(`document.querySelector('ndr-rules .table-scroll').getAttribute('aria-busy')==='false'`);
  assert.deepEqual(queries(from).map(r=>new URL(r.url).pathname),['/api/rules/page']);
+ const table='ndr-rules > section ndr-table',picker='ndr-picker #picker-candidates',selected='ndr-rule-collection #selection-rules';
+ const search=async(scope,value,submit=false)=>{
+  await set(scope+' input[type="search"]',value);
+  if(submit)await evaluate(`document.querySelector(${JSON.stringify(scope+' form')}).requestSubmit()`);
+ };
+ const tableRows=scope=>`[...document.querySelectorAll(${JSON.stringify(scope+' tbody tr.clickable')})]`;
+ const close=async scope=>{
+  await evaluate(`document.querySelector(${JSON.stringify(scope+' [aria-label="关闭"]')}).click()`);
+  await until(`!document.querySelector(${JSON.stringify(scope+' dialog[open]')})`);
+ };
+ const identity='1:2100498';
+ for(const url of ['/api/rules/groups?q=1:2100498&exclude=action','/api/rules/selection?selector=source:et/open']){
+  const reply=await fetch(base+url);
+  assert.equal(reply.status,401);
+ }
+ await ruleTab('检测签名');await search(table,identity,true);
+ await until(`${tableRows(table)}.length===1&&${tableRows(table)}[0].textContent.includes('${identity}')`);
+ for(const tab of ['禁用策略','阻断动作','告警抑制']){
+  await ruleTab(tab);await click('＋ 新建',`document.querySelector('ndr-rules')`);
+  await set('ndr-picker input[type="search"]',identity);
+  await until(`${tableRows(picker)}.length===1&&${tableRows(picker)}[0].textContent.includes('${identity}')`);
+  await evaluate(`(()=>{const row=${tableRows(picker)}[0];row.focus();row.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));})()`);
+  await until(`document.querySelector('ndr-details dialog[open] h2')?.textContent.includes('${identity}')`);
+  await close('ndr-details');
+  assert.equal(await evaluate(`${tableRows(picker)}[0].querySelector('input').checked`),false);
+  await evaluate(`${tableRows(picker)}[0].querySelector('input').click()`);
+  await evaluate(`document.querySelector('ndr-picker .chips .quiet').click()`);
+  await until(`document.querySelector('ndr-details dialog[open] h2')?.textContent.includes('${identity}')`);
+  await close('ndr-details');
+  assert.equal(await evaluate(`${tableRows(picker)}[0].querySelector('input').checked`),true);
+  await evaluate(`document.querySelector('ndr-picker .chips button[aria-label^="移除"]').click()`);
+  await evaluate(`(()=>{const e=document.querySelector('ndr-picker [aria-label="选择对象类型"]');e.value='group';e.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+  await until(`${tableRows(picker)}.length===1&&${tableRows(picker)}[0].textContent.includes('emerging-scan')`);
+  await evaluate(`${tableRows(picker)}[0].click()`);
+  await until(`document.querySelector('ndr-rule-collection dialog[open] h2')?.textContent.includes('emerging-scan')`);
+  await set('ndr-rule-collection input[type="search"]',identity);
+  await evaluate(`document.querySelector('ndr-rule-collection form').requestSubmit()`);
+  await until(`${tableRows(selected)}.length===1&&${tableRows(selected)}[0].textContent.includes('${identity}')`);
+  await evaluate(`${tableRows(selected)}[0].click()`);
+  await until(`document.querySelector('ndr-details dialog[open] h2')?.textContent.includes('${identity}')`);
+  await close('ndr-details');await close('ndr-rule-collection');await close('ndr-picker');
+ }
+ await ruleTab('规则分组');await search(table,identity);
+ await until(`${tableRows(table)}.length===1&&${tableRows(table)}[0].textContent.includes('emerging-scan')`);
+ await ruleTab('规则源');await search(table,identity);
+ await until(`${tableRows(table)}.length===1&&${tableRows(table)}[0].textContent.includes('et/open')`);
+ await evaluate(`${tableRows(table)}[0].click()`);
+ await until(`document.querySelector('ndr-rule-collection dialog[open] h2')?.textContent.includes('规则集 et/open')&&${tableRows(selected)}.length>0`);
+ await set('ndr-rule-collection input[type="search"]','2:2100498');
+ await evaluate(`document.querySelector('ndr-rule-collection form').requestSubmit()`);
+ await until(`document.querySelector('ndr-rule-collection .empty')?.textContent.includes('未找到匹配规则')`);
+ await close('ndr-rule-collection');
+ for(const [tab,route,body] of [
+  ['禁用策略','disable',{values:['sid:2100498']}],
+  ['阻断动作','action',{selectors:['sid:2100498'],action:'drop'}],
+  ['告警抑制','suppress',{sids:['2100498']}],
+ ]){
+  assert.equal(await evaluate(`fetch('/api/rules/${route}',{method:'POST',headers:{'Content-Type':'application/json','X-Requested-With':'ips-web'},body:${JSON.stringify(JSON.stringify(body))}}).then(r=>r.json()).then(d=>d.ok)`),true);
+  await ruleTab(tab);
+  await search(table,identity);
+  await until(`${tableRows(table)}.length===1&&${tableRows(table)}[0].textContent.includes('2100498')`);
+  await search(table,'2:2100498');
+  await until(`!${tableRows(table)}.length`);
+ }
  assert.deepEqual(exceptions,[]);
- console.log('PASS: one query per load/tab/refresh/save; superseded HTTP request aborted; no cancellation error; source scheduling shares the page response');
+ console.log('PASS: bounded page requests; GID:SID search and rule, group, and source details in desktop rule management');
 } finally {
  if(ws)ws.close();chrome.kill();await pause(500);
  const resolved=path.resolve(profile);

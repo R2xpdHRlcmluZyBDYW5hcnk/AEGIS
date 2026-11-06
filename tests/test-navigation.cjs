@@ -6,6 +6,7 @@ class LiveQuery{start(){}stop(){}}
 const groupSelector=(name,source)=>'group-source:'+encodeURIComponent(source)+':'+encodeURIComponent(name);
 const core={groupSelector,groupTarget:value=>value,LiveQuery,canonical:value=>value.trim(),localDate:value=>value.toISOString().slice(0,16)};
 function load(file,imports={}){const exported={};vm.runInNewContext(ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS,experimentalDecorators:true}}).outputText,{exports:exported,require:name=>name==='@angular/core'?angular:imports[name]||{},queueMicrotask});return exported;}
+core.ruleSignature=load('frontend/src/app/core.ts').ruleSignature;
 const {EventsComponent}=load('frontend/src/app/pages/events.component.ts',{'../core':core});
 const calls=[],state={investigate:(...args)=>calls.push(args)};
 const events=new EventsComponent({},state,{});events.mode='drops';events.query='sid:123 OR sid:456';events.proto='TCP';
@@ -17,7 +18,8 @@ events.query='';events.proto='';events.initialChoice='60';events.investigateDrop
 assert.equal(calls[1][0],'type: drop AND src: "2001:db8::1"');assert.equal(calls[1][2].choice,'60');
 events.investigateDrop({key:'destinations'},{ip:'192.0.2.1'});assert.equal(calls[2][0],'type: drop AND dst: "192.0.2.1"');
 events.investigateDrop({key:'sources'},{ip:''});assert.equal(calls.length,3);
-const {RulesComponent}=load('frontend/src/app/pages/rules.component.ts',{'../core':core});
+const collection=load('frontend/src/app/rule-collection.component.ts',{'./core':core});
+const {RulesComponent}=load('frontend/src/app/pages/rules.component.ts',{'../core':core,'../rule-collection.component':collection});
 const opened=[],rules=new RulesComponent({},state,{rule:row=>opened.push(row)});
 rules.tab='manual';rules.openRow({sid:9900200,line:'custom'});assert.equal(opened[0].line,'custom');
 rules.tab='action';rules.openRow({value:'msg:Custom*',name:'Custom',action:'reject'});assert.equal(rules.selection.selector,'msg:Custom*');
