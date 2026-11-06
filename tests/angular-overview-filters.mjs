@@ -158,8 +158,54 @@ try {
   let exported='';for(let index=0;index<100;index++){try{exported=await readFile(path.join(download,'snort-alerts.csv'),'utf8');break;}catch{await pause(100);}}
   assert.ok(exported.includes('Native reject only'),'downloaded CSV includes blocked native detections');
   assert.ok(exported.includes('time,type,severity,sid,signature'),'download contains CSV rows and headers');
+  assert.equal(await evaluate(`document.querySelector('ndr-events .chart-spinner')`),null);
+
+  // Drive the overview stream one message at a time so pending states are observable.
+  await execute(`
+    const NativeEventSource = window.EventSource;
+    window.EventSource = class extends EventTarget {
+      static OPEN = NativeEventSource.OPEN;
+      readyState = NativeEventSource.CONNECTING;
+      constructor(url) {
+        super();
+        if (new URL(url, location.href).searchParams.get('topic') !== 'overview') return new NativeEventSource(url);
+        window.overviewTestStream = this;
+      }
+      close() { this.readyState = NativeEventSource.CLOSED; }
+    };
+    document.querySelector('[data-page="overview"]').click();
+  `);
+  const trendSpinner = "ndr-overview .trend .chart-spinner";
+  const redAlert = 'ndr-overview .error[role="alert"]';
+  await until(`!!document.querySelector(${JSON.stringify(trendSpinner)})`);
+  assert.equal(await evaluate(`getComputedStyle(document.querySelector(${JSON.stringify(trendSpinner)})).animationName`),'chart-spin');
+  assert.equal(await evaluate(`document.querySelector(${JSON.stringify(redAlert)})`),null,'waiting for the first chart shows no error');
+  await cdp('Emulation.setEmulatedMedia',{features:[{name:'prefers-reduced-motion',value:'reduce'}]});
+  assert.equal(await evaluate(`getComputedStyle(document.querySelector(${JSON.stringify(trendSpinner)})).animationName`),'none');
+  await cdp('Emulation.setEmulatedMedia',{features:[]});
+
+  const emitOverview = payload => execute(`
+    window.overviewTestStream.readyState = EventSource.OPEN;
+    window.overviewTestStream.onmessage({data: ${JSON.stringify(JSON.stringify(payload))}});
+  `);
+  const errorText = `document.querySelector(${JSON.stringify(redAlert)})?.textContent`;
+  await emitOverview({error:'实时连接中断'});
+  await until(`${errorText}?.includes('实时连接中断') && !document.querySelector('ndr-overview .chart-spinner')`);
+
+  await emitOverview({...overview,network:{available:false,status:'pending'}});
+  await until(`!!document.querySelector('.network-preparing .chart-spinner') && !(${errorText})`);
+  await emitOverview({...overview,network:{available:false,status:'error',error:'事件库不可用'}});
+  await until(`${errorText}?.includes('事件库不可用') && !document.querySelector('.network-preparing .chart-spinner')`);
+
+  const settledNetwork = {...overview.network,available:true,status:'ready',error:''};
+  await emitOverview({...overview,network:settledNetwork,read_state:{status:'stale',as_of:1}});
+  await until(`!!document.querySelector('.trend ndr-chart svg') && !!document.querySelector(${JSON.stringify(trendSpinner)}) && !(${errorText})`);
+  await emitOverview({...overview,network:settledNetwork,read_state:{status:'stale',error:'读取失败'}});
+  await until(`${errorText}?.includes('读取失败') && !document.querySelector('ndr-overview .chart-spinner')`);
+  await emitOverview({...overview,network:settledNetwork});
+  await until(`!!document.querySelector('.trend ndr-chart svg') && !document.querySelector('ndr-overview .chart-spinner') && !(${errorText})`);
   assert.deepEqual(exceptions,[]);
-  console.log('PASS: log-based overview ranks, session-cohort filters, DNS-to-UDP statistics, evidence details and non-empty native-alert CSV download');
+  console.log('PASS: overview chart loading and error states, log-based ranks, session-cohort filters, DNS-to-UDP statistics, evidence details and native-alert CSV download');
 } finally {
  if(ws)ws.close();chrome.kill();await pause(500);const resolved=path.resolve(profile);assert.ok(resolved.startsWith(path.resolve(tmpdir())+path.sep)&&path.basename(resolved).startsWith('ndr-chrome-'));await rm(resolved,{recursive:true,force:true,maxRetries:5,retryDelay:200}).catch(()=>{});
 }

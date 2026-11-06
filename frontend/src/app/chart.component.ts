@@ -7,8 +7,8 @@ import { ChartPalette, defaultPalette, rankOptions, trendOptions } from './chart
 @Component({changeDetection:ChangeDetectionStrategy.Eager,selector:'ndr-chart',standalone:true,imports:[CommonModule],template:`
  <div class="chart-wrap" [class.rank-chart]="ranks!==null">
   <div #surface class="echarts-surface" [style.height.px]="ranks!==null?Math.max(220,ranks.length*32+40):null" role="img" [attr.aria-label]="ranks!==null?title+'，点击排行筛选概览':'告警与阻断趋势，点击柱形筛选，可滚轮缩放、按住鼠标左右拖动'"></div>
-  <div class="chart-empty" *ngIf="loading">正在加载图表…</div>
-  <div class="chart-empty" *ngIf="error"><span>{{error}} <button class="quiet" (click)="load()">重试</button></span></div>
+  <div class="chart-empty" *ngIf="loading" role="status"><span class="chart-status"><span class="chart-spinner" aria-hidden="true"></span>正在加载图表…</span></div>
+  <div class="chart-empty" *ngIf="error" role="alert"><span>{{error}} <button class="quiet" (click)="load()">重试</button></span></div>
   <div class="chart-empty" *ngIf="!loading && !error && ranks!==null && !ranks.length">暂无数据</div>
   <button *ngIf="ranks===null && viewport.zoomed" class="quiet chart-zoom-reset" (click)="resetZoom()">重置缩放</button>
  </div>
@@ -26,7 +26,8 @@ export class ChartComponent implements AfterViewInit,OnChanges,DoCheck,OnDestroy
   this.visibility.observe(this.surface.nativeElement);
  }
  async load():Promise<void>{
-  if(this.chart||this.loading||this.destroyed)return;this.loading=true;this.error='';
+  if(this.chart||this.loading||this.destroyed)return;
+  this.zone.run(()=>{this.loading=true;this.error='';this.change.markForCheck();});
   try{
    const {createChart}=await import('./echarts-runtime');if(this.destroyed)return;
    this.zone.runOutsideAngular(()=>{
