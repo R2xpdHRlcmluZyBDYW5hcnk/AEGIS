@@ -60,7 +60,7 @@ class OverviewCohortTests(unittest.TestCase):
         self.assertEqual(result['applications'],[dict(name='http',count=1)])
 
     def test_projection_and_main_database_return_identical_log_and_connection_statistics(self):
-        self.add('tls','b',tls=dict(sni='example.test'))
+        self.add('tls','b',src_ip='192.0.2.81',dest_ip='198.51.100.82',tls=dict(sni='example.test'))
         stats=m.StoredNetworkStats(self.db)
         import sqlite3
         projection=sqlite3.connect(':memory:');self.addCleanup(projection.close);stats.install(projection)
@@ -72,6 +72,8 @@ class OverviewCohortTests(unittest.TestCase):
             self.assertEqual(base[0][key],direct[key],key)
         self.assertEqual(base[0]['tls'],1)
         self.assertIsNone(base[0]['addresses'])
+        self.assertEqual(base[1]['addresses'],direct['addresses'])
+        self.assertEqual(base[1]['addresses'],4,'higher priority flow endpoints win over a later TLS record')
 
     def test_unidentified_flows_count_separately_from_each_other_and_identified_sessions(self):
         rows = [
@@ -87,6 +89,9 @@ class OverviewCohortTests(unittest.TestCase):
              for i,row in enumerate(rows,100)])
         result = self.summary()
         self.assertEqual((result['flows'],result['bidirectional'],result['one_way']), (5,3,1))
+        staged=[]
+        m.EventDB.compute_network_summary(self.db.conn,self.low,self.high,publish_base=staged.append)
+        self.assertEqual(staged[-1]['addresses'],result['addresses'])
         self.assertIn(dict(name='tls',count=1),result['applications'])
         self.assertEqual(result['bytes'], 1880)
 

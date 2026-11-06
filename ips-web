@@ -2445,7 +2445,12 @@ class NetworkSnapshots:
             self._invalidate_locked()
             if self.stop.is_set() or generation != self.generation or self.entries.get(key) is not entry:
                 return
-            if self.cache.put(self._cache_key(key),dict(result,computed_at=now())):
+            cache_key = self._cache_key(key)
+            if result['addresses'] is None and entry['result']:
+                previous = self.cache.get(cache_key)
+                if previous is not None and previous['addresses'] is not None:
+                    return
+            if self.cache.put(cache_key,dict(result,computed_at=now())):
                 entry.update(result=True,partial=True,completed=self.clock())
 
     def _run(self):

@@ -3,6 +3,7 @@ import time
 from parallel_sql import fetch_many
 
 APP_ORDER="(app NOT IN ('','unknown','failed')) DESC,(COALESCE(app,'')!='') DESC,(type='session') DESC,ts DESC,id DESC"
+REPRESENTATIVE_ORDER="(type='flow') DESC,(type='session') DESC,ts DESC,id DESC"
 
 
 def range_bound(value):
@@ -43,7 +44,7 @@ def summarize(conn, start, end, *, table='events', push=None, parallel=None, pub
       MAX(resp_pkts) OVER complete received,MAX(ts) OVER complete latest
       FROM selected WHERE session_id!=''
       WINDOW representative AS (PARTITION BY session_id
-        ORDER BY (type='flow') DESC,(type='session') DESC,ts DESC,id DESC),
+        ORDER BY '''+REPRESENTATIVE_ORDER+'''),
         complete AS (representative ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)),
       connections AS MATERIALIZED (
         SELECT src,dst,proto,application,payload,sent,received,latest FROM candidates WHERE position=1
@@ -51,7 +52,8 @@ def summarize(conn, start, end, *, table='events', push=None, parallel=None, pub
         FROM selected WHERE session_id='' AND type='flow')
       SELECT 'metrics','',COUNT(*),COALESCE(SUM(payload),0),COALESCE(SUM(sent>0 AND received>0),0),
         COALESCE(SUM((sent>0)!=(received>0)),0),MAX(latest),
-        (SELECT COUNT(*) FROM (SELECT src ip FROM connections WHERE src!='' UNION SELECT dst ip FROM connections WHERE dst!=''))
+        '''+('NULL' if publish_base is not None else
+        "(SELECT COUNT(*) FROM (SELECT src ip FROM connections WHERE src!='' UNION SELECT dst ip FROM connections WHERE dst!=''))")+'''
       FROM connections
       UNION ALL SELECT 'application',name,n,NULL,NULL,NULL,NULL,NULL FROM
         (SELECT LOWER(application) name,COUNT(*) n FROM connections GROUP BY LOWER(application) ORDER BY n DESC,name LIMIT 8)
@@ -91,11 +93,29 @@ def summarize(conn, start, end, *, table='events', push=None, parallel=None, pub
         else:result['dns_names' if kind=='dns' else 'tls_names'].append(dict(name=name,count=count))
     result['event_types'].sort(key=lambda row:row['name'])
     if publish_base is not None:
-        publish_base(dict(result,partial=True,bytes=None,bidirectional=None,one_way=None,addresses=None,
-                          applications=[],protocols=[],sources=[]))
+        base=dict(result,partial=True,bytes=None,bidirectional=None,one_way=None,addresses=None,
+                  applications=[],protocols=[],sources=[])
+        publish_base(base)
+        # Endpoint counts only need the representative ordering. Leave the
+        # application and packet/byte windows to the full connection summary.
+        endpoints='''WITH selected AS MATERIALIZED (
+          SELECT id,ts,type,src,dst,COALESCE(session_id,'') session_id'''+selection+'''),
+          representatives AS (
+            SELECT src,dst,ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY '''+REPRESENTATIVE_ORDER+''') position
+            FROM selected WHERE session_id!=''),
+          connections AS MATERIALIZED (
+            SELECT src,dst FROM representatives WHERE position=1
+            UNION ALL SELECT src,dst FROM selected WHERE session_id='' AND type='flow')
+          SELECT COUNT(*) FROM (SELECT src ip FROM connections WHERE src!=''
+                                UNION SELECT dst ip FROM connections WHERE dst!='')'''
+        addresses,=conn.execute(endpoints,args).fetchone()
+        result['addresses']=addresses
+        publish_base(dict(base,addresses=addresses))
         connection_rows=conn.execute(cohort,args).fetchall()
     for kind,name,count,volume,bidirectional,one_way,latest,addresses in connection_rows:
-        if kind=='metrics':result.update(flows=count,bytes=volume,bidirectional=bidirectional,one_way=one_way,addresses=addresses)
+        if kind=='metrics':
+            result.update(flows=count,bytes=volume,bidirectional=bidirectional,one_way=one_way)
+            if addresses is not None:result['addresses']=addresses
         elif kind=='connection_source':result['sources'].append(dict(ip=name,count=count,bytes=volume,latest=(latest or 0)/1000))
         else:result['applications' if kind=='application' else 'protocols'].append(dict(name=name or '未识别',count=count))
     return result

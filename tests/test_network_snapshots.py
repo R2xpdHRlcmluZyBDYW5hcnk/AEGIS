@@ -231,11 +231,15 @@ class NetworkSnapshotTests(unittest.TestCase):
     def test_first_snapshot_retains_base_when_connection_details_time_out(self):
         self.add()
         original = backend.EventDB.compute_network_summary
+        attempts = []
 
         def timeout_after_base(conn, start, end, *, push, publish_base):
+            attempts.append(True)
+
             def publish_then_timeout(result):
                 publish_base(result)
-                raise TimeoutError('网络统计计算超时')
+                if len(attempts) > 1 or result['addresses'] is not None:
+                    raise TimeoutError('网络统计计算超时')
             return original(conn, start, end, push=push, publish_base=publish_then_timeout)
 
         with mock.patch.object(backend.EventDB, 'compute_network_summary', side_effect=timeout_after_base):
@@ -244,8 +248,12 @@ class NetworkSnapshotTests(unittest.TestCase):
             partial = self.get()
             self.assertTrue(partial['available'] and partial['partial'])
             self.assertEqual((partial['flows'], partial['tls']), (1, 0))
+            self.assertEqual(partial['addresses'], 2)
             self.assertEqual(partial['log_sources'], [{'ip': '192.0.2.1', 'count': 1}])
             self.assertIsNone(partial['bytes'])
+            self.advance()
+            self.wait_for(lambda: len(attempts) == 2 and self.get()['error'] and not self.get()['refreshing'])
+            self.assertEqual(self.get()['addresses'], 2, 'retrying base counts must not erase known endpoints')
 
         self.advance()
         complete = self.ready()
