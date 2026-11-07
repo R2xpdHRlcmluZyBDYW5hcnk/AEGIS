@@ -7,7 +7,7 @@ const groups: {title:string; fields:[string,string][]}[] = [
  {title:'事件概况',fields:[['ts','事件时间'],['type','事件类型'],['action','处置结果'],['sev','严重级别'],['level','风险等级'],['app','应用'],['proto','传输协议']]},
  {title:'通信信息',fields:[['src','源地址'],['sport','源端口'],['dst','目的地址'],['dport','目的端口'],['dir','通信方向'],['iif','采集接口'],['ip_version','IP 版本'],['vlan','VLAN 标识'],['pkt_src','数据包来源']]},
  {title:'检测信息',fields:[['sig','检测签名'],['sig_id','规则编号（SID）'],['cat','威胁分类'],['reason','阻断原因'],['ips_action','规则动作'],['ids_reason','IDS 模式原因'],['gid','生成器编号（GID）'],['rev','规则版本'],['anom','协议异常']]},
- {title:'HTTP',fields:[['host','主机名'],['url','请求路径'],['method','请求方法'],['status','响应状态码'],['httpver','HTTP 版本'],['ua','用户代理'],['ct','内容类型'],['clen','内容长度'],['referrer','来源页面']]},
+ {title:'HTTP',fields:[['host','主机名'],['url','请求路径'],['method','请求方法'],['status','响应状态码'],['httpver','HTTP 版本'],['ua','用户代理'],['ct','内容类型'],['http_request_bytes','请求体字节数'],['clen','响应体字节数'],['referrer','来源页面']]},
  {title:'DNS',fields:[['dns','查询域名'],['rrtype','记录类型'],['rcode','响应代码'],['answers','解析结果'],['dns_ttl','最小应答 TTL（秒）']]},
  {title:'TLS',fields:[['sni','服务器名称（SNI）'],['tlsver','TLS 版本'],['alpn','应用层协议协商（ALPN）'],['subject','证书主体'],['issuer','证书签发者'],['cipher','密码套件'],['curve','椭圆曲线'],['validation_status','证书验证状态']]},
  {title:'SSH',fields:[['ssh_client','客户端版本'],['ssh_server','服务端版本'],['ssh_kex','密钥交换'],['ssh_hostkey','主机密钥算法'],['ssh_cipher','加密算法'],['ssh_mac','MAC 算法'],['ssh_compression','压缩算法']]},
@@ -60,7 +60,7 @@ export function evidenceValue(key:string,value:any):string {
  if(key==='coverage'&&value==='passive_visible')return '被动可见 部分证据';
  if(key==='app'&&String(value).toLowerCase()==='failed')return 'FAILED（应用协议识别失败）';
  if(key==='app'||key==='proto')return String(value).toUpperCase();
- if(key==='size'||key==='clen'||key==='bytes_toserver'||key==='bytes_toclient')return bytes(value);
+ if(key==='size'||key==='http_request_bytes'||key==='clen'||key==='bytes_toserver'||key==='bytes_toclient')return bytes(value);
  if(typeof value==='object')return JSON.stringify(value,null,2);
  return String(value);
 }

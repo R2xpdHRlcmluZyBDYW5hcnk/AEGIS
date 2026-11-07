@@ -19,8 +19,16 @@ appid = { app_detector_dir = '/var/lib/snort/appid' }
 if get_module_version('ndr_session', 'inspector') >= 1 then
     ndr_session = { snapshot_interval = 30, state_limit = 32 }
 end
-file_id = { }
-file_policy = { enable_type = true, enable_signature = true }
+-- Keep file identity and hashes, never capture file contents or dump file bytes.
+file_policy = { enable_type = true, enable_signature = true, enable_capture = false }
+file_inspect.show_data_depth = 0
+file_inspect.trace_stream = false
+-- Packet loggers are not part of the metadata-only collection profile.
+alert_full = nil
+log_codecs = nil
+log_hext = nil
+log_pcap = nil
+file_log = nil
 file_connector = { { connector = 'ndr', name = 'ndr', direction = 'transmit', text_format = true } }
 local common = 'ts uid session_id id.orig_h id.orig_p id.resp_h id.resp_p pkt_num tenant_id '
 local notice_fields = common .. 'gid sid rev msg proto action ips_action ids_reason refs'
@@ -36,9 +44,8 @@ extractor = {
         { service = 'http', on_events = 'eot', fields = common .. 'method host uri user_agent referrer origin version status_code status_msg trans_depth request_body_len response_body_len resp_mime_types orig_filenames resp_filenames' },
         { service = 'dns', on_events = 'response', fields = common .. 'proto trans_id query qclass_name qtype qtype_name rcode rcode_name answers TTLs rejected' },
         { service = 'ssl', on_events = 'tls_metadata_event', fields = common .. 'version server_name validation_status subject issuer module_identifier cipher curve' },
-        { service = 'quic', on_events = 'handshake', fields = common .. 'version client_initial_dcid client_scid server_scid server_name client_protocol history' },
         { service = 'ssh', on_events = 'algorithm exchange', fields = common .. 'version direction client.version server.version kex_alg host_key_alg cipher_alg mac_alg compression_alg' },
         { service = 'ftp', on_events = 'request response eot', fields = common .. 'command arg user reply_code reply_msg file_size' },
-        { service = 'file', on_events = 'eof', fields = common .. 'filename fuid source analyzers mime_type is_orig seen_bytes total_bytes duration timedout sha256 extracted extracted_size extracted_cutoff' }
+        { service = 'file', on_events = 'eof', fields = common .. 'filename fuid source analyzers mime_type is_orig seen_bytes total_bytes duration timedout sha256' }
     }
 }

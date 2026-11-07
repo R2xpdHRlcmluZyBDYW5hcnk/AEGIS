@@ -36,3 +36,11 @@ Community 官方归档只提供 `snort3-community-rules/snort3-community.rules`�
 
 
 验证时将所需规则文件及归档复制到开发电脑临时目录，在本地比较冷加载、缓存加载及策略文件变化后的查询，不在检测设备上压测。回归覆盖缓存容量与失效、策略编辑后的新状态、请求内快照、新文件发现、来源隔离和 Community 单组结构；浏览器回归检查加载、切换标签、保存及刷新只发出一份页面查询。
+
+## PulledPork3 SO 部署扩展边界
+
+2026-11-07（Australia/Perth，UTC+08:00）查询 [上游 PR #62](https://github.com/shirkdog/pulledpork3/pull/62)，并通过 `gh pr diff` 核对头提交 `dcc5d33c1a73e76d12c8dd87f793f8cb1bec40df`，通过 GitHub API 核对[维护 fork](https://github.com/R2xpdHRlcmluZyBDYW5hcnk/pulledpork3) 的主分支 `8329a9fdfcc8adb724a1a8669037ed12c4f54b3b`。查询前复用本文的候选生成和更新事务说明。条件为共享对象规则切换、重载失败传播和旧版本清理，不下载真实规则或凭据。
+
+该 PR 在版本目录中准备 SO 文件，但使用 `unlink` 后再 `symlink`，两个操作之间路径不存在；秒级目录名也不能保证同秒更新互相隔离。重载与重启函数捕获失败后返回，调用处仍把操作标记为完成并清理旧目录，不能证明检测引擎已切换成功。因此当前不直接整合。若将来需要 SO 规则更新，应使用同目录临时链接加原子替换、唯一版本目录、明确的成功确认及失败回滚，并在确认后才清理旧版本。
+
+当前 AEGIS 通过 `IPS_PULLEDPORK_TEXT_ONLY=1` 获取文本候选，生成的配置不设置 `sorule_path`、`pid_path` 或 `snort_service_name`。规则校验、热重载及回滚仍由规则管理器负责；SO 部署选项不会改善现有文本更新路径，也不应引入额外的检测服务重启。

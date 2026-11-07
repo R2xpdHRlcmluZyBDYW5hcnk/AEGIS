@@ -12,7 +12,7 @@ def checksum(data):
     return ~value & 65535
 
 
-def capture(path, tls_hostname=None, application='http'):
+def capture(path, tls_hostname=None, application='http', request_body=None, response_body=None):
     frames=[]
     client, server=map(socket.inet_aton, ('192.0.2.10','198.51.100.20'))
     def packet(src,dst,proto,payload):
@@ -30,6 +30,12 @@ def capture(path, tls_hostname=None, application='http'):
         packet(src,dst,6,header+data)
     request=b'GET /ndr-smoke HTTP/1.1\r\nHost: example.test\r\nUser-Agent: NDR-Test\r\nConnection: close\r\n\r\n'
     response=b'HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello'
+    if request_body is not None:
+        request=(b'POST /ndr-smoke HTTP/1.1\r\nHost: example.test\r\nContent-Type: application/octet-stream\r\n'
+                 b'Content-Length: '+str(len(request_body)).encode()+b'\r\nConnection: close\r\n\r\n'+request_body)
+    if response_body is not None:
+        response=(b'HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: '+
+                  str(len(response_body)).encode()+b'\r\nConnection: close\r\n\r\n'+response_body)
     if application!='http':request=b'\x01\x02\x03\x04'*20;response=b'\x05\x06\x07\x08'*20
     tcp(False,1,0,2);tcp(True,100,2,18);tcp(False,2,101,16)
     tcp(False,2,101,24,request);tcp(True,101,2+len(request),24,response)

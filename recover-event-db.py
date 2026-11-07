@@ -503,8 +503,9 @@ def replay_eve(backend, connection, eve, offset, minimum_id):
     connection.execute('PRAGMA cache_size=-65536')
     columns = [name for name, _ in backend.EventDB.COLUMNS]
     converter = backend.EventDB.__new__(backend.EventDB)
-    insert = ('INSERT OR IGNORE INTO events(id,' + ','.join(quote(name) for name in columns) + ')'
-              ' VALUES(' + ','.join('?' for _ in range(len(columns) + 1)) + ')')
+    insert = ('INSERT INTO events(id,' + ','.join(quote(name) for name in columns) + ')'
+              ' VALUES(' + ','.join('?' for _ in range(len(columns) + 1)) + ')'
+              ' ON CONFLICT(event_key) WHERE event_key IS NOT NULL DO NOTHING')
     identity = max(minimum_id, connection.execute('SELECT COALESCE(MAX(id),0) FROM events').fetchone()[0])
     before = connection.total_changes
     records, completed_offset, batch = 0, offset, []

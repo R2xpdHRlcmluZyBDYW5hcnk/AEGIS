@@ -36,15 +36,21 @@ class CPUExecutor:
         self.stop = threading.Event()
         self.executor = None
 
-    def _submit(self, function, argument):
-        while not self.slots.acquire(timeout=.1):
-            if self.stop.is_set():
-                raise RuntimeError('计算服务正在关闭')
+    def _check_cancelled(self, cancelled):
+        if self.stop.is_set():
+            raise RuntimeError('计算服务正在关闭')
+        if cancelled is not None and cancelled():
+            raise RuntimeError('计算任务已中断，请重试或缩小时间范围')
+
+    def _submit(self, function, argument, cancelled=None):
+        while True:
+            self._check_cancelled(cancelled)
+            if self.slots.acquire(timeout=.1):
+                break
         executor=None
         try:
             with self.lock:
-                if self.stop.is_set():
-                    raise RuntimeError('计算服务正在关闭')
+                self._check_cancelled(cancelled)
                 if self.executor is None:
                     self.executor = ProcessPoolExecutor(max_workers=self.workers,
                         mp_context=multiprocessing.get_context('spawn'), initializer=_initialize)
@@ -83,7 +89,7 @@ class CPUExecutor:
                 if self.stop.is_set() or (cancelled is not None and cancelled()):
                     raise RuntimeError('计算任务已中断，请重试或缩小时间范围')
                 try:
-                    pending.append(self._submit(function, next(source)))
+                    pending.append(self._submit(function, next(source), cancelled))
                 except StopIteration:
                     break
             while pending:
@@ -93,18 +99,22 @@ class CPUExecutor:
                         future.cancel()
                         raise RuntimeError('计算任务已中断，请重试或缩小时间范围')
                     try:
-                        pid,value=future.result(timeout=.1)
+                        # exception() waits without re-raising the task's own
+                        # TimeoutError, which must not be mistaken for polling.
+                        future.exception(timeout=.1)
                         break
                     except TimeoutError:
                         continue
-                    except BrokenProcessPool:
-                        self._reset_broken(owner)
-                        raise
+                try:
+                    pid,value=future.result()
+                except BrokenProcessPool:
+                    self._reset_broken(owner)
+                    raise
                 if stats is not None:
                     stats.setdefault('pids', set()).add(pid)
                 yield value
                 try:
-                    pending.append(self._submit(function, next(source)))
+                    pending.append(self._submit(function, next(source), cancelled))
                 except StopIteration:
                     pass
         finally:

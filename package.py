@@ -32,6 +32,8 @@ build_tools/build-snort3-arm64.sh tests/snort_pcap.py tests/test_snort_engine.py
 EXECUTABLE = {'ips-event-bridge','ips-snort-rules','snort-home-net','ips-web', 'ips-supervisor', 'ips-log-maintenance', 'ips-rule-manager','deploy.sh'}
 FILES.append('tests/test-rule-job-logs.cjs')
 FILES.append('tests/test_ingest_resume.py')
+FILES.extend(('tests/check_ndr_metadata.py','tests/benchmark_network_summary.py','docs/ndr-observability.md'))
+FILES.extend(('deploy-snort-config.py','tests/test_snort_config_deploy.py'))
 
 
 def build(output,reuse_ui=None,with_sqlite_runtime=False):
@@ -47,7 +49,7 @@ def _build(output,reuse_ui=None,with_sqlite_runtime=False):
     if output.is_relative_to(ROOT):
         raise ValueError('Export releases outside the source directory')
     checks = subprocess.run([sys.executable, '-B', '-m', 'unittest', '-q',
-                             'tests.test_snort_engine', 'tests.test_rule_policy', 'tests.test_parallel_runtime', 'tests.test_ingest_resume', 'tests.test_native_deploy', 'tests.test_deploy_backend', 'tests.test_event_db_recovery',
+                             'tests.test_snort_engine', 'tests.test_rule_policy', 'tests.test_parallel_runtime', 'tests.test_ingest_resume', 'tests.test_native_deploy', 'tests.test_deploy_backend', 'tests.test_event_db_recovery', 'tests.test_snort_config_deploy',
                              'tests.test_quic_observer', 'tests.test_llm_assistant', 'tests.test_llm_context', 'tests.test_rule_manager', 'tests.test_rule_manager_transport', 'tests.test_bridge_recovery', 'tests.test_legacy_cleanup', 'tests.test_native_log_cleanup', 'tests.test_log_storage', 'tests.test_log_storage_paths', 'tests.test_native_rule_management', 'tests.test_group_policies', 'tests.test_rule_inventory', 'tests.test_telemetry', 'tests.test_runtime_status', 'tests.test_history_reset', 'tests.test_session_identity', 'tests.test_rule_selection',
                              'tests.test_nft_rules', 'tests.test_deploy_nft', 'tests.test_supervisor', 'tests.test_native_response_deploy', 'tests.test_hunt_language', 'tests.test_openappid_update', 'tests.test_session_logger', 'tests.test_session_logger_deploy','tests.test_overview_cohorts','tests.test_ai_evidence'], cwd=ROOT,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)

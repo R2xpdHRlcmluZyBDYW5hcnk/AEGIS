@@ -99,7 +99,7 @@ class RuntimeStatusCase(unittest.TestCase):
         for contents,count,total,drops in (
                 ('0 40 3 2 65531 8 0 30 1\n1 41 5 2 65531 2 0 31 1\n',2,8,10),
                 ('',0,0,0),
-                (None,None,0,0)):
+                (None,None,None,None)):
             def open_listeners(path,*args,**kwargs):
                 self.assertEqual(path,'/proc/net/netfilter/nfnetlink_queue')
                 if contents is None:raise PermissionError(path)

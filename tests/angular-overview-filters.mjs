@@ -52,7 +52,7 @@ try {
       JSON.stringify(exceptions) + '\nPage: ' + await evaluate('document.body.innerText.slice(-4500)'));
   }
   await cdp('Runtime.enable');await cdp('Page.enable');
-  await cdp('Emulation.setDeviceMetricsOverride',{width:1440,height:1100,deviceScaleFactor:1,mobile:false});
+  await cdp('Emulation.setDeviceMetricsOverride',{width:1920,height:1080,deviceScaleFactor:1,mobile:false});
   await cdp('Page.navigate',{url:(process.env.NDR_PREVIEW_URL||'http://127.0.0.1:19090')+'/login'});await until(`!!document.querySelector('#password')`);
   await evaluate(`document.querySelector('#password').value='preview-only';document.querySelector('form').submit()`);await until(`!!document.querySelector('ndr-chart')`);
   assert.equal(await evaluate(`document.querySelector('ndr-overview ndr-range')`),null);
@@ -197,6 +197,10 @@ try {
 
   await emitOverview({...overview,network:{available:false,status:'pending'}});
   await until(`!!document.querySelector('ndr-overview .trend ndr-chart') && !(${errorText})`);
+  await emitOverview({...overview,queue:{packets:999999,queue_total:null,kernel_drops:null,user_drops:null},network:{available:false,status:'pending'}});
+  await until(`document.querySelector('[data-testid="queue-backlog"]')?.textContent.trim()==='未读取'`);
+  await emitOverview({...overview,queue:{packets:999999,queue_total:0,kernel_drops:0,user_drops:0},network:{available:false,status:'pending'}});
+  await until(`document.querySelector('[data-testid="queue-backlog"]')?.textContent.trim()==='0'`);
   assert.equal(await evaluate(`document.querySelector('.network-summary strong').textContent.trim()`),'—');
   assert.ok(await evaluate(`document.querySelector('.network-summary').compareDocumentPosition(document.querySelector('ndr-overview .three-grid')) & Node.DOCUMENT_POSITION_FOLLOWING`));
 

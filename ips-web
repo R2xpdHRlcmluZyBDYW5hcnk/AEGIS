@@ -1153,7 +1153,7 @@ class EventDB:
                        "clen", "fsize", "flow_id", "vlan", "gid", "rev", "tx",
                        "icmp_type", "icmp_code", "bytes_toserver", "bytes_toclient",
                        "pkts_toserver", "pkts_toclient", "flow_start", "flow_end", "flow_age", "observed_first", "observed_last",
-                       "dns_ttl", "wire_bytes_toserver", "wire_bytes_toclient", *__import__('snort_engine').PACKET_NUMBER_FIELDS,
+                       "dns_ttl", "http_request_bytes", "wire_bytes_toserver", "wire_bytes_toclient", *__import__('snort_engine').PACKET_NUMBER_FIELDS,
                        *["appid_"+name+"_id" for name in ("service","client","payload","misc","referred")]}
 
     @classmethod
@@ -1197,13 +1197,16 @@ class EventDB:
         self.names = [name for name, _ in self.COLUMNS]
         self.select_sql = ("SELECT " + ", ".join(self.names) + " FROM events"
                            " WHERE ts >= ? AND ts <= ?")
-        self.insert_sql = ("INSERT OR IGNORE INTO events (id, " + ", ".join(self.names) +
-                           ") VALUES (" + ",".join("?" * (len(self.names) + 1)) + ")")
+        self.insert_sql = ("INSERT INTO events (id, " + ", ".join(self.names) +
+                           ") VALUES (" + ",".join("?" * (len(self.names) + 1)) + ")"
+                           " ON CONFLICT(event_key) WHERE event_key IS NOT NULL DO NOTHING")
         try:
             self.conn = sqlite3.connect(path, check_same_thread=False, timeout=10)
+            # Must precede WAL initialization, which writes a new database header.
+            # Existing NONE databases require an offline VACUUM; never rebuild here.
+            self.conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
             self.conn.execute("PRAGMA journal_mode=WAL")
             self.conn.execute("PRAGMA synchronous=FULL")
-            self.conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
             self.conn.execute("PRAGMA journal_size_limit=67108864")
             # Retain hot index pages across bounded commits on slower flash.
             self.conn.execute('PRAGMA cache_size=-65536')
@@ -1350,7 +1353,7 @@ class EventDB:
                 self.last_id = first + len(rows)
                 self.last_error = ""
                 self.write_error = ""
-            except sqlite3.Error as exc:  # noqa: BLE001
+            except (sqlite3.Error, OverflowError) as exc:  # noqa: BLE001
                 inserted = 0
                 self.buf = rows + self.buf
                 self._rollback_write(exc)
@@ -3916,24 +3919,27 @@ class SysInfo:
 
     @staticmethod
     def _queue_listeners():
-        queues, total, drops = [], 0, 0
+        queues, total, drops, user_drops = [], 0, 0, 0
         try:
             with open("/proc/net/netfilter/nfnetlink_queue", encoding="utf-8") as fh:
                 for line in fh:
                     cols = line.split()
-                    if len(cols) >= 6 and cols[0] in ("0", "1", "2", "3") and int(cols[1]):
+                    if len(cols) >= 7 and cols[0] in ("0", "1", "2", "3") and int(cols[1]):
                         backlog = int(cols[2])
                         total += backlog
                         drops += int(cols[5])
-                        queues.append({"id": int(cols[0]), "backlog": backlog})
+                        user_drops += int(cols[6])
+                        queues.append({"id": int(cols[0]), "backlog": backlog,
+                                       "kernel_drops": int(cols[5]), "user_drops": int(cols[6])})
         except (OSError, ValueError):
             return None
         return dict(queues=queues, count=len(queues), queue_total=total, kernel_drops=drops,
+                    user_drops=user_drops,
                     listeners_known=True, listeners_at=now())
 
     def queue(self):
         def fetch():
-            info = {"packets": None, "bytes": None, "kernel_drops": 0, "queue_total": 0,
+            info = {"packets": None, "bytes": None, "kernel_drops": None, "user_drops": None, "queue_total": None,
                     "queues": [], "listeners_known": False, "ts": now()}
             # nft 的 counter 是唯一准确的“入队字节”：Snort 的 decoder.bytes 在
             # NFQ+GSO 下会把 GSO 报文重复计数（实测约 2.5 倍），不能用来算吞吐
@@ -4949,7 +4955,7 @@ HUNT_CI_FIELDS = {"proto", "action", "dir", "type", "app", "state", "rrtype",
                   "rcode", "method", "pkt_src", "tlsver", "iif", "httpver"}
 HUNT_NUMBER_FIELDS = {"ts", "sport", "dport", "sig_id", "ip_version", "vlan", "gid", "rev", "tx",
                       "icmp_type", "icmp_code", "size", "status", "clen", "flow_id", *FLOW_METRIC_FIELDS,
-                      "dns_ttl","observed_first","observed_last","wire_bytes_toserver","wire_bytes_toclient",*__import__('snort_engine').PACKET_NUMBER_FIELDS,
+                      "dns_ttl","http_request_bytes","observed_first","observed_last","wire_bytes_toserver","wire_bytes_toclient",*__import__('snort_engine').PACKET_NUMBER_FIELDS,
                       *["appid_"+name+"_id" for name in ("service","client","payload","misc","referred")]}
 
 
@@ -6272,7 +6278,7 @@ class App:
         drops = ips.get("drop_reason", {}) if isinstance(ips, dict) else {}
         if panel:
             svc = {key:svc.get(key) for key in ('state','memory','uptime')}
-            queue = {key:queue.get(key) for key in ('packets','kernel_drops')}
+            queue = {key:queue.get(key) for key in ('packets','queue_total','kernel_drops','user_drops','listeners_known')}
         return {
             'telemetry':self.sys.telemetry(),
             "service": svc,
@@ -6905,6 +6911,7 @@ class App:
             ('session_event','会话生命周期事件'),('session_origin','会话观察起点'),('session_limited','会话状态记录限制'),('observed_first','首次观察时间'),('observed_last','最后观察时间'),
             ('wire_bytes_toserver','客户端方向报文字节数'),('wire_bytes_toclient','服务端方向报文字节数')]})
         native_labels['dns_ttl']='最小 DNS 应答 TTL（秒）'
+        native_labels['http_request_bytes']='HTTP 请求体字节数'
         native_labels.update({'client.version':'SSH 客户端版本','server.version':'SSH 服务端版本','kex_alg':'SSH 密钥交换','host_key_alg':'SSH 主机密钥算法','cipher_alg':'SSH 加密算法','mac_alg':'SSH MAC 算法','compression_alg':'SSH 压缩算法'})
         native_labels.update(packet_ts='采样包时间',packet_len='采样包长度',data_len='采样包数据长度',packet_direction='采样包方向',
             ip_ttl='IP TTL / 跳数限制',ip_tos='IP TOS / 流量类别',ip_id='IP 标识',ip_offset='IP 分片偏移（字节）',ip_flags='IP 分片标志',

@@ -2,6 +2,7 @@ param(
     [string]$Target = '',
     [string]$IdentityFile = '',
     [switch]$UpdateBackend,
+    [switch]$UpdateSnortConfig,
     [switch]$UpdateNftRules,
     [switch]$UpdateSupervisor,
     [switch]$NativeResponse,
@@ -47,6 +48,7 @@ if ($ClearEventStream -and -not $ClearNativeLogs) { throw '-ClearEventStream req
 if ($QuicInterface -and (-not $UpdateBackend -or $BuildOnly -or $QuicInterface -notmatch '^[a-zA-Z0-9_.:-]{1,15}$')) { throw '-QuicInterface requires -UpdateBackend and a valid capture interface name' }
 if ($SessionLoggerDirectory -and (-not $UpdateBackend -or $BuildOnly -or -not (Test-Path -LiteralPath $SessionLoggerDirectory -PathType Container))) { throw '-SessionLoggerDirectory requires -UpdateBackend and a compiled extension directory' }
 if ($ReleasePackage -and ($BuildOnly -or -not (Test-Path -LiteralPath $ReleasePackage))) { throw '-ReleasePackage requires an existing release and cannot be combined with -BuildOnly' }
+if ($UpdateSnortConfig -and (-not $UpdateBackend -or $BuildOnly -or $InstallSnort3 -or $UpdateEngine -or $NativeResponse)) { throw '-UpdateSnortConfig requires -UpdateBackend on an existing engine' }
 if ($ReuseUiPackage -and ($ReleasePackage -or -not (Test-Path -LiteralPath $ReuseUiPackage))) { throw '-ReuseUiPackage requires an existing UI release and cannot be combined with -ReleasePackage' }
 $resourceFlags = [ordered]@{WebReadWorkers='--read-workers';CacheMemoryPercent='--cache-memory-percent';CacheMaxMiB='--cache-max-mib';PreloadMemoryMiB='--preload-memory-mib';StatsBatchSize='--stats-batch-size';StatsDutyPercent='--stats-duty-percent';LlmSummaryMaxTokens='--llm-summary-max-tokens'}
 $resourceArguments = @()
@@ -213,6 +215,7 @@ try {
     if ($ClearNativeLogs) { $staticStep += ' && python3 snort-ndr/cleanup-native-logs.py --apply'; if ($ClearEventStream) { $staticStep += ' --event-stream' } }
     if ($QuicInterface) { $staticStep += " && python3 snort-ndr/deploy-quic-observer.py --release snort-ndr --interface '$QuicInterface'" }
     if ($SessionLoggerDirectory -and -not $UpdateEngine) { $staticStep += ' && python3 snort-ndr/deploy-session-logger.py --release snort-ndr --plugin session-logger' }
+    if ($UpdateSnortConfig) { $staticStep += ' && python3 -B snort-ndr/deploy-snort-config.py --release snort-ndr' }
     & ssh @options $Target "cd '$stage' && sha256sum -c '$fileName.sha256' && tar -xzf '$fileName' && ${backendStep}$staticStep"
     if ($LASTEXITCODE -ne 0) { throw 'Deployment or health check failed' }
 } finally {

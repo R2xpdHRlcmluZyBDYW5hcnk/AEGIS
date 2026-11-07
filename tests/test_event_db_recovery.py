@@ -201,6 +201,22 @@ class RecoveryTests(unittest.TestCase):
             self.assertEqual(conn.execute("SELECT seq FROM sqlite_sequence WHERE name='settings'").fetchone()[0], 900)
         self.assertEqual(report['table_counts']['events'], 300)
 
+    def test_replay_rejects_non_identity_conflicts_and_rolls_back(self):
+        from event_processing import backend
+        module = backend()
+        database = module.EventDB(str(self.root / 'conflict.db'))
+        try:
+            database.conn.execute('CREATE UNIQUE INDEX legacy_identity ON events(type)')
+            database.conn.commit()
+            eve = self.root / 'conflict.json'
+            eve.write_text(''.join(json.dumps(dict(event_type='flow',
+                timestamp='2026-10-31T00:00:%02d+0000' % second, proto='TCP')) + '\n'
+                for second in (1, 2)))
+            with self.assertRaises(sqlite3.IntegrityError):
+                m.replay_eve(module, database.conn, eve, 0, 0)
+            self.assertEqual(database.conn.execute('SELECT COUNT(*) FROM events').fetchone()[0], 0)
+        finally:database.conn.close()
+
     def test_index_only_rebuild_rejects_unreadable_table(self):
         with closing(sqlite3.connect(self.db)) as conn:
             size = conn.execute('PRAGMA page_size').fetchone()[0]

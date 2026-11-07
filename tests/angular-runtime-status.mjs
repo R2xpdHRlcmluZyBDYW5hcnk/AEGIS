@@ -1,7 +1,7 @@
 // Desktop regression with synthetic transport responses. Start serve_preview.py first.
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
-import {mkdtemp,readFile,rm} from 'node:fs/promises';
+import {mkdtemp,readFile,rm,mkdir,writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 const profile=await mkdtemp(path.join(tmpdir(),'ndr-chrome-'));
@@ -38,8 +38,21 @@ try {
  async function nav(page){await evaluate(`document.querySelector('[data-page="${page}"]').click()`);await until(`location.hash==='#${page}'`);}
  async function ruleTab(title){await click(title,`document.querySelector('ndr-rules .tabs')`);await until(`document.querySelector('ndr-rules .tabs button.active')?.textContent.trim()===${JSON.stringify(title)}&&document.querySelector('ndr-rules ndr-table .table-scroll')?.getAttribute('aria-busy')==='false'`);}
  async function api(url){return evaluate(`fetch(${JSON.stringify(url)}).then(r=>r.json())`);}
+ async function desktop(page,width,height){
+  await cdp('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false});
+  await pause(100);
+  assert.ok(await evaluate(`document.documentElement.scrollWidth<=innerWidth+1`),'desktop page must not overflow');
+  assert.ok(await evaluate(`[...document.querySelectorAll('ndr-${page} .key-values')].every(e=>e.scrollWidth<=e.clientWidth+1)`),'metric labels must fit');
+  if(process.env.NDR_PREVIEW_SCREENSHOTS){
+   const folder=path.resolve(process.env.NDR_PREVIEW_SCREENSHOTS),relative=path.relative(tmpdir(),folder);
+   assert.ok(relative&&!relative.startsWith('..')&&!path.isAbsolute(relative),'screenshots belong in a temporary directory');
+   await mkdir(folder,{recursive:true});
+   const shot=await cdp('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});
+   await writeFile(path.join(folder,`${page}-${width}.png`),Buffer.from(shot.data,'base64'));
+  }
+ }
  await cdp('Runtime.enable');await cdp('Page.enable');await cdp('Network.enable');
- await cdp('Emulation.setDeviceMetricsOverride',{width:1440,height:1100,deviceScaleFactor:1,mobile:false});
+ await cdp('Emulation.setDeviceMetricsOverride',{width:1920,height:1080,deviceScaleFactor:1,mobile:false});
  const base=process.env.NDR_PREVIEW_URL||'http://127.0.0.1:19090';
  await cdp('Page.navigate',{url:base+'/login'});await until(`!!document.querySelector('#password')`);
  await set('#password','preview-only');await evaluate(`document.querySelector('form').submit()`);
@@ -61,6 +74,14 @@ try {
  await evaluate(`fetch('/__test/release-reload',{method:'POST',headers:{'X-Requested-With':'ips-web'}}).then(r=>r.json())`);
  await until(`document.querySelector('.job-log')?.textContent.includes('规则已校验并完成热重载')`);
  await nav('system');await until(`!!document.querySelector('ndr-system .system-grid')&&!document.querySelector('ndr-system .telemetry-status')`);
+ assert.ok(await evaluate(`document.querySelector('ndr-system').textContent.includes('解析与检测限制（累计）')`));
+ assert.ok(await evaluate(`document.querySelector('ndr-system').textContent.includes('累计用户态投递丢包')`));
+ assert.ok(await evaluate(`document.querySelector('ndr-system').textContent.includes('事件阈值抑制')`));
+ if(process.env.NDR_PREVIEW_COMPONENT_HEALTH!=='1'){
+  for(const [width,height] of [[1920,1080],[1600,900]])await desktop('system',width,height);
+  await nav('overview');await until(`document.querySelector('[data-testid="queue-backlog"]')?.textContent.trim()==='3'`);
+  for(const [width,height] of [[1920,1080],[1600,900]])await desktop('overview',width,height);
+ }
  if(process.env.NDR_PREVIEW_COMPONENT_HEALTH==='1'){
   await nav('overview');
   await until(`[...document.querySelectorAll('ndr-overview [role="alert"]')].some(e=>e.textContent.includes('malformed'))`);

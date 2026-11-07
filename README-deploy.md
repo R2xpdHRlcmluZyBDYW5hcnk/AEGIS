@@ -108,11 +108,15 @@ SSH 用户需能执行目标端管理操作；每次部署显式指定目标：
 .\deploy.ps1 -Target root@sensor.example
 # 后端模块与控制台相关进程
 .\deploy.ps1 -Target root@sensor.example -UpdateBackend
+# 同时应用发布包的 Snort 包装配置并热重载
+.\deploy.ps1 -Target root@sensor.example -UpdateBackend -UpdateSnortConfig
 # 可选 SSH 密钥
 .\deploy.ps1 -Target root@sensor.example -IdentityFile "$env:USERPROFILE\.ssh\sensor_key"
 ```
 
 这些入口要求目标已按本项目布局运行，不替代首次安装。更新不改变外部更新器。部署检查已知的引擎 PID 文件；外部采集服务应使用自己的健康与进程监控。静态更新校验后原子替换；后端更新先备份和暂停规则任务，再替换程序与验证，失败恢复，保留检测进程、数据库、规则和认证。
+
+`-UpdateSnortConfig` 显式替换 `/etc/snort/snort.lua`，保留其引用的现场网段、抑制配置和规则文件。部署前应比较包装配置中的本地定制；普通更新不启用此选项。配置先备份到 `/var/backups/ips-snort-config`，用当前引擎与已安装会话扩展执行 `-T` 校验，再原子替换并热重载。确认配置代数推进和引擎进程身份不变；失败恢复旧配置并重新热重载。校验输出仅保存在受限备份目录，不输出现场配置。前后端部署与配置部署各自保留备份，配置失败不撤销已健康的控制台版本。
 
 已有包可通过 `-ReleasePackage <归档>` 部署。资源覆盖与迁移选项均需满足对应脚本的前置条件。上传暂存使用磁盘 `/var/lib/ips-deploy`，备份位于 `/var/backups/ips-*`，不使用运行机内存盘保存大型文件。回滚入口以该次部署输出为准，确认新版本健康后再管理备份。
 

@@ -37,23 +37,24 @@ def summarize(conn, start, end, *, table='events', push=None, parallel=None, pub
       COALESCE(app,'') app,COALESCE(proto,'') proto,
       COALESCE(session_id,'') session_id, CASE WHEN type='flow' THEN '''+volume+''' END volume,
       COALESCE('''+origin+''',0) orig_pkts,COALESCE('''+response+''',0) resp_pkts'''+selection+'''),
-      candidates AS (SELECT src,dst,proto,
+      candidates AS (SELECT session_id,src,dst,proto,volume,orig_pkts,resp_pkts,ts,
       ROW_NUMBER() OVER representative position,
-      FIRST_VALUE(app) OVER (PARTITION BY session_id ORDER BY '''+APP_ORDER+''') application,
-      MAX(volume) OVER complete payload,MAX(orig_pkts) OVER complete sent,
-      MAX(resp_pkts) OVER complete received,MAX(ts) OVER complete latest
+      FIRST_VALUE(app) OVER (PARTITION BY session_id ORDER BY '''+APP_ORDER+''') application
       FROM selected WHERE session_id!=''
       WINDOW representative AS (PARTITION BY session_id
-        ORDER BY '''+REPRESENTATIVE_ORDER+'''),
-        complete AS (representative ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)),
+        ORDER BY '''+REPRESENTATIVE_ORDER+''')),
       connections AS MATERIALIZED (
-        SELECT src,dst,proto,application,payload,sent,received,latest FROM candidates WHERE position=1
+        SELECT MAX(CASE WHEN position=1 THEN src END) src,
+          MAX(CASE WHEN position=1 THEN dst END) dst,
+          MAX(CASE WHEN position=1 THEN proto END) proto,
+          MAX(application) application,MAX(volume) payload,MAX(orig_pkts) sent,
+          MAX(resp_pkts) received,MAX(ts) latest FROM candidates GROUP BY session_id
         UNION ALL SELECT src,dst,proto,app,volume,orig_pkts,resp_pkts,ts
         FROM selected WHERE session_id='' AND type='flow')
       SELECT 'metrics','',COUNT(*),COALESCE(SUM(payload),0),COALESCE(SUM(sent>0 AND received>0),0),
         COALESCE(SUM((sent>0)!=(received>0)),0),MAX(latest),
-        '''+('NULL' if publish_base is not None else
-        "(SELECT COUNT(*) FROM (SELECT src ip FROM connections WHERE src!='' UNION SELECT dst ip FROM connections WHERE dst!=''))")+'''
+        (SELECT COUNT(*) FROM (SELECT src ip FROM connections WHERE src!=''
+                              UNION SELECT dst ip FROM connections WHERE dst!=''))
       FROM connections
       UNION ALL SELECT 'application',name,n,NULL,NULL,NULL,NULL,NULL FROM
         (SELECT LOWER(application) name,COUNT(*) n FROM connections GROUP BY LOWER(application) ORDER BY n DESC,name LIMIT 8)
@@ -96,26 +97,15 @@ def summarize(conn, start, end, *, table='events', push=None, parallel=None, pub
         base=dict(result,partial=True,bytes=None,bidirectional=None,one_way=None,addresses=None,
                   applications=[],protocols=[],sources=[])
         publish_base(base)
-        # Endpoint counts only need the representative ordering. Leave the
-        # application and packet/byte windows to the full connection summary.
-        endpoints='''WITH selected AS MATERIALIZED (
-          SELECT id,ts,type,src,dst,COALESCE(session_id,'') session_id'''+selection+'''),
-          representatives AS (
-            SELECT src,dst,ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY '''+REPRESENTATIVE_ORDER+''') position
-            FROM selected WHERE session_id!=''),
-          connections AS MATERIALIZED (
-            SELECT src,dst FROM representatives WHERE position=1
-            UNION ALL SELECT src,dst FROM selected WHERE session_id='' AND type='flow')
-          SELECT COUNT(*) FROM (SELECT src ip FROM connections WHERE src!=''
-                                UNION SELECT dst ip FROM connections WHERE dst!='')'''
-        addresses,=conn.execute(endpoints,args).fetchone()
-        result['addresses']=addresses
-        publish_base(dict(base,addresses=addresses))
-        connection_rows=conn.execute(cohort,args).fetchall()
+        # Reuse the exact same representatives for endpoints and all other
+        # connection metrics instead of scanning and sorting the range again.
+        connection_rows=conn.execute(cohort,args)
     for kind,name,count,volume,bidirectional,one_way,latest,addresses in connection_rows:
         if kind=='metrics':
             result.update(flows=count,bytes=volume,bidirectional=bidirectional,one_way=one_way)
-            if addresses is not None:result['addresses']=addresses
+            if addresses is not None:
+                result['addresses']=addresses
+                if publish_base is not None:publish_base(dict(base,addresses=addresses))
         elif kind=='connection_source':result['sources'].append(dict(ip=name,count=count,bytes=volume,latest=(latest or 0)/1000))
         else:result['applications' if kind=='application' else 'protocols'].append(dict(name=name or '未识别',count=count))
     return result

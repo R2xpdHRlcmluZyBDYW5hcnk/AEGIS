@@ -55,6 +55,20 @@ class NativeEventTests(unittest.TestCase):
         event=snort_engine.native_event(self.envelope(trans_id=1234,query='example.test',qtype_name='A',rcode_name='NOERROR',answers='198.51.100.1'))
         self.assertEqual(event['dns']['answers'],[{'rdata':'198.51.100.1'}])
 
+    def test_http_upload_size_is_indexed_and_searchable_without_body_content(self):
+        raw=json.dumps(self.envelope(trans_depth=1,method='POST',host='example.test',uri='/upload',
+            request_body_len=8192,response_body_len=128,version='1.1',status_code=200))
+        with tempfile.TemporaryDirectory() as directory:
+            db=self.web.EventDB(str(Path(directory)/'events.db'))
+            try:
+                db.add(*self.web.EventStore._parse(raw));db.flush()
+                clauses,args,complete=self.web.hunt_sql_pushdown(self.web.hunt_parse('http_request_bytes:>8000'))
+                self.assertTrue(complete)
+                row=db.conn.execute('SELECT http_request_bytes,clen FROM events WHERE '+' AND '.join(clauses),args).fetchone()
+                self.assertEqual(row,(8192,128))
+                self.assertNotIn('payload',json.loads(raw)['data'])
+            finally:db.conn.close()
+
     def test_deferred_conn_log_time_does_not_invent_packet_time_bounds(self):
         envelope=self.envelope(duration=5,orig_pkts=4,resp_pkts=3,proto='TCP',service='unknown')
         normalized=snort_engine.native_event(envelope)

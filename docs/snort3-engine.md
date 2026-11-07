@@ -30,7 +30,7 @@ PulledPork3 独立安装。面板仅通过 `IPS_PULLEDPORK` 指定的入口传�
 
 核查时间：2026-11-04 12:31 UTC。查询前检查本文与已有规则来源记录，既有记录没有覆盖 QUIC 解析来源。MCP Search Service 查询条件为固定标签 `3.12.4.0` 的 QUIC extractor、QUIC 事件发布接口、AppID 实现及检查器目录；同时只读核对已部署二进制的版本、模块与插件列表、已加载协议库以及配置，不读取真实会话日志、不回放流量。
 
-核查结果：当前二进制为 3.12.4.0，包含 `stream_udp`、AppID、extractor、HTTP 和 HTTP/2 检查器，模块和插件清单未列出 QUIC 或 HTTP/3 检查器。当前配置包含 QUIC handshake 日志绑定及版本、连接 ID、SNI、客户端应用协议字段，但配置接收日志事件不等价于具有生成事件的协议解析器。没有发现当前进程加载额外 QUIC / HTTP/3 协议解析库。
+核查结果：当前二进制为 3.12.4.0，包含 `stream_udp`、AppID、extractor、HTTP 和 HTTP/2 检查器，模块和插件清单未列出 QUIC 或 HTTP/3 检查器。核查时配置包含 QUIC handshake 日志绑定及版本、连接 ID、SNI、客户端应用协议字段，但配置接收日志事件不等价于具有生成事件的协议解析器。没有发现当前进程加载额外 QUIC / HTTP/3 协议解析库。
 
 - [extractor 文档](https://github.com/snort3/snort3/blob/3.12.4.0/doc/user/extractor.txt)列出 QUIC handshake 及连接 ID、SNI、客户端协议字段，并定义 UDP 连接计数与状态。
 - [extractor_quic.cc](https://github.com/snort3/snort3/blob/3.12.4.0/src/network_inspectors/extractor/extractor_quic.cc)订阅 QUIC ClientHello 与握手完成事件后记录数据。

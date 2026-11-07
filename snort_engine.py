@@ -51,6 +51,7 @@ NATIVE_FIELDS = {
     'timedout': 'file_timeout', 'extracted_cutoff': 'extracted_cutoff',
     'ips_action': 'ips_action', 'ids_reason': 'ids_reason',
     'dns_ttl': 'dns_ttl',
+    'request_body_len': 'http_request_bytes',
     'client.version':'ssh_client','server.version':'ssh_server','kex_alg':'ssh_kex','host_key_alg':'ssh_hostkey',
     'cipher_alg':'ssh_cipher','mac_alg':'ssh_mac','compression_alg':'ssh_compression',
     **{name:name for name in ('packet_ts','packet_len','data_len','packet_direction','ip_ttl','ip_tos','ip_id','ip_offset','ip_flags','ip_proto','ip_header_len',
@@ -371,9 +372,18 @@ class SnortControl:
                             for counter in group.get('counters', []):
                                 counters[counter['name']] = counter['value']
                     daq, actions = groups.get('daq', {}), groups.get('ips_actions', {})
+                    def observed(group, name):
+                        # Snort omits zero pegs; an absent group is unknown.
+                        return groups[group].get(name, 0) if group in groups else None
                     result[command] = dict(native=groups,
                         decoder=dict(pkts=daq.get('received', 0), bytes=daq.get('rx_bytes', 0)),
                         capture=dict(kernel_drops=daq.get('dropped', 0)),
+                        inspection=dict(decoder_discards=observed('codec','discards'),
+                            tcp_gaps=observed('stream_tcp','gaps'),
+                            tcp_invalid_ack=observed('stream_tcp','invalid_ack'),
+                            tcp_max_bytes=observed('stream_tcp','exceeded_max_bytes'),
+                            tcp_max_segs=observed('stream_tcp','exceeded_max_segs'),
+                            event_limit=observed('detection','event_limit')),
                         ips=dict(accepted=daq.get('allow', 0), blocked=daq.get('block', 0)+daq.get('blacklist', 0),
                                  rejected=actions.get('reject', 0),
                                  drop_reason=dict(rules=actions.get('block', 0)+actions.get('drop', 0))),

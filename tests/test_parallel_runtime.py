@@ -31,7 +31,71 @@ def abort_worker(_):
     os._exit(3)
 
 
+def timeout_worker(_):
+    raise TimeoutError('fixture task timeout')
+
+
 class CPUCase(unittest.TestCase):
+    def test_worker_timeout_is_reported_without_waiting_for_cancellation(self):
+        pool = CPUExecutor(2)
+        cancelled = threading.Event()
+        timer = threading.Timer(3, cancelled.set)
+        timer.start()
+        try:
+            with self.assertRaisesRegex(TimeoutError, 'fixture task timeout'):
+                list(pool.ordered(timeout_worker, [0], cancelled=cancelled.is_set))
+        finally:
+            timer.cancel(); timer.join(); pool.close()
+
+    def test_waiting_for_capacity_observes_cancellation_and_releases_no_foreign_lease(self):
+        pool = CPUExecutor(2)
+        if pool.workers < 2:
+            pool.close(); self.skipTest('Requires at least two CPUs')
+        for _ in range(pool.workers * 2):
+            self.assertTrue(pool.slots.acquire(blocking=False))
+        cancelled, done, waiting = threading.Event(), threading.Event(), threading.Event()
+        errors = []
+        def consume():
+            try:
+                list(pool.ordered(hash_work, [0], cancelled=cancelled.is_set))
+            except RuntimeError as exc:
+                errors.append(exc)
+            finally:
+                done.set()
+        thread = threading.Thread(target=consume)
+        acquire = pool.slots.acquire
+        def acquiring(*args, **kwargs):
+            if 'timeout' in kwargs:waiting.set()
+            return acquire(*args, **kwargs)
+        with mock.patch.object(pool.slots, 'acquire', side_effect=acquiring):
+            thread.start()
+            try:
+                self.assertTrue(waiting.wait(2), 'Caller must reach the saturated queue')
+                cancelled.set()
+                stopped = done.wait(1)
+                self.assertFalse(pool.slots.acquire(blocking=False))
+            finally:
+                for _ in range(pool.workers * 2):pool.slots.release()
+                thread.join(5); pool.close()
+        self.assertTrue(stopped, 'Cancelled callers must not wait for another job to finish')
+        self.assertEqual(len(errors), 1)
+        for _ in range(pool.workers * 2):self.assertTrue(pool.slots.acquire(blocking=False))
+        self.assertFalse(pool.slots.acquire(blocking=False))
+
+    def test_cancellation_during_input_iteration_prevents_submission(self):
+        pool = CPUExecutor(2)
+        if pool.workers < 2:
+            pool.close(); self.skipTest('Requires at least two CPUs')
+        cancelled = threading.Event()
+        def source():
+            cancelled.set()
+            yield 0
+        try:
+            with self.assertRaises(RuntimeError):
+                list(pool.ordered(hash_work, source(), cancelled=cancelled.is_set))
+            self.assertIsNone(pool.executor, 'Cancelled input must not create a process pool')
+        finally:pool.close()
+
     def test_spawned_workers_preserve_results_and_order(self):
         pool = CPUExecutor(4)
         try:

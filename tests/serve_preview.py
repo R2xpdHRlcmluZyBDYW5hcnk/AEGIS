@@ -111,9 +111,10 @@ app.sys.sc = lambda *args, **kwargs: {}
 app.sys.engine.call = lambda *args, **kwargs: {}
 app.sessions, app.auth_lock, app.login_failures = m.Sessions(3600), threading.Lock(), {}
 app.sys.service = lambda: dict(state='active', sub='running', pid=1234, uptime=3600, memory=256 * 1024 * 1024)
-app.sys.counters = lambda: dict(ips=dict(accepted=1234567, blocked=420, drop_reason=dict(rules=400)))
+app.sys.counters = lambda: dict(ips=dict(accepted=1234567, blocked=420, drop_reason=dict(rules=400)),
+    inspection=dict(decoder_discards=19,tcp_gaps=7,tcp_invalid_ack=23,tcp_max_bytes=0,tcp_max_segs=0,event_limit=2))
 app.sys.ruleset = lambda: dict(rules_loaded=65000, rules_failed=0, rules_skipped=10)
-app.sys.queue = lambda: dict(packets=0, kernel_drops=0, queues=[], count=4)
+app.sys.queue = lambda: dict(packets=1234567, queue_total=3, kernel_drops=5, user_drops=7, queues=[], count=4)
 app.sys.latest_rates = dict(pps=1240, mbps=8.4, fps=23)
 # Exercise the same persistent staging boundary as the DynamicUser deployment.
 import ips_control
@@ -286,6 +287,14 @@ app.network = m.NetworkSnapshots(app.db,cache=app.cache)
 if os.environ.get('NDR_PREVIEW_OVERVIEW') == '1':
     app.recent_events = m.RecentEvents(app.db, 16 << 20)
 app.data = m.DataService(app,app.cache)
+if os.environ.get('NDR_PREVIEW_BLOCK_RELOAD')=='1':
+    # Production updates this separately from cached event summaries.
+    def sample_overview_runtime():
+        while not runtime_stop.is_set():
+            app.sample_overview_runtime()
+            runtime_stop.wait(2)
+    thread=threading.Thread(target=sample_overview_runtime,daemon=True)
+    runtime_threads.append(thread);thread.start()
 app.analytics.start()
 app.data.start()
 network_delay = max(0, min(15, float(os.environ.get('NDR_PREVIEW_NETWORK_DELAY', '0'))))

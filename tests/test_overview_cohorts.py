@@ -103,6 +103,17 @@ class OverviewCohortTests(unittest.TestCase):
         snapshots.get(self.low+1,self.high+1,rolling=True,push=push)
         self.assertEqual(list(snapshots.entries),previous)
 
+    def test_progressive_summary_reuses_connection_scan(self):
+        statements=[];stages=[]
+        self.db.conn.set_trace_callback(statements.append)
+        try:
+            result=m.EventDB.compute_network_summary(self.db.conn,self.low,self.high,publish_base=stages.append)
+        finally:self.db.conn.set_trace_callback(None)
+        self.assertEqual(len([sql for sql in statements if sql.lstrip().startswith('WITH')]),2)
+        self.assertIsNone(stages[0]['addresses'])
+        self.assertEqual(stages[-1]['addresses'],result['addresses'])
+        self.assertTrue(stages[0]['partial'])
+
     def test_injection_cannot_escape_cohort_values_and_unidentified_logs_are_not_joined_by_tuple(self):
         self.assertEqual(self.summary(dns="' OR 1=1 --")['records'],0)
         raw=dict(timestamp=m.iso(self.low+1),event_type='dns',src_ip='192.0.2.10',dest_ip='198.51.100.1',proto='UDP',dns=dict(rrname='unrelated.test'))
