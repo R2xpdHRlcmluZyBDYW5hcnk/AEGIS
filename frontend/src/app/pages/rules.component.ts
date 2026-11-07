@@ -11,20 +11,25 @@ import { RuleEditorComponent } from '../rule-editor.component';
 import { ModalComponent } from '../modal.component';
 import { RuleCollectionComponent, RuleSelection, groupSelection } from '../rule-collection.component';
 @Component({changeDetection:ChangeDetectionStrategy.Eager,selector:'ndr-rules',standalone:true,imports:[TabMotionDirective,CommonModule,FormsModule,TableComponent,PickerComponent,SourceEditorComponent,RuleEditorComponent,ModalComponent,RuleCollectionComponent],template:`
- <div class="rule-summary"><div><p class="muted">{{summary?.ruleset?.rules_loaded_source==='rule_files'?'配置文本规则':'已载入'}} {{!summary?'读取中':summary?.ruleset?.rules_loaded==null?'未提供':(summary.ruleset.rules_loaded | number)}} 失败 {{!summary?'读取中':summary?.ruleset?.rules_failed==null?'未提供':(summary.ruleset.rules_failed | number)}} {{!summary?'读取中':summary?.ruleset?.error?'引擎状态不可用':(jobBusy||summary?.reload?.state==='running')?'规则校验与应用中':summary?.reload?.ok===false?'上次应用失败，请查看操作日志':'引擎就绪'}}</p></div><div class="toolbar"><button class="quiet" (click)="refreshCurrent()" [disabled]="busy">↻ 刷新</button><button (click)="job('apply')" [disabled]="jobBusy">应用更改 →</button></div></div>
+ <div class="rule-summary"><div class="stats-grid resource-summary rule-status-grid" role="group" aria-label="规则运行状态"><h2>规则概况</h2>
+  <div class="stat-card rule-status-card"><span>{{summary?.ruleset?.rules_loaded_source==='rule_files'?'配置文本规则':'已载入'}}</span><strong>{{!summary?'读取中':summary?.ruleset?.rules_loaded==null?'未提供':(summary.ruleset.rules_loaded | number)}}</strong></div>
+  <div class="stat-card rule-status-card" [class.failed]="summary?.ruleset?.rules_failed>0"><span>失败</span><strong [attr.title]="summary&&summary?.ruleset?.rules_failed==null?'引擎未提供失败计数':null">{{!summary?'读取中':summary?.ruleset?.rules_failed>0?(summary.ruleset.rules_failed | number):'无'}}</strong></div>
+  <div class="stat-card rule-status-card"><span>引擎状态</span><strong class="rule-engine-state" [class.is-ready]="summary&&!summary?.ruleset?.error&&!jobBusy&&summary?.reload?.state!=='running'&&summary?.reload?.ok!==false" [class.is-error]="summary?.ruleset?.error||summary?.reload?.ok===false">{{!summary?'读取中':summary?.ruleset?.error?'引擎状态不可用':(jobBusy||summary?.reload?.state==='running')?'规则校验与应用中':summary?.reload?.ok===false?'上次应用失败，请查看操作日志':'引擎就绪'}}</strong></div>
+ </div><div class="toolbar"><button class="quiet" (click)="refreshCurrent()" [disabled]="busy">↻ 刷新</button><button (click)="job('apply')" [disabled]="jobBusy">应用更改 →</button></div></div>
  <div ndrTabMotion class="tabs" role="tablist" aria-label="规则管理"><button *ngFor="let t of tabs;let i=index" role="tab" [id]="'rule-tab-'+t.id" [attr.aria-selected]="tab===t.id" [attr.tabindex]="tab===t.id?0:-1" [class.active]="tab===t.id" (click)="change(t.id)" (keydown)="tabKey($event,i)">{{t.title}}</button></div>
  <div class="pending-rules warning" role="status" *ngIf="summary?.pending"><span>有待应用的更改，点击“应用更改”后生效</span><button class="quiet" [disabled]="mutating||jobBusy" (click)="discardPending()">放弃待应用更改</button></div>
  <p class="error" *ngIf="error" role="alert">{{error}}</p>
  <div *ngIf="tab==='jobs'" role="tabpanel" aria-labelledby="rule-tab-jobs">
   <p class="error" role="alert" *ngIf="jobError">{{jobError}}</p>
-  <ng-container *ngTemplateOutlet="jobOutput; context:{$implicit:latestJob,title:jobTitle}"></ng-container>
+  <ng-container *ngTemplateOutlet="jobOutput; context:{$implicit:latestJob,title:'规则操作日志'}"></ng-container>
+  <section class="card" *ngIf="!latestJob"><header><h2>规则操作日志</h2></header><p class="muted empty">{{!jobStatus||busy?'正在读取操作日志…':'暂无手动操作日志'}}</p></section>
   <ng-container *ngTemplateOutlet="jobOutput; context:{$implicit:previousScheduledJob,title:'最近定时更新'}"></ng-container>
-  <section class="card" *ngIf="!jobError&&!latestJob&&!previousScheduledJob"><p class="muted empty">{{!jobStatus||busy?'正在读取操作日志…':'暂无规则操作日志'}}</p></section>
+  <section class="card" *ngIf="!previousScheduledJob"><header><h2>最近定时更新</h2></header><p class="muted empty">{{!jobStatus||busy?'正在读取操作日志…':'暂无定时更新日志'}}</p></section>
  </div>
  <ng-template #jobOutput let-status let-title="title">
   <section class="card" *ngIf="status">
    <header><div><h2>{{title}}</h2><small class="muted" *ngIf="status.started">{{dt(status.started)}}</small></div><span class="badge">{{status.state==='running'?'执行中':status.rc==null?'已中断':'退出码 '+status.rc}}</span></header>
-   <pre class="job-log" tabindex="0" [attr.aria-label]="title+'输出'" *ngIf="status.lines?.length;else noJobOutput">{{status.lines.join('\n')}}</pre>
+   <pre class="job-log" tabindex="0" [attr.aria-label]="title+'输出'" *ngIf="jobText(status);else noJobOutput">{{jobText(status)}}</pre>
    <ng-template #noJobOutput><p class="muted">{{status.state==='running'?'等待任务输出…':'没有命令输出'}}</p></ng-template>
   </section>
  </ng-template>
@@ -56,6 +61,7 @@ export class RulesComponent implements OnInit,OnDestroy {
  editSource():void{const source=this.rows.find(r=>this.selected.has(r._key));if(source&&(source.custom||source.requires_code))this.sourceEditor={source};}
  private revision=0;private pageRequest?:AbortController;private jobRequest?:AbortController;private pollTimer?:ReturnType<typeof setTimeout>;private refreshTimer?:ReturnType<typeof setInterval>;private alive=true;private startingJob=false;private refreshing=false;private catalogRows=new Map<string,any>();private appliedQuery='';
  private matching=new Set<string>();private searchTimer?:ReturnType<typeof setTimeout>;
+ private jobLogs=new Map<string,{text:string;offset:number}>();
 
  constructor(private api:Api,public state:ConsoleState,public details:Details){}
  get title():string{return this.tabs.find(t=>t.id===this.tab)?.title||'';}
@@ -79,13 +85,28 @@ export class RulesComponent implements OnInit,OnDestroy {
   else if(this.membershipSearch&&ruleSignature(query))void this.refresh(false,0,query.trim().toLowerCase());
  }
  get jobBusy():boolean{return this.startingJob||this.jobStatus?.state==='running';}
- get latestJob():any{return this.jobStatus?.state==='idle'?null:this.jobStatus;}
+ get latestJob():any{return this.jobStatus?.state!=='idle'&&this.jobStatus?.trigger!=='scheduled'?this.jobStatus:this.jobStatus?.recent_manual;}
  get previousScheduledJob():any{
-  const scheduled=this.scheduledJob,current=this.jobStatus;
-  if(current?.trigger==='scheduled'&&(scheduled?.started===current.started||scheduled?.state==='running'))return null;
-  return scheduled;
+  return this.jobStatus?.trigger==='scheduled'?this.jobStatus:this.jobStatus?.recent_scheduled||this.scheduledJob;
  }
- get jobTitle():string{const {kind,trigger}=this.jobStatus||{};return kind==='reload'?'规则重载':kind==='manual-add'?'手动规则应用':kind==='apply'?'规则应用':trigger==='scheduled'?'定时更新':'规则更新';}
+ jobText(status:any):string{return status.log_ref?this.jobLogs.get(status.log_ref)?.text||'':status.lines?.join('\n')||'';}
+ private async loadJobLogs(signal:AbortSignal):Promise<void>{
+  const logs=[this.latestJob,this.previousScheduledJob].filter(status=>status?.log_ref);
+  const active=new Set(logs.map(status=>status.log_ref));
+  for(const key of this.jobLogs.keys())if(this.jobLogs.size>4&&!active.has(key))this.jobLogs.delete(key);
+  await Promise.all(logs.map(async status=>{
+   const id=status.log_ref;
+   let entry=this.jobLogs.get(id);if(!entry){entry={text:'',offset:0};this.jobLogs.set(id,entry);}
+   const target=Number.isFinite(status.log_bytes)?status.log_bytes:Infinity;
+   while(!signal.aborted&&entry.offset<target){
+    const page=await this.api.get('/api/actions/log',{id,offset:entry.offset},signal);
+    if(signal.aborted)return;
+    if(page.id!==id||page.offset!==entry.offset||typeof page.text!=='string'||!Number.isInteger(page.next_offset)||page.next_offset<entry.offset)throw Error('操作日志分段无效');
+    const previous=entry.offset;entry.text+=page.text;entry.offset=page.next_offset;
+    if(page.eof||entry.offset===previous)break;
+   }
+  }));
+ }
  get columns():Column[]{switch(this.tab){case 'catalog':return [{key:'signature',label:'GID:SID',width:130},{key:'msg',label:'规则描述',width:360},{key:'group',label:'规则分组',width:210},{key:'source',label:'规则源',kind:'source',width:160},{key:'action',label:'实际动作',width:110}];case 'groups':return [{key:'name',label:'分组标识',width:240},{key:'label',label:'名称',width:230},{key:'source',label:'规则源',kind:'source',width:160},{key:'total',label:'总规则',width:110},{key:'compiled',label:'已启用',width:110},{key:'status',label:'状态',kind:'status',width:140}];case 'manual':return [{key:'sid',label:'SID',width:110},{key:'line',label:'规则原文',kind:'mono',width:740}];case 'sources':return [{key:'name',label:'规则源',kind:'source',width:220},{key:'vendor',label:'提供者',width:140},{key:'summary',label:'说明',width:380},{key:'license',label:'许可',width:120},{key:'authorization',label:'授权',width:100},{key:'status',label:'状态',kind:'status',width:100}];case 'bans':return [{key:'type',label:'类型',width:100},{key:'value',label:'封禁目标',width:280},{key:'ips',label:'解析 IP',width:370}];default:return [{key:'typeLabel',label:'类型',width:120},{key:'target',label:'匹配对象',kind:'scope',width:250},{key:'name',label:'名称',width:350},...(this.tab==='action'?[{key:'action',label:'目标动作',width:120}]:[]),...(this.tab==='suppress'?[{key:'status',label:'状态',kind:'status',width:140},{key:'memberCount',label:'成员数',width:100}]:[])];}}
  ngOnInit():void{const saved=this.state.views.get('rules');if(saved)Object.assign(this,saved);void this.refresh();void this.pollJob();this.refreshTimer=setInterval(()=>{if(!document.hidden&&!this.mutating&&!this.picker&&!this.editor&&!this.sourceEditor&&!this.busy&&!this.jobBusy)this.refreshCurrent(true);},15000);}
  ngOnDestroy():void{this.state.views.set('rules',{tab:this.tab,query:this.query,appliedQuery:this.appliedQuery,offset:this.offset,selected:new Set(this.selected)});this.alive=false;this.revision++;this.pageRequest?.abort();this.jobRequest?.abort();clearTimeout(this.pollTimer);clearTimeout(this.searchTimer);clearInterval(this.refreshTimer);}
@@ -171,7 +192,9 @@ export class RulesComponent implements OnInit,OnDestroy {
    if(request.signal.aborted)return;
    const wasRunning=this.jobStatus?.state==='running';
    this.jobStatus=status;
-   this.jobError='';
+   this.jobError=status.log_error||'';
+   if(this.tab==='jobs')await this.loadJobLogs(request.signal);
+   if(request.signal.aborted)return;
    if(status.state==='running')this.pollTimer=setTimeout(()=>void this.pollJob(),2000);
    else if(wasRunning){
     this.state.toast(status.rc===0?'规则任务完成':'规则任务未完成，请查看操作日志');

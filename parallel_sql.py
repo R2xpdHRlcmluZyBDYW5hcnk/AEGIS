@@ -5,7 +5,6 @@ from pathlib import Path
 import queue
 import sqlite3
 import threading
-import time
 
 
 class ReadExecutor:
@@ -38,10 +37,9 @@ class Snapshot:
         self.setup, self.cancelled, self.locks = setup, cancelled, locks
         self.stop = threading.Event()
         self.members = []
-        self.deadline = time.monotonic()+20
 
     def _cancelled(self):
-        return (self.stop.is_set() or self.pool.stop.is_set() or time.monotonic() >= self.deadline
+        return (self.stop.is_set() or self.pool.stop.is_set()
                 or (self.cancelled is not None and self.cancelled()))
 
     @staticmethod
@@ -161,8 +159,14 @@ class Snapshot:
                     raise sqlite3.OperationalError('interrupted')
                 own = self.connection.execute(statement,args).fetchall()
             for future in jobs:
-                try:result.append(future.result(timeout=max(.01,self.deadline-time.monotonic())))
-                except FutureTimeout as exc:raise sqlite3.OperationalError('interrupted') from exc
+                while True:
+                    if self._cancelled():
+                        raise sqlite3.OperationalError('interrupted')
+                    try:
+                        result.append(future.result(timeout=.1))
+                        break
+                    except FutureTimeout:
+                        continue
             if own is not None:
                 result.append(own)
             if not jobs and own is None:

@@ -177,6 +177,16 @@ if os.environ.get('NDR_PREVIEW_BLOCK_RELOAD')=='1':
     runtime_reader=RuntimeReader(runtime_path)
 ips_control.install_proxies(m, app.control,runtime_reader)
 app.rule_schedule = ips_control.RemoteSchedule(app.control)
+job_log_lines = max(0,min(10000,int(os.environ.get('NDR_PREVIEW_JOB_LOG_LINES','0'))))
+if job_log_lines:
+    for index,(kind,trigger,label) in enumerate((('apply','manual','manual'),('update','scheduled','scheduled')),1):
+        identity=format(index,'032x')
+        job=dict(id=identity,log_ref=identity,kind=kind,trigger=trigger,state='done',started=m.now()-120+index,
+                 finished=m.now()-60+index,rc=0,
+                 lines=ips_control.OperationLogLines(manager.jobs.history.log_path(identity)))
+        job['lines'].extend([label+' first line',*(label+' line %05d 完整输出'%row for row in range(job_log_lines)),label+' last line'])
+        manager.jobs.rule_job=job;manager.jobs.history.checkpoint(job)
+        if trigger=='scheduled':manager.app.rule_schedule.finished(job)
 events = []
 for i, etype in enumerate(('alert', 'alert', 'alert', 'drop', 'dns', 'tls')):
     events.append(dict(timestamp=m.iso(m.now() - i * 30), event_type=etype,

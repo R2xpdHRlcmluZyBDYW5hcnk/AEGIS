@@ -14,6 +14,7 @@
 import argparse
 import base64
 from contextlib import closing, contextmanager, nullcontext
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from types import SimpleNamespace
 from itertools import chain
 import math
@@ -369,7 +370,7 @@ class BoundedRecords(deque):
         self.bytes = 0
 
 
-def data_query(ttl=2, pages=False, cache=True, seconds=20):
+def data_query(ttl=2, pages=False, cache=True, seconds=None):
     def decorate(function):
         @wraps(function)
         def call(app, params=None):
@@ -382,7 +383,8 @@ def data_query(ttl=2, pages=False, cache=True, seconds=20):
                                        cancelled=params.get('_cancelled'),event_query=(function.__name__, params))
             if pages and params.get('view') != 'list':
                 return service.execute(lambda reader: function(reader, params),event_query=(function.__name__, params))
-            return service.query(function, params, ttl, pages)
+            return service.query(function, params, ttl, pages,
+                                 wait_fresh=getattr(service.request_state, 'wait_fresh', False))
         return call
     return decorate
 
@@ -416,6 +418,13 @@ class DataService:
         self.stop = threading.Event()
         self.wake = threading.Event()
         self.thread = None
+        self.recent_thread = None
+        self.requests = OrderedDict()
+        self.request_state = threading.local()
+        self.request_pools = {
+            'panel': ThreadPoolExecutor(max_workers=1, thread_name_prefix='panel-query'),
+            'log': ThreadPoolExecutor(max_workers=max(1,self.read_workers-1), thread_name_prefix='event-query'),
+        }
         self.generation = app.db.network_generation
         self.revision = 0
         self.ingest_revision = 0
@@ -558,8 +567,13 @@ class DataService:
                     and recent.covers(low, high, stamp, self.ingest_revision)):
                 return False, None
             bounds = (low, high)
-        if not recent.lock.acquire(timeout=5):
-            raise RuntimeError('最近事件缓存查询繁忙，请稍后重试')
+        # A busy resident query must not hold up independent disk reads.
+        if not recent.lock.acquire(blocking=False):
+            if not cache_scope:
+                return False, None
+            while not recent.lock.acquire(timeout=.1):
+                if cancelled():
+                    raise RuntimeError('查询已取消')
         try:
             source = self.app.db
             if recent.bounds is None or recent.generation != source.history_generation:
@@ -573,9 +587,9 @@ class DataService:
                     return False, None
             elif not recent.covers(*bounds, stamp, self.ingest_revision):
                 return False, None
-            deadline = time.monotonic() + min(20, max(.01, seconds))
+            deadline = None if seconds is None else time.monotonic() + max(.01, seconds)
             def interrupted():
-                return cancelled() or time.monotonic() > deadline or recent.generation != source.history_generation
+                return cancelled() or (deadline is not None and time.monotonic() > deadline) or recent.generation != source.history_generation
             if interrupted():
                 raise RuntimeError('查询已取消或历史记录已变更')
             conn = recent.conn
@@ -594,13 +608,13 @@ class DataService:
             try:
                 value = producer(reader)
                 if interrupted():
-                    raise RuntimeError('最近事件缓存查询中断或超时')
+                    raise RuntimeError('查询已取消或历史记录已变更')
                 if name == 'record' and value.get('error'):
                     return False, None
                 return True, value
             except sqlite3.OperationalError as exc:
                 if getattr(exc, 'sqlite_errorcode', None) == sqlite3.SQLITE_INTERRUPT:
-                    raise RuntimeError('最近事件缓存查询中断或超时') from exc
+                    raise RuntimeError('查询已取消或历史记录已变更') from exc
                 raise
             finally:
                 conn.set_progress_handler(None, 0)
@@ -611,19 +625,16 @@ class DataService:
         finally:
             recent.lock.release()
 
-    def execute(self, producer, lane='log', background=False, seconds=20, cancelled=None, event_query=None):
+    def execute(self, producer, lane='log', background=False, seconds=None, cancelled=None, event_query=None):
         gate=self.background_slots if background else self.panel_slots if lane=='panel' else self.log_slots
         gates=[gate] if background else [gate,self.slots]
         acquired=[];conn = None;attached_summary=False
         def is_cancelled():return self.stop.is_set() or (callable(cancelled) and cancelled())
         try:
-            deadline=time.monotonic()+5
             for slot in gates:
                 while True:
                     if is_cancelled():raise RuntimeError('查询服务正在关闭' if self.stop.is_set() else '查询已取消')
-                    remaining=deadline-time.monotonic()
-                    if remaining<=0:raise RuntimeError('查询繁忙，请稍后重试')
-                    if slot.acquire(timeout=min(.1,remaining)):
+                    if slot.acquire(timeout=.1):
                         acquired.append(slot);break
             if self.stop.is_set():raise RuntimeError('查询服务正在关闭')
             source = self.app.db
@@ -635,10 +646,11 @@ class DataService:
             conn = sqlite3.connect(Path(source.path).resolve().as_uri()+'?mode=ro', uri=True, timeout=1)
             conn.execute('PRAGMA query_only=ON')
             conn.execute('PRAGMA cache_size=-2048')
-            generation = source.network_generation
-            deadline = time.monotonic()+min(20,max(.01,seconds))
-            conn.set_progress_handler(lambda: is_cancelled() or time.monotonic()>deadline
-                                      or generation != source.network_generation, 10000)
+            generation = source.history_generation
+            deadline = None if seconds is None else time.monotonic()+max(.01,seconds)
+            def read_cancelled():
+                return is_cancelled() or (deadline is not None and time.monotonic()>deadline) or generation != source.history_generation
+            conn.set_progress_handler(read_cancelled, 10000)
             with self.lock:
                 self.readers.add(conn)
             if self.stop.is_set():raise RuntimeError('查询服务正在关闭')
@@ -667,14 +679,14 @@ class DataService:
             if analytics is not None:
                 locks.append(analytics.lock)
             with self.sql.snapshot(source,conn,setup=setup,
-                    cancelled=lambda:is_cancelled() or generation!=source.network_generation or time.monotonic()>deadline,
+                    cancelled=read_cancelled,
                     locks=locks) as snapshot:
                 db.parallel = snapshot
                 if attached_summary:
                     state=dict(conn.execute('SELECT k,v FROM summaries.meta'))
                     if state.get('ready')=='1' and now()-float(state.get('as_of',0))<=30:
                         db.summary_cursor=int(state.get('cursor',0))
-                db.cpu_cancelled = lambda:is_cancelled() or generation!=source.network_generation or time.monotonic()>deadline
+                db.cpu_cancelled = read_cancelled
                 return producer(reader)
         except sqlite3.Error as exc:
             if not attached_summary:
@@ -688,6 +700,49 @@ class DataService:
                 conn.close()
             for slot in reversed(acquired):slot.release()
 
+    def request(self, name, params):
+        """Share bounded background work across authenticated REST/SSE reconnects."""
+        key = json.dumps(['request', self.app.db.history_generation, self.revision, name, self.normalized(params)],
+                         sort_keys=True, separators=(',', ':'))
+        with self.lock:
+            if self.stop.is_set():
+                raise RuntimeError('查询服务正在关闭')
+            stamp = time.monotonic()
+            for old_key, entry in list(self.requests.items()):
+                if entry['future'].done() and (stamp-entry['completed'] >= 300 or
+                        (entry['delivered'] is not None and stamp-entry['delivered'] >= 2)):
+                    del self.requests[old_key]
+            entry = self.requests.get(key)
+            if (entry is not None and entry['future'].done() and entry['delivered'] is not None
+                    and entry['revision'] != self._page_revision(name)):
+                del self.requests[key]
+                entry = None
+            if entry is None:
+                if len(self.requests) >= 16:
+                    raise RuntimeError('查询队列已满，请稍后重试')
+                pool = self.request_pools['panel' if name == 'overview' else 'log']
+                entry = dict(completed=float('inf'), delivered=None, revision=self._page_revision(name))
+                future = pool.submit(self._request_value, name, dict(params))
+                entry['future'] = future
+                self.requests[key] = entry
+                future.add_done_callback(lambda _, entry=entry: entry.update(completed=time.monotonic()))
+        future = entry['future']
+        try:
+            future.exception(timeout=.05)
+        except FutureTimeout:
+            return {'query_state': {'status':'running'}}, 202
+        with self.lock:
+            if entry['delivered'] is None:
+                entry['delivered'] = time.monotonic()
+        return future.result(), 200
+
+    def _request_value(self, name, params):
+        self.request_state.wait_fresh = True
+        try:
+            return getattr(self.app, name)(params)
+        finally:
+            self.request_state.wait_fresh = False
+
     def schedule(self, key, task):
         with self.lock:
             if (self.stop.is_set() or key in self.queue or key in self.inflight or len(self.queue) >= 16
@@ -696,7 +751,7 @@ class DataService:
             self.queue[key] = (time.monotonic()+15, task)
         self.wake.set()
 
-    def query(self, function, params, ttl=2, pages=False, background=False):
+    def query(self, function, params, ttl=2, pages=False, background=False, wait_fresh=False):
         if self.stop.is_set():raise RuntimeError('查询服务正在关闭')
         self._sync_generation()
         name = function.__name__
@@ -704,14 +759,19 @@ class DataService:
                 params.get(key) for key in ('scope','window','from','to')):
             params = dict(params, scope='cache')
         requested_generation = self._query_generation(name, params)
+        requested_history = self.app.db.history_generation, self.revision
         first = self.first_page(name, params)
         if first is not None:
             params = first
         key = self.key(name, params)
         fresh = None if background else self.cache.get(key, None if first is not None else ttl)
+        if wait_fresh and first is not None and self._first_due(name) <= time.monotonic():
+            fresh = None
         # Same query/range/page only. Keep a bounded last success while one
         # background refresh retries; never cache or substitute failed results.
         stale = fresh if fresh is not None or background else self.cache.get(key, 900)
+        if wait_fresh and fresh is None:
+            stale = None
         if (name == 'overview' and first is not None and self.recent is not None
                 and self.recent.has_events and stale is not None and not stale['network']['records']):
             fresh = stale = None
@@ -733,8 +793,11 @@ class DataService:
                         raise RuntimeError('查询队列已满，请稍后重试')
                     flight = self.inflight[key] = dict(event=threading.Event(), result=None, error=None)
             if not owner:
-                if not flight['event'].wait(25):
-                    raise RuntimeError('查询超时，请稍后重试')
+                while not flight['event'].wait(.1):
+                    if self.stop.is_set():
+                        raise RuntimeError('查询服务正在关闭')
+                    if requested_history != (self.app.db.history_generation, self.revision):
+                        raise RuntimeError('历史记录已变更，请重新查询')
                 if flight['error']:
                     raise RuntimeError(flight['error'])
                 result = copy.deepcopy(flight['result'])
@@ -809,7 +872,7 @@ class DataService:
         write_error = self.app.db.write_error
         if write_error:
             result = dict(result, error='事件入库失败，查询结果可能未更新：' + write_error)
-        if requested_generation != self._query_generation(name, params):
+        if requested_history != (self.app.db.history_generation, self.revision):
             raise RuntimeError('历史记录已变更，请重新查询')
         return result
 
@@ -828,22 +891,26 @@ class DataService:
     def start(self):
         if self.thread is not None and self.thread.is_alive():
             return
+        if self.recent is not None:
+            self.recent_thread = threading.Thread(target=self._run_recent, name='recent-events', daemon=True)
+            self.recent_thread.start()
         self.thread = threading.Thread(target=self._run, name='data-prefetch', daemon=True)
         self.thread.start()
 
+    def _run_recent(self):
+        while not self.stop.is_set():
+            try:
+                pending = self.recent.refresh(self.ingest_revision, self.stop)
+                self.stop.wait(.05 if pending else 1)
+            except sqlite3.Error:
+                self.stop.wait(2)
+
     def _run(self):
         pressure_at = float('inf') if self.app.config.get('preload_memory_mib') is not None else 0
-        recent_at = 0 if self.recent is not None else float('inf')
         while not self.stop.is_set():
             self.wake.clear()
             self._sync_generation()
             stamp = time.monotonic()
-            if stamp >= recent_at:
-                try:
-                    pending = self.recent.refresh(self.ingest_revision, self.stop)
-                    recent_at = time.monotonic() + (.05 if pending else 1)
-                except sqlite3.Error:
-                    recent_at = time.monotonic() + 2
             if stamp >= pressure_at:
                 self.cache.pressure()
                 pressure_at = stamp + 30
@@ -869,8 +936,8 @@ class DataService:
                 except Exception:
                     pass  # Foreground reads report errors; a failed prefetch must not stop the worker.
             else:
-                timeout = min(due, pressure_at, recent_at) - stamp
-                self.wake.wait(None if math.isinf(timeout) else max(0,timeout))
+                timeout = min(due, pressure_at) - stamp
+                self.wake.wait(min(1, max(0,timeout)))
 
     def close(self):
         self.stop.set()
@@ -881,6 +948,10 @@ class DataService:
                 conn.interrupt()
         if self.thread is not None:
             self.thread.join(timeout=5)
+        if self.recent_thread is not None:
+            self.recent_thread.join(timeout=5)
+        for pool in self.request_pools.values():
+            pool.shutdown(wait=True, cancel_futures=True)
         self.sql.close()
         if self.recent is not None:
             with self.recent.lock:
@@ -2242,7 +2313,11 @@ class RecentEvents:
                         self.conn.execute('DELETE FROM events WHERE (ts,id)<=(?,?)', self.edge)
 
     def committed(self, rows, epoch, revision):
-        with self.lock:
+        # Disk ingestion is authoritative. A skipped resident merge is recovered
+        # by refresh() from the cursor, without waiting on a long cache query.
+        if not self.lock.acquire(blocking=False):
+            return
+        try:
             if epoch != self.source.history_generation:
                 return
             if self.generation != epoch:
@@ -2259,6 +2334,8 @@ class RecentEvents:
                 self.error = ''
             except sqlite3.Error as exc:
                 self.error = str(exc)
+        finally:
+            self.lock.release()
 
     def _advance(self, disk, stamp, revision):
         rows = disk.execute(self.select + ' WHERE id>? ORDER BY id LIMIT ?',
@@ -2311,7 +2388,8 @@ class RecentEvents:
     def covers(self, low, high, stamp, revision):
         upper = stamp if self.revision == revision else self.as_of
         # Round the excluded edge conservatively before reusing SQLite's seconds-to-ms conversion.
-        return self.bounds is not None and upper is not None and low * 1000 >= self.floor + 1 and high <= upper
+        return (self.revision == revision and self.bounds is not None and upper is not None
+                and low * 1000 >= self.floor + 1 and high <= upper)
 
 
 class StoredNetworkStats:
@@ -2584,7 +2662,7 @@ class NetworkSnapshots:
     IDLE_SECONDS = 60
     # This is a single background reader, never an HTTP request or a pool lease.
     # A bounded longer pass can finish instead of restarting the same large sort.
-    QUERY_SECONDS = 60
+    QUERY_SECONDS = None
     QUERY_GAP_SECONDS = 1
     CPU_DUTY = 0.25
     MAX_ENTRIES = 8
@@ -2735,11 +2813,11 @@ class NetworkSnapshots:
         push=resolve_bounds(push,start,end)
         uri = Path(self.db.path).resolve().as_uri() + '?mode=ro'
         conn = sqlite3.connect(uri, uri=True, timeout=1)
-        deadline = time.monotonic() + self.QUERY_SECONDS
+        deadline = None if self.QUERY_SECONDS is None else time.monotonic() + self.QUERY_SECONDS
         timed_out = [False]
 
         def cancelled():
-            timed_out[0] = time.monotonic() >= deadline
+            timed_out[0] = deadline is not None and time.monotonic() >= deadline
             return timed_out[0] or self.stop.is_set() or generation != self.db.network_generation
 
         with self.condition:
@@ -3558,6 +3636,8 @@ class RuleUpdateSchedule:
         with self.lock:
             self.data["last_run"] = {key: job.get(key) for key in ("state", "started", "finished", "rc")}
             self.data["last_run"]["lines"] = list(job["lines"])[-80:]
+            for key in ('id','kind','trigger','log_ref'):
+                if key in job:self.data['last_run'][key] = job[key]
             try:
                 self._save()
                 self.error = ""
@@ -6145,6 +6225,7 @@ class App:
         push = self._overview_push(params, low, high)
         if hasattr(self, '_recent_bounds') and push[0]:
             # Evaluate session membership once for all aggregates and the recent rows.
+            self.db.conn.execute('DELETE FROM overview_matches')
             self.db.conn.execute('INSERT INTO overview_matches SELECT id FROM events WHERE ts>=? AND ts<=? AND '
                                  + ' AND '.join(push[0]), [low*1000, high*1000, *push[1]])
             push = (['id IN (SELECT id FROM overview_matches)'], [])
@@ -7366,6 +7447,16 @@ class Handler(BaseHTTPRequestHandler):
     def _error(self, status, message):
         self._json({"error": message}, status)
 
+    def _query_payload(self, name, params):
+        service = getattr(self.app, 'data', None)
+        if service is None:
+            return getattr(self.app, name)(params), 200
+        return service.request(name, params)
+
+    def _query_json(self, name, params):
+        payload, status = self._query_payload(name, params)
+        return self._json(payload, status)
+
     # -- 会话 / 登录 -----------------------------------------------------
     def _cookie_token(self):
         for part in (self.headers.get("Cookie") or "").split(";"):
@@ -7550,19 +7641,21 @@ button:disabled{opacity:.4;cursor:not-allowed}
                 return self._send(200, self.app.metrics(),
                                   "text/plain; version=0.0.4; charset=utf-8")
             if path == "/api/overview":
-                return self._json(self.app.overview(params))
+                return self._query_json('overview', params)
             if path == '/api/record':
-                return self._json(self.app.record(params))
+                return self._query_json('record', params)
             if path == '/api/session':
-                return self._json(self.app.session_events(params))
+                return self._query_json('session_events', params)
             if path == '/api/cache/stats':
                 return self._json(self.app.cache_stats())
             if path == "/api/incidents":
-                return self._json(self.app.incidents(params))
+                return self._query_json('incidents', params)
             if path == "/api/incident":
-                return self._json(self.app.incident(params))
+                return self._query_json('incident', params)
             if path == "/api/events":
-                data = self.app.events(params)
+                data, status = self._query_payload('events', params)
+                if status == 202:
+                    return self._json(data, status)
                 if params.get("format") == "csv":
                     if data.get('error'):return self._error(503,'事件查询失败，未生成导出文件')
                     return self._send(200, events_csv(data.get("events", [])),
@@ -7572,7 +7665,7 @@ button:disabled{opacity:.4;cursor:not-allowed}
                                       })
                 return self._json(data)
             if path == "/api/aggregate":
-                return self._json(self.app.aggregate(params))
+                return self._query_json('aggregate', params)
             if path == '/api/hunt/flow-range':
                 return self._json(self.app.hunt_flow_range(params))
             if path == '/api/hunt/community-range':
@@ -7582,7 +7675,7 @@ button:disabled{opacity:.4;cursor:not-allowed}
             if path == '/api/hunt/related':
                 return self._json(self.app.hunt_related(params))
             if path == "/api/hunt":
-                return self._json(self.app.hunt(params))
+                return self._query_json('hunt', params)
             if path in ("/api/stream", "/api/hunt/stream"):
                 if path == "/api/hunt/stream":
                     params = dict(params)
@@ -7640,6 +7733,8 @@ button:disabled{opacity:.4;cursor:not-allowed}
                 return self._json(self.app.system_payload())
             if path == "/api/actions/status":
                 return self._json(self.app.sys.update_status())
+            if path == '/api/actions/log':
+                return self._json(self.app.sys.rule_log(params.get('id',''),int(params.get('offset') or 0)))
             if path == "/api/rules/schedule":
                 return self._json(self.app.rule_schedule.status())
             return self._error(404, "not found")
@@ -7673,13 +7768,13 @@ button:disabled{opacity:.4;cursor:not-allowed}
         query = dict(params)
         query.pop("topic", None)
         if topic == "overview":
-            return self.app.overview(query)
+            return self._query_payload('overview', query)[0]
         if topic in ("alerts", "drops"):
             # App resolves the rolling window per computation, shared with REST/prefetch keys.
             if topic == "alerts":
-                return self.app.incidents(query)
+                return self._query_payload('incidents', query)[0]
             query["type"] = "drop"
-            return self.app.events(query)
+            return self._query_payload('events', query)[0]
         if topic == "system":
             return self.app.system_payload()
         if topic == "rules":
@@ -7687,7 +7782,7 @@ button:disabled{opacity:.4;cursor:not-allowed}
         if topic == "manage":
             return {"governance": governance_state(), "rules": self.app.rules_payload()}
         if topic == "hunt":
-            return self.app.hunt(query)
+            return self._query_payload('hunt', query)[0]
         return {"error": "unknown topic"}
 
     DELTA_TOPICS = ("hunt", "alerts", "drops")
@@ -7719,7 +7814,7 @@ button:disabled{opacity:.4;cursor:not-allowed}
             except Exception as exc:  # noqa: BLE001
                 payload = {"error": str(exc)}
             body = json.dumps(payload, ensure_ascii=False, default=str, sort_keys=True)
-            if body != last:      # 内容没变就发心跳，客户端仍能判断连接是否存活
+            if body != last and not payload.get('query_state'):      # Pending work keeps its connection alive without replacing data.
                 last = body
                 if not self._sse_send(payload):
                     return

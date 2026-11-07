@@ -77,13 +77,9 @@ try {
  await cdp('Page.navigate',{url:base+'/login'});await until(`!!document.querySelector('#password')`);
  await set('#password','preview-only');await evaluate(`document.querySelector('form').submit()`);
  await until(`!!document.querySelector('[data-page="rules"]')`);await nav('rules');
- await until(`document.querySelector('.rule-summary')?.textContent.includes('失败 未提供')`);
- for(const value of [null,2,0]){
-  rulesFailed=value;await click('↻ 刷新');
-  await until(`document.querySelector('ndr-rules .table-scroll')?.getAttribute('aria-busy')==='false'&&document.querySelector('.rule-summary')?.textContent.includes('失败 ${value??'未提供'}')`);
- }
+ await until(`document.querySelector('.rule-engine-state')?.textContent.trim()==='引擎就绪'`);
  await click('操作日志',`document.querySelector('ndr-rules .tabs')`);
- await until(`document.querySelector('ndr-rules [role="tabpanel"]')?.textContent.includes('暂无规则操作日志')`);
+ await until(`document.querySelector('ndr-rules [role="tabpanel"]')?.textContent.includes('暂无手动操作日志')`);
  assert.equal(await evaluate(`!!document.querySelector('ndr-rules ndr-table')`),false);
  await ruleTab('阻断动作');await click('＋ 新建');
  await until(`!!document.querySelector('ndr-picker [aria-label="目标动作"]')`);
@@ -132,7 +128,7 @@ try {
  await until(`!document.querySelector('.pending-rules')`);
  assert.equal(await evaluate(`!!document.querySelector('ndr-rules .job-log')`),false);
  await click('操作日志',`document.querySelector('ndr-rules .tabs')`);
- await until(`document.querySelector('.job-log[aria-label="规则应用输出"]')?.textContent.includes('完成热重载')&&document.querySelector('.job-log[aria-label="最近定时更新输出"]')?.textContent.includes('定时更新输出')`);
+ await until(`document.querySelector('.job-log[aria-label="规则操作日志输出"]')?.textContent.includes('完成热重载')&&document.querySelector('.job-log[aria-label="最近定时更新输出"]')?.textContent.includes('定时更新输出')`);
  assert.equal(writes.length,3);
  pendingSources=true;
  await ruleTab('规则源');await until(`!!document.querySelector('.schedule-form')`);

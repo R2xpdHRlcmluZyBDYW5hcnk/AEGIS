@@ -61,16 +61,27 @@ export class Api {
   async request(path:string,method='GET',body?:unknown,signal?:AbortSignal):Promise<any> {
     try {
       if(signal?.aborted)throw new DOMException('请求已取消','AbortError');
-      const request=this.http.request(method,path,{body,headers:{'X-Requested-With':'ips-web'},withCredentials:true}).pipe(timeout(120000));
-      const value:any=await firstValueFrom(signal?request.pipe(takeUntil(fromEvent(signal,'abort'))):request);
-      if (value?.error && value.error !== 'already running') throw new Error(value.error);
-      return value;
+      while(true){
+        if(signal?.aborted)throw new DOMException('请求已取消','AbortError');
+        const response=this.http.request(method,path,{body,headers:{'X-Requested-With':'ips-web'},withCredentials:true});
+        const request=method==='GET'?response:response.pipe(timeout(120000));
+        const value:any=await firstValueFrom(signal?request.pipe(takeUntil(fromEvent(signal,'abort'))):request);
+        if (value?.error && value.error !== 'already running') throw new Error(value.error);
+        if(method!=='GET'||value?.query_state?.status!=='running')return value;
+        await this.waitForQuery(signal);
+      }
     } catch(error:any) {
       if(signal?.aborted)throw new DOMException('请求已取消','AbortError');
       if(error.status===401) location.assign('/login');
       throw new Error(error.error?.error || error.message || '请求失败');
     }
   }
+  waitForQuery(signal?:AbortSignal):Promise<void>{return new Promise<void>((resolve,reject)=>{
+    const abort=()=>{clearTimeout(timer);signal?.removeEventListener('abort',abort);reject(new DOMException('请求已取消','AbortError'));};
+    const timer=setTimeout(()=>{signal?.removeEventListener('abort',abort);resolve();},1500);
+    signal?.addEventListener('abort',abort,{once:true});
+    if(signal?.aborted)abort();
+  });}
   get(path:string,params:Record<string,any>={},signal?:AbortSignal):Promise<any> {const query=new URLSearchParams();Object.entries(params).forEach(([k,v])=>{if(v!==undefined && v!==null && v!=='')query.set(k,String(v));});return this.request(path+(query.size?'?'+query:''),'GET',undefined,signal);}
   async post(path:string,body:any={}):Promise<any> {const r=await this.request(path,'POST',body);if(r.ok===false)throw new Error(r.message||r.output||r.error||'操作未完成');return r;}
   async delete(path:string):Promise<any> {const r=await this.request(path,'DELETE');if(r.ok===false)throw new Error(r.message||'删除失败');return r;}

@@ -86,7 +86,7 @@ def _build(output):
         shutil.copy2(ROOT / 'test_app.js', project / 'test_app.js')
         run([node, 'test_app.js'], project, env)
         (project / 'tests').mkdir()
-        for name in ('test-attack-mapping.cjs', 'test-console-scroll.cjs', 'test-overview-range.cjs', 'test-modal-backdrop.cjs', 'test-range-context.cjs', 'test-chart-zoom.cjs', 'test-navigation.cjs', 'test-data-layer.cjs', 'test-connection-summary.cjs', 'test-local-assistant-stream.cjs', 'test-live-recovery.cjs'):
+        for name in ('test-attack-mapping.cjs', 'test-console-scroll.cjs', 'test-overview-range.cjs', 'test-modal-backdrop.cjs', 'test-range-context.cjs', 'test-chart-zoom.cjs', 'test-navigation.cjs', 'test-data-layer.cjs', 'test-connection-summary.cjs', 'test-local-assistant-stream.cjs', 'test-live-recovery.cjs', 'test-rule-job-logs.cjs'):
             shutil.copy2(ROOT / 'tests' / name, project / 'tests' / name)
             run([node, project / 'tests' / name], project, env)
         for name in ('ips-web','dns_context.py','llm_hunting.py','overview_metrics.py','hunt_query.py','python_dependencies.py','session_logger.py','openappid_update.py','llm_assistant.py','quic_observer.py','snort_engine.py','snort_rules.py','rule_policy.py','parallel_cpu.py','parallel_sql.py','event_processing.py','native_rules.py','rule_sources.py','rule_identity.py','rule_inventory.py','runtime_status.py','history_reset.py','log_storage.py'):

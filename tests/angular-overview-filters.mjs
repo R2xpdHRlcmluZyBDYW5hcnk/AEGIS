@@ -211,7 +211,7 @@ try {
   assert.equal(counts[0],'37');
   assert.equal(counts[3],'12');
   assert.equal(await evaluate(`[...document.querySelectorAll('.visibility-grid h2')].some(e=>e.textContent==='连接应用分布')`),false);
-  assert.doesNotMatch(await evaluate(`document.querySelector('.network-update').innerText`),waitingText);
+  assert.equal(await evaluate(`!!document.querySelector('.network-update')`),false);
   await emitOverview({...overview,network:{available:false,status:'error',error:'事件库不可用'}});
   await until(`${errorText}?.includes('事件库不可用')`);
 

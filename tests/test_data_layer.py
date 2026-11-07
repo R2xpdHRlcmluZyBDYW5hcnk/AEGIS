@@ -23,6 +23,138 @@ loader.exec_module(m)
 
 
 class DataLayerCase(unittest.TestCase):
+    def test_manual_http_query_waits_for_fresh_data_instead_of_finishing_with_stale_cache(self):
+        entered, release = threading.Event(), threading.Event()
+        def custom(reader, params):
+            entered.set();release.wait(3)
+            return {'total':42}
+        self.app.custom = types.MethodType(m.data_query(ttl=0)(custom), self.app)
+        key = self.service.key('custom', {})
+        self.cache.put(key, {'total':1})
+        try:
+            self.assertEqual(self.service.request('custom', {})[1],202)
+            self.assertTrue(entered.wait(2))
+        finally:release.set()
+        result, status = self.service.request('custom', {})
+        self.assertEqual((status,result['total']),(200,42))
+        self.assertNotIn('read_state',result)
+
+    def test_http_polling_requires_authentication_and_reconnects_to_one_job(self):
+        self.app.sessions = m.Sessions(3600)
+        token = self.app.sessions.create('fixture','127.0.0.1')
+        release = threading.Event()
+        self.app.hunt = lambda params: release.wait(3) and {'total':42}
+        class Handler(m.Handler):
+            def log_message(self,*_):pass
+        Handler.app, Handler.config = self.app, {}
+        with m.BoundedHTTPServer(('127.0.0.1',0),Handler) as server:
+            thread = threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+            def read(authenticated):
+                conn = http.client.HTTPConnection(*server.server_address, timeout=2)
+                try:
+                    conn.request('GET','/api/hunt',headers={'Cookie':m.SESSION_COOKIE+'='+token} if authenticated else {})
+                    response = conn.getresponse()
+                    return response.status,json.loads(response.read())
+                finally:conn.close()
+            try:
+                self.assertEqual(read(False)[0],401)
+                self.assertFalse(self.service.requests)
+                self.assertEqual(read(True)[0],202)
+                self.assertEqual(read(True)[0],202)
+                self.assertEqual(len(self.service.requests),1)
+                self.assertEqual(read(False)[0],401)
+                release.set()
+                self.assertEqual(read(True),(200,{'total':42}))
+            finally:
+                release.set();server.shutdown();thread.join(3)
+
+    def test_default_read_survives_a_day_of_elapsed_time(self):
+        clock = time.monotonic
+        def read(reader):
+            with mock.patch.object(m.time, 'monotonic', side_effect=lambda:clock()+86400):
+                return reader.db.conn.execute('WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL '
+                    'SELECT x+1 FROM n WHERE x<10000) SELECT SUM(x) FROM n').fetchone()[0]
+        self.assertEqual(self.service.execute(read), 50005000)
+
+    def test_retention_does_not_cancel_or_restart_an_accepted_read(self):
+        self.add('flow')
+        entered, release = threading.Event(), threading.Event()
+        def hunt(params):
+            def read(reader):
+                count = reader.db.conn.execute('SELECT COUNT(*) FROM events').fetchone()[0]
+                entered.set();release.wait(3)
+                return {'total':count, 'remaining':reader.db.conn.execute('SELECT COUNT(*) FROM events').fetchone()[0]}
+            return self.service.execute(read)
+        self.app.hunt = hunt
+        try:
+            self.assertEqual(self.service.request('hunt', {})[1],202)
+            self.assertTrue(entered.wait(2))
+            self.db._prune('SELECT id FROM events')
+            self.assertEqual(self.service.request('hunt', {})[1],202)
+            self.assertEqual(len(self.service.requests),1)
+        finally:release.set()
+        result, status = self.service.request('hunt', {})
+        self.assertEqual((status,result),(200,{'total':1,'remaining':1}))
+
+    def test_background_request_survives_reconnect_and_shares_one_execution(self):
+        entered, release = threading.Event(), threading.Event()
+        calls = []
+        def hunt(params):
+            calls.append(params);entered.set();release.wait(3)
+            return {'total':42}
+        self.app.hunt = hunt
+        try:
+            for _ in range(3):
+                result, status = self.service.request('hunt', {'q':'type:flow'})
+                self.assertEqual((status,result['query_state']['status']), (202,'running'))
+            self.assertTrue(entered.is_set())
+            self.assertEqual(len(calls),1)
+        finally:
+            release.set()
+        result, status = self.service.request('hunt', {'q':'type:flow'})
+        self.assertEqual((status,result), (200,{'total':42}))
+        self.assertEqual(len(calls),1)
+
+    def test_background_queue_is_bounded_and_panel_has_its_own_worker(self):
+        release = threading.Event()
+        self.app.hunt = lambda params: release.wait(4) and {'total':1}
+        self.app.overview = lambda params: {'panel':True}
+        try:
+            self.service.request('hunt', {'q':'0'})
+            self.assertEqual(self.service.request('overview', {})[0], {'panel':True})
+            for index in range(1,15):
+                self.service.request('hunt', {'q':str(index)})
+            with self.assertRaisesRegex(RuntimeError,'队列已满'):
+                self.service.request('hunt', {'q':'overflow'})
+            self.assertEqual(len(self.service.requests),16)
+        finally:
+            release.set()
+
+    def test_slow_resident_query_does_not_block_ingestion_and_refresh_recovers(self):
+        self.service.close()
+        recent = self.app.recent_events = m.RecentEvents(self.db, 1<<20)
+        self.service = self.app.data = m.DataService(self.app, self.cache)
+        self.add('flow')
+        while recent.refresh(self.service.ingest_revision, self.service.stop):pass
+        locked, release = threading.Event(), threading.Event()
+        def hold():
+            with recent.lock:
+                locked.set();release.wait(4)
+        thread = threading.Thread(target=hold);thread.start()
+        try:
+            self.assertTrue(locked.wait(2))
+            self.add('flow', self.stamp+1)
+            self.assertEqual(self.db.conn.execute('SELECT COUNT(*) FROM events').fetchone()[0],2)
+            # Queries outside the resident overview can use their independent WAL reader.
+            self.assertEqual(self.app.events({'from':str(self.stamp-1),'to':str(self.stamp+2),
+                                              'view':'list'})['total'],2)
+        finally:
+            release.set();thread.join(3)
+        self.assertFalse(recent.covers(*recent.bounds,m.now(),self.service.ingest_revision),
+                         'A skipped merge must use disk until the resident cursor catches up')
+        while recent.refresh(self.service.ingest_revision, self.service.stop):pass
+        self.assertEqual(recent.conn.execute('SELECT COUNT(*) FROM events').fetchone()[0],2)
+
     def test_read_budget_and_caller_cancellation_interrupt_sql_and_release_slots(self):
         query='WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000000) SELECT SUM(x) FROM n'
         with self.assertRaises(sqlite3.OperationalError):

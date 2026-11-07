@@ -76,6 +76,78 @@ class ManagerCase(unittest.TestCase):
                 self.manager.dispatch(request)
         self.assertEqual(self.manager.dispatch({'operation':'ping'}), {'ready':True})
 
+    def log_job(self, identity, kind='apply', trigger='manual', raw=b'first\nlast\n', state='done'):
+        job = dict(id=identity,log_ref=identity,kind=kind,trigger=trigger,state=state,
+                   started=100,finished=200 if state!='running' else 0,rc=0 if state!='running' else None,
+                   lines=control.OperationLogLines(self.jobs.history.log_path(identity)))
+        job['lines'].write(raw)
+        self.jobs.rule_job=job;self.jobs.history.checkpoint(job)
+        return job
+
+    def full_log(self, identity):
+        offset=0;parts=[]
+        while True:
+            page=self.manager.dispatch(dict(operation='read',name='sys.rule_log',args=[identity,offset],kwargs={}))
+            parts.append(page['text']);self.assertGreaterEqual(page['next_offset'],offset)
+            if page['eof']:return ''.join(parts)
+            self.assertGreater(page['next_offset'],offset);offset=page['next_offset']
+
+    def test_complete_logs_survive_restart_and_keep_manual_apply_beside_scheduled_update(self):
+        manual='a'*32;scheduled='b'*32
+        raw=('first manual line\n'+''.join('manual %05d 汉字 🦊\n'%i for i in range(6000))+'last manual line\n').encode()
+        self.log_job(manual,raw=raw)
+        self.log_job(scheduled,kind='update',trigger='scheduled',raw=b'first scheduled\n'+b'row\n'*7000+b'last scheduled\n')
+        self.assertEqual(self.full_log(manual),raw.decode())
+        self.assertTrue(self.full_log(scheduled).endswith('last scheduled\n'))
+        rebuilt=control.Manager(self.module,self.manager.state)
+        status=rebuilt.jobs.update_status()
+        self.assertEqual(status['recent_manual']['kind'],'apply')
+        self.assertEqual(status['recent_manual']['id'],manual)
+        self.assertEqual(status['recent_scheduled']['id'],scheduled)
+        self.assertEqual(status['recent_manual']['log_bytes'],len(raw))
+        self.assertEqual(rebuilt.jobs.rule_log(manual)['text'],self.jobs.rule_log(manual)['text'])
+
+    def test_log_pages_preserve_utf8_at_the_byte_boundary_and_live_partial_characters(self):
+        identity='c'*32
+        raw=b'x'*65535+'汉🦊\n'.encode()
+        job=self.log_job(identity,raw=raw,state='running')
+        first=self.jobs.rule_log(identity)
+        self.assertEqual(first['next_offset'],65535)
+        self.assertEqual(first['text'],'x'*65535)
+        self.assertEqual(first['text']+self.jobs.rule_log(identity,first['next_offset'])['text'],raw.decode())
+        job['lines'].write(b'\xe6')
+        trailing=self.jobs.rule_log(identity,len(raw))
+        self.assertEqual(trailing['next_offset'],len(raw))
+        self.assertFalse(trailing['eof'])
+        job['lines'].write(b'\xb1\x89')
+        self.assertEqual(self.jobs.rule_log(identity,len(raw))['text'],'汉')
+
+    def test_restart_marks_a_running_operation_interrupted_without_discarding_output(self):
+        identity='d'*32
+        self.log_job(identity,raw=b'beginning\ncomplete captured output\n',state='running')
+        rebuilt=control.Manager(self.module,self.manager.state)
+        self.assertEqual(rebuilt.jobs.update_status()['state'],'interrupted')
+        self.assertTrue(rebuilt.jobs.rule_log(identity)['text'].startswith('beginning\ncomplete captured output\n'))
+
+    def test_operation_log_ids_and_offsets_are_validated(self):
+        identity='e'*32;self.log_job(identity)
+        for key,offset in (('../../etc/shadow',0),('f'*32,0),(identity,-1),(identity,True),(identity,999999)):
+            with self.subTest(key=key,offset=offset),self.assertRaises(ValueError):self.jobs.rule_log(key,offset)
+        self.assertEqual(len(self.jobs.rule_log(identity)['text']),len('first\nlast\n'))
+
+    def test_log_retention_keeps_latest_manual_output_while_scheduled_jobs_advance(self):
+        manual='1'*32;self.log_job(manual)
+        for value in range(2,25):self.log_job(format(value,'032x'),kind='update',trigger='scheduled')
+        self.assertEqual(len(self.jobs.history.records),20)
+        self.assertTrue(self.jobs.history.log_path(manual).exists())
+        self.assertEqual(self.jobs.update_status()['recent_manual']['id'],manual)
+
+    def test_log_index_failure_refuses_to_launch_a_rule_operation(self):
+        with mock.patch.object(self.jobs.history,'checkpoint',side_effect=OSError('fixture disk full')), \
+                mock.patch.object(control.threading.Thread,'start') as start:
+            with self.assertRaises(OSError):self.mutate('/api/actions/apply')
+        start.assert_not_called();self.assertFalse(self.manager.busy)
+
     def test_request_and_response_size_limits(self):
         for raw in (b'{}', b'{}\n' * 100):
             with self.assertRaises(ValueError):

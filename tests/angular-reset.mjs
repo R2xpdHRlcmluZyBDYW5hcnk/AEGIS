@@ -78,7 +78,7 @@ try {
    await pointerClick('ndr-events ndr-range .text-button');
    await until(`!!document.querySelector('ndr-events tbody tr.clickable')`);
    assert.equal(await evaluate(`document.querySelector('ndr-events input[aria-label="搜索查询"]').value`),'');
-   assert.equal(await evaluate(`document.querySelector('ndr-events ndr-range select').value`),'1440');
+   assert.equal(await evaluate(`document.querySelector('ndr-events ndr-range select').value`),'60');
    assert.equal(await evaluate(`document.querySelectorAll('ndr-events ndr-range input').length`),0);
    assert.equal(await evaluate(`document.querySelector('ndr-events .filter-line>label input').checked`),mode!=='hunt');
    assert.equal(await evaluate(`document.querySelectorAll('ndr-events .error').length`),0);
@@ -89,14 +89,14 @@ try {
    const resetRequests=requests.slice(marker).map(u=>new URL(u)).filter(u=>u.pathname===endpoint);
    assert.equal(resetRequests.length,1,'reset makes one result request: '+mode);
    const params=resetRequests[0].searchParams;
-   assert.equal(params.get('window'),'1440');assert.equal(params.get('offset'),'0');
+   assert.equal(params.get('window'),'60');assert.equal(params.get('offset'),'0');
    for(const key of ['q','sev','proto','from','to'])assert.equal(params.has(key),false,key+' cleared for '+mode);
    if(mode==='hunt')assert.equal(params.get('icase'),'1');
    await pointerClick('[data-page="overview"]');await until(`!!document.querySelector('ndr-chart')`);
    await pointerClick('[data-page="'+mode+'"]');await until(`!!document.querySelector('ndr-events tbody tr.clickable')`);
    assert.equal(await evaluate(`document.querySelector('ndr-events input[aria-label="搜索查询"]').value`),'');
-   assert.equal(await evaluate(`document.querySelector('ndr-events ndr-range select').value`),'1440');
-   console.log('ok - '+mode+': reset clears query, filters, invalid custom range, options; reloads default 24-hour results once; stays reset after navigating away and back');
+   assert.equal(await evaluate(`document.querySelector('ndr-events ndr-range select').value`),'60');
+   console.log('ok - '+mode+': reset clears query, filters, invalid custom range, options; reloads default 1-hour results once; stays reset after navigating away and back');
   }
   assert.deepEqual(exceptions,[]);
 } finally {

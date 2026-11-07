@@ -1,5 +1,7 @@
 """Local, bounded rule-manager protocol. No caller-supplied commands or paths."""
 import inspect
+import codecs
+import re
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from snort_engine import configuration_lock
@@ -16,7 +18,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from collections import deque
+from collections import deque, OrderedDict
 
 SOCKET = '/run/ips-rule-manager/control.sock'
 REQUEST_LIMIT = 256 * 1024
@@ -98,6 +100,7 @@ def install_proxies(module, client, runtime=None):
             return runtime.read().get(_name,{'state':'unknown'} if _name=='service' else {})
         setattr(module.SysInfo, name, lambda self, _fn=function: _fn())
     module.SysInfo.telemetry=lambda self:runtime.read().get('telemetry',{})
+    module.SysInfo.rule_log=lambda self,identity,offset=0:client.request('read',name='sys.rule_log',args=[identity,offset],kwargs={})
     module.SysInfo._queue_listeners=staticmethod(lambda:runtime.read().get('queue_listeners'))
     module.SysInfo.history_reset_status=lambda self:runtime.read().get('history_reset',{'state':'idle'})
     module.Snort.call = lambda self, commands, timeout=10: runtime.engine_call(commands,timeout)
@@ -204,6 +207,150 @@ class RuleBackup:
         shutil.rmtree(self.directory)
 
 
+class OperationLogLines(list):
+    """Append complete output to disk; keep only a small status preview in RAM."""
+    def __init__(self, path, create=True):
+        self.path = Path(path)
+        self.lock = threading.RLock()
+        self.error = ''
+        if self.path.is_symlink():
+            raise ValueError('Invalid operation log')
+        if not create and not self.path.is_file():raise FileNotFoundError('Operation log unavailable')
+        descriptor = os.open(self.path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+        os.close(descriptor)
+        self._preview()
+
+    def _preview(self):
+        with self.path.open('rb') as handle:
+            size = os.fstat(handle.fileno()).st_size
+            handle.seek(max(0,size-65536))
+            rows = handle.read(min(size,65536)).decode('utf-8','replace').splitlines()[-300:]
+        self[:] = rows
+
+    def write(self, raw):
+        with self.lock:
+            with self.path.open('ab') as handle:
+                handle.write(raw)
+            self._preview()
+
+    def append(self, value):
+        with self.lock:
+            try:
+                prefix = b''
+                with self.path.open('rb') as handle:
+                    if self.path.stat().st_size:
+                        handle.seek(-1,os.SEEK_END)
+                        if handle.read(1) != b'\n':prefix = b'\n'
+                self.write(prefix+str(value).encode('utf-8')+b'\n')
+            except OSError:
+                # Reporting a disk failure must not prevent transaction rollback.
+                self.error = '操作日志写入失败'
+                super().append(str(value))
+                del self[:-300]
+
+    def extend(self, values):
+        values = [str(value) for value in values]
+        if values:self.append('\n'.join(values))
+
+
+class OperationHistory:
+    """Private, atomic metadata and complete logs for the latest 20 operations."""
+    def __init__(self, state):
+        self.root = Path(state)/'operation-logs'
+        self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.path = self.root/'index.json'
+        self.lock = threading.RLock()
+        self.records = OrderedDict()
+        self.current = self.manual = self.scheduled = None
+        self.error = ''
+        try:
+            if self.path.stat().st_size > 4<<20:raise ValueError('oversized index')
+            value = json.loads(self.path.read_text(encoding='utf-8'))
+            if value.get('schema') != 1 or not isinstance(value.get('records'),list) or len(value['records'])>20:
+                raise ValueError('invalid index')
+            for record in value['records']:
+                if not isinstance(record,dict) or not self.valid_id(record.get('id')):
+                    raise ValueError('invalid operation')
+                self.records[record['id']] = record
+            self.current,self.manual,self.scheduled = (value.get(key) for key in ('current','manual','scheduled'))
+            if any(key is not None and key not in self.records for key in (self.current,self.manual,self.scheduled)):
+                raise ValueError('invalid operation reference')
+        except FileNotFoundError:pass
+        except (OSError, ValueError, TypeError):self.error = '操作日志索引读取失败'
+
+    @staticmethod
+    def valid_id(value):
+        return isinstance(value,str) and re.fullmatch('[0-9a-f]{32}',value) is not None
+
+    def log_path(self, identity):
+        if not self.valid_id(identity):raise ValueError('操作日志标识无效')
+        path = self.root/(identity+'.log')
+        if path.is_symlink():raise ValueError('操作日志路径无效')
+        return path
+
+    @staticmethod
+    def snapshot(job):
+        result = {key:job[key] for key in ('id','kind','trigger','state','started','finished','rc','log_ref') if key in job}
+        rows = job.get('lines',[])
+        result['lines'] = [str(line)[:256] for line in list(rows)[-80:]]
+        if isinstance(rows,OperationLogLines):
+            try:result['log_bytes'] = rows.path.stat().st_size
+            except OSError:result['log_error'] = '操作日志文件不可用'
+            if rows.error:result['log_error'] = rows.error
+        elif 'log_bytes' in job:result['log_bytes'] = job['log_bytes']
+        return result
+
+    def checkpoint(self, job):
+        with self.lock:
+            if self.error:raise OSError(self.error)
+            record = self.snapshot(job)
+            identity = record['id']
+            if not self.valid_id(identity):raise ValueError('操作日志标识无效')
+            if record.get('log_ref'):
+                with self.log_path(identity).open('ab') as handle:handle.flush();os.fsync(handle.fileno())
+            self.records[identity] = record
+            self.records.move_to_end(identity)
+            self.current = identity
+            if job.get('trigger') == 'scheduled':self.scheduled = identity
+            else:self.manual = identity
+            protected = {self.current,self.manual,self.scheduled}
+            obsolete = []
+            while len(self.records)>20:
+                oldest = next(key for key in self.records if key not in protected)
+                obsolete.append(oldest);del self.records[oldest]
+            value = dict(schema=1,current=self.current,manual=self.manual,scheduled=self.scheduled,
+                         records=list(self.records.values()))
+            candidate = self.path.with_suffix('.new')
+            try:
+                descriptor = os.open(candidate,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
+                with os.fdopen(descriptor,'w',encoding='utf-8') as handle:
+                    json.dump(value,handle,ensure_ascii=False);handle.flush();os.fsync(handle.fileno())
+                os.replace(candidate,self.path)
+            finally:candidate.unlink(missing_ok=True)
+            for key in obsolete:self.log_path(key).unlink(missing_ok=True)
+
+    def read(self, identity, offset=0):
+        if not self.valid_id(identity) or type(offset) is not int or offset<0:
+            raise ValueError('操作日志读取参数无效')
+        with self.lock:
+            record = self.records.get(identity)
+            if record is None:raise ValueError('操作日志不存在')
+            if not record.get('log_ref'):raise ValueError('该历史记录没有完整日志文件')
+            running = record.get('state') == 'running'
+        path = self.log_path(identity)
+        try:
+            with path.open('rb') as handle:
+                size = os.fstat(handle.fileno()).st_size
+                if offset>size:raise ValueError('操作日志偏移无效')
+                handle.seek(offset);raw = handle.read(min(65536,size-offset))
+        except OSError:raise ValueError('操作日志文件不可用') from None
+        decoder = codecs.getincrementaldecoder('utf-8')('replace')
+        text = decoder.decode(raw,final=not running and offset+len(raw)>=size)
+        pending = decoder.getstate()[0]
+        following = offset+len(raw)-len(pending)
+        return dict(id=identity,offset=offset,next_offset=following,bytes=size,text=text,eof=following>=size)
+
+
 class Jobs:
     """One update/apply/reload at a time; queries and schedule edits stay available."""
     def __init__(self, owner):
@@ -211,6 +358,17 @@ class Jobs:
         self.local = owner.module.SysInfo()
         self.rule_job = dict(state='idle', started=0, finished=0, lines=deque(maxlen=300))
         self.reload_job = dict(state='idle', last='', since='')
+        self.history = OperationHistory(owner.state)
+        self.log_error = self.history.error
+        if self.history.current:
+            self.rule_job = dict(self.history.records[self.history.current])
+            if self.rule_job.get('log_ref'):
+                try:self.rule_job['lines'] = OperationLogLines(self.history.log_path(self.history.current),create=False)
+                except OSError:self.log_error = '完整操作日志文件不可用'
+            if self.rule_job.get('state') == 'running':
+                self.rule_job.update(state='interrupted',rc=None,finished=time.time())
+                self.rule_job['lines'].append('规则管理进程重启，任务已中断')
+                self.save_log()
 
     def __getattr__(self, name):
         return getattr(self.local, name)
@@ -227,7 +385,21 @@ class Jobs:
             return self.local.engine.call(commands,timeout=timeout)
 
     def update_status(self):
-        return dict(self.rule_job, lines=list(self.rule_job['lines'])[-80:], pending=self.owner.drafts.dirty)
+        with self.history.lock:
+            result = dict(self.history.snapshot(self.rule_job),pending=self.owner.drafts.dirty)
+            for key,identity in (('recent_manual',self.history.manual),('recent_scheduled',self.history.scheduled)):
+                if identity:
+                    result[key] = (self.history.snapshot(self.rule_job) if identity==self.rule_job.get('id')
+                                   else dict(self.history.records[identity]))
+            if self.log_error:result['log_error'] = self.log_error
+            return result
+
+    def rule_log(self, identity, offset=0):
+        return self.history.read(identity,offset)
+
+    def save_log(self):
+        try:self.history.checkpoint(self.rule_job);self.log_error = ''
+        except OSError:self.log_error = '操作日志状态保存失败'
 
     def reload_rules(self):
         return self.start('reload')
@@ -248,10 +420,15 @@ class Jobs:
             self.rule_job = job
             self.reload_job = dict(state='running', since=time.strftime('%Y-%m-%d %H:%M:%S'))
             try:
+                job['log_ref'] = job['id']
+                job['lines'] = OperationLogLines(self.history.log_path(job['id']))
+                self.history.checkpoint(job)
                 self.owner.runtime.publish_current()
                 threading.Thread(target=self.worker, args=(job, backup, on_complete), daemon=True).start()
             except BaseException:
                 self.owner.busy = False
+                job.update(state='interrupted',rc=None,finished=time.time())
+                self.save_log()
                 backup.restore()
                 backup.close()
                 raise
@@ -259,25 +436,29 @@ class Jobs:
 
     def run(self, arguments, job, timeout=600):
         # Fixed argv only; bounded captured output, deadline covers downloads and validation.
-        with tempfile.TemporaryFile() as output:
+        durable = isinstance(job['lines'],OperationLogLines)
+        with (job['lines'].path.open('ab') if durable else tempfile.TemporaryFile()) as output:
+            initial_size = os.fstat(output.fileno()).st_size
             process = subprocess.Popen(arguments, stdout=output, stderr=subprocess.STDOUT,
                                        start_new_session=True)
             position = 0
             deadline = time.monotonic() + timeout
             try:
                 while True:
-                    with open('/proc/%d/fd/%d' % (os.getpid(), output.fileno()), 'rb') as reader:
-                        reader.seek(position)
-                        chunk = reader.read(65536)
-                    position += len(chunk)
-                    if chunk:
-                        job['lines'].extend(chunk.decode('utf-8', 'replace').splitlines())
-                    if process.poll() is not None and len(chunk) < 65536:
-                        break
+                    if durable:
+                        with job['lines'].lock:job['lines']._preview()
+                        drained = True
+                    else:
+                        with open('/proc/%d/fd/%d' % (os.getpid(), output.fileno()), 'rb') as reader:
+                            reader.seek(position);chunk = reader.read(65536)
+                        position += len(chunk)
+                        if chunk:job['lines'].extend(chunk.decode('utf-8','replace').splitlines())
+                        drained = len(chunk)<65536
+                    if os.fstat(output.fileno()).st_size-initial_size > RESPONSE_LIMIT:
+                        raise RuntimeError('规则任务输出超过上限，已保留捕获的完整日志')
+                    if process.poll() is not None and drained:break
                     if time.monotonic() >= deadline:
                         raise TimeoutError('规则任务超时')
-                    if os.fstat(output.fileno()).st_size > RESPONSE_LIMIT:
-                        raise RuntimeError('规则任务输出超过上限')
                     time.sleep(.1)
                 if process.returncode:
                     raise RuntimeError('规则命令失败，退出码 %d' % process.returncode)
@@ -286,6 +467,8 @@ class Jobs:
                     import signal
                     os.killpg(process.pid, signal.SIGKILL)
                     process.wait()
+                if durable:
+                    with job['lines'].lock:job['lines']._preview()
 
     def worker(self, job, backup, on_complete):
         m = self.owner.module
@@ -384,6 +567,7 @@ class Jobs:
         finally:
             guard.close()
             job.update(state='done', finished=time.time())
+            self.save_log()
             self.reload_job = dict(state='idle', last=time.strftime('%Y-%m-%d %H:%M:%S'),
                                    ok=job['rc'] == 0, error='' if job['rc'] == 0 else job['lines'][-1])
             try:
@@ -432,8 +616,9 @@ class Manager:
                 result = self.jobs.local.engine.call(['ruleset-reload-rules'], timeout=300)
                 if 'ruleset-reload-rules' not in result:
                     raise RuntimeError('Interrupted rule transaction recovery failed; backup retained')
-                self.jobs.rule_job.update(state='done', rc=1, finished=time.time(),
-                    lines=deque(['上次规则任务被中断，已恢复任务前规则；待应用更改仍保留'], maxlen=300))
+                self.jobs.rule_job.update(state='done', rc=1, finished=time.time())
+                self.jobs.rule_job['lines'].append('上次规则任务被中断，已恢复任务前规则；待应用更改仍保留')
+                if self.jobs.rule_job.get('id'):self.jobs.save_log()
             backup.close()
         from rule_drafts import RuleDrafts
         self.drafts = RuleDrafts(module, state)
@@ -453,6 +638,7 @@ class Manager:
         self.reads = {name: getattr(draft, name) for name in FUNCTIONS}
         self.reads.update({'app.' + name: getattr(self.app, name) for name in APP_READS})
         self.reads.update({'sys.' + name: getattr(self.jobs, name) for name in SYS_READS})
+        self.reads['sys.rule_log'] = self.jobs.rule_log
         self.runtime=RuntimeSnapshot(self)
 
     def run_schedule(self, stop):

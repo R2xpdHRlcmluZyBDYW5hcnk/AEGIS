@@ -19,7 +19,7 @@ import { completeHuntFields } from '../hunt-fields';
  <ndr-rule-editor *ngIf="editor" (closed)="editor=false"/>
 `})
 export class EventsComponent implements OnInit,OnDestroy {
- @Input() mode:'alerts'|'hunt'|'drops'='alerts';query='';sev='';proto='';caseSensitive=false;realtime=true;range:any={window:'1440'};initialChoice='1440';customFrom='';customTo='';rows:any[]=[];fields:any[]=[];total=0;offset=0;busy=false;error='';truncated=false;aggregate:any;editor=false;private live:LiveQuery;private initialized=false;private seenInvestigation=0;private aggregateRevision=0;
+ @Input() mode:'alerts'|'hunt'|'drops'='alerts';query='';sev='';proto='';caseSensitive=false;realtime=true;range:any={window:'60'};initialChoice='60';customFrom='';customTo='';rows:any[]=[];fields:any[]=[];total=0;offset=0;busy=false;error='';truncated=false;aggregate:any;editor=false;private live:LiveQuery;private initialized=false;private seenInvestigation=0;private aggregateRevision=0;
  private applied?:Record<string,any>;private requestedOffset=0;private pageRange?:[number,number];
  get refreshLabel():string{return !this.realtime?'手动查询':this.requestedOffset?'实时刷新已暂停':'实时订阅';}
  dropTops=[{key:'reasons',title:'阻断处置信息',columns:[{key:'reason',label:'处置动作或原因',kind:'engineAction',width:230},{key:'count',label:'次数',width:90}]},{key:'sources',title:'源地址',columns:[{key:'ip',label:'地址',width:200},{key:'count',label:'次数',width:90}]},{key:'destinations',title:'目的地址',columns:[{key:'ip',label:'地址',width:200},{key:'count',label:'次数',width:90}]}];
@@ -46,7 +46,7 @@ export class EventsComponent implements OnInit,OnDestroy {
  applyInvestigation():void{
   const revision=++this.rangeRevision;this.resolvingRange=false;this.seenInvestigation=this.state.investigation();this.query=this.state.huntQuery();this.sev='';this.proto='';
   this.pageRange=undefined;this.applied=undefined;this.offset=0;
-  const community=this.state.huntCommunity?.(),tuple=this.state.huntTuple?.();const flow=this.state.huntFlow(),time=this.state.huntTime(),selected=this.state.huntRange();this.initialChoice=selected?.choice||(flow||community||tuple||time?'custom':'1440');this.customFrom=selected?.from??time?.from??'';this.customTo=selected?.to??time?.to??'';this.range=selected?timeRange(selected.choice,selected.from,selected.to):time?timeRange('custom',time.from,time.to):{window:'1440'};
+  const community=this.state.huntCommunity?.(),tuple=this.state.huntTuple?.();const flow=this.state.huntFlow(),time=this.state.huntTime(),selected=this.state.huntRange();this.initialChoice=selected?.choice||(flow||community||tuple||time?'custom':'60');this.customFrom=selected?.from??time?.from??'';this.customTo=selected?.to??time?.to??'';this.range=selected?timeRange(selected.choice,selected.from,selected.to):time?timeRange('custom',time.from,time.to):{window:'60'};
   if(selected?.choice==='all'&&this.query.includes('session_id:'))this.realtime=true;
   if(!flow&&!community&&!tuple)return;
   this.live.stop();this.rows=[];this.total=0;this.asOf=0;this.resolvingRange=true;this.busy=true;this.error='';
@@ -107,7 +107,12 @@ export class EventsComponent implements OnInit,OnDestroy {
   if(this.exporting)return;this.exporting=true;const request=this.exportRequest=new AbortController();
   const p=new URLSearchParams({...this.params(),detection:'alerts',format:'csv',offset:'0',limit:'10000'});p.delete('type');
   try{
-   const response=await fetch('/api/events?'+p,{credentials:'same-origin',signal:request.signal,headers:{'X-Requested-With':'ips-web'}});
+   const load=()=>fetch('/api/events?'+p,{credentials:'same-origin',signal:request.signal,headers:{'X-Requested-With':'ips-web'}});
+   let response=await load();
+   while(response.status===202){
+    const pending=await response.json();if(pending?.query_state?.status!=='running')throw Error('导出响应格式无效');
+    await this.api.waitForQuery(request.signal);response=await load();
+   }
    if(response.status===401){location.assign('/login');return;}
    if(!response.ok){const error=await response.json();throw Error(error.error||'告警导出失败');}
    if(!response.headers.get('Content-Type')?.includes('text/csv'))throw Error('导出响应格式无效');

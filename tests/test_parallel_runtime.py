@@ -7,6 +7,7 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import threading
+import time
 import types
 import unittest
 from unittest import mock
@@ -163,6 +164,12 @@ class SQLCase(unittest.TestCase):
                 with self.assertRaisesRegex(sqlite3.OperationalError,'interrupted'):
                     group.fetch([('WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000000) SELECT SUM(x) FROM n',())])
             finally:timer.join()
+
+    def test_helper_read_has_no_elapsed_time_deadline(self):
+        with self.pool.snapshot(self.source,self.reader) as group:
+            clock = time.monotonic
+            with mock.patch.object(time,'monotonic',side_effect=lambda:clock()+86400):
+                self.assertEqual(group.fetch([('SELECT value FROM events',())]),[[(10,)]])
 
     def test_worker_start_failure_releases_all_reserved_slots(self):
         with mock.patch.object(self.pool.executor,'submit',side_effect=RuntimeError('start failed')):

@@ -8,7 +8,7 @@ const angular={Component:config=>{template=config.template;return value=>value;}
 const core={};vm.runInNewContext(compile('frontend/src/app/core.ts'),{exports:core,require:name=>name==='@angular/core'?angular:{}});
 const component={};vm.runInNewContext(compile('frontend/src/app/range.component.ts'),{exports:component,require:name=>name==='@angular/core'?angular:name==='./core'?core:{}});
 assert.ok(!template.includes('全部历史'));assert.ok(!template.includes('关联流范围'));assert.ok(template.includes('*ngIf="sessionScope" value="all"'));assert.equal(new component.RangeComponent().sessionScope,false);
-const range=new component.RangeComponent();range.choice='custom';range.reset();assert.equal(range.choice,'1440');assert.equal(range.changed.values.at(-1).window,'1440');
+const range=new component.RangeComponent();range.choice='custom';range.reset();assert.equal(range.choice,'60');assert.equal(range.changed.values.at(-1).window,'60');
 function fixture(bounds,selected=null){
  const requests=[];
  const api={zone:{run:fn=>fn()},get:(path,params)=>path==='/api/hunt/flow-range'?bounds:Promise.resolve({fields:[]})};
