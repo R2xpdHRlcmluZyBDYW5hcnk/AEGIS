@@ -7549,8 +7549,14 @@ class Handler(BaseHTTPRequestHandler):
     def _query_payload(self, name, params):
         service = getattr(self.app, 'data', None)
         if service is None:
-            return getattr(self.app, name)(params), 200
-        return service.request(name, params)
+            payload, status = getattr(self.app, name)(params), 200
+        else:
+            payload, status = service.request(name, params)
+        if status == 200 and name in ('hunt', 'incidents', 'events'):
+            # Transport-time progress stays current even when rows come from a cache.
+            # Copy the response so a live queue watermark never mutates shared pages.
+            payload = dict(payload, ingest_lag_bytes=self.app.ingest_lag())
+        return payload, status
 
     def _query_json(self, name, params):
         payload, status = self._query_payload(name, params)

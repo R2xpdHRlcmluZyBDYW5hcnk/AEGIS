@@ -64,7 +64,7 @@ class DataLayerCase(unittest.TestCase):
                 self.assertEqual(len(self.service.requests),1)
                 self.assertEqual(read(False)[0],401)
                 release.set()
-                self.assertEqual(read(True),(200,{'total':42}))
+                self.assertEqual(read(True),(200,{'total':42,'ingest_lag_bytes':None}))
             finally:
                 release.set();server.shutdown();thread.join(3)
 
@@ -1067,6 +1067,28 @@ class DataLayerCase(unittest.TestCase):
 
 
 class HTTPConcurrencyCase(unittest.TestCase):
+    def test_event_pages_expose_live_ingestion_progress_without_changing_cached_results(self):
+        cached={'events':[],'total':0}
+        progress=mock.Mock(side_effect=[12<<20,0,None])
+        handler=object.__new__(m.Handler)
+        handler.app=types.SimpleNamespace(data=types.SimpleNamespace(request=lambda *args:(cached,200)),
+                                         ingest_lag=progress)
+        for name,expected in (('hunt',12<<20),('incidents',0),('events',None)):
+            value,status=handler._query_payload(name,{})
+            self.assertEqual((status,value['ingest_lag_bytes']),(200,expected))
+            self.assertIsNot(value,cached)
+        self.assertNotIn('ingest_lag_bytes',cached)
+        handler._query_payload('overview',{})
+        self.assertEqual(progress.call_count,3)
+
+    def test_pending_queries_do_not_report_complete_ingestion_or_replace_rows(self):
+        pending={'query_state':{'status':'running'}}
+        handler=object.__new__(m.Handler)
+        handler.app=types.SimpleNamespace(data=types.SimpleNamespace(request=lambda *args:(pending,202)),
+                                         ingest_lag=mock.Mock())
+        self.assertEqual(handler._query_payload('hunt',{}),(pending,202))
+        handler.app.ingest_lag.assert_not_called()
+
     def test_closed_stream_releases_its_slot_before_the_next_refresh(self):
         ended=threading.Event()
         class Handler(m.Handler):
