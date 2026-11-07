@@ -254,7 +254,11 @@ class DataLayerCase(unittest.TestCase):
         self.add('drop', stamp+31)
         while recent.refresh(self.service.ingest_revision, self.service.stop):
             pass
-        self.assertEqual(recent.bounds, (stamp+31, stamp+31))
+        self.assertEqual(recent.bounds[1], stamp + 31)
+        resident_count, = recent.conn.execute('SELECT COUNT(*) FROM events').fetchone()
+        self.service.query(m.App.overview.__wrapped__, {'scope':'cache','view':'panel'}, background=True)
+        snapshot = self.app.overview({'scope':'cache','view':'panel'})
+        self.assertEqual(snapshot['network']['records'], resident_count)
         self.assertEqual(self.app.hunt({'from':str(stamp+30), 'to':str(stamp+31), 'view':'list'})['total'], 31)
         self.assertTrue(self.app.clear_history())
         self.assertEqual(self.service.overview_health()['state'], 'pending')
@@ -277,6 +281,114 @@ class DataLayerCase(unittest.TestCase):
         cache.clear()
         self.assertIsNone(cache.get('first'))
         self.assertEqual(cache.stats()['resident_entries'], 0)
+
+    def test_overview_starts_before_disk_log_prefetch(self):
+        self.service.close()
+        self.app.recent_events = m.RecentEvents(self.db, 1 << 20)
+        self.service = self.app.data = m.DataService(self.app, self.cache)
+        self.service.FIRST_REFRESH_SECONDS = .05
+        self.app.overview_runtime = lambda panel: {}
+        self.app.ingest_lag = lambda: 0
+        stamp = int(m.now()) - 60
+        self.db.conn.executemany("INSERT INTO events (ts,type) VALUES (?,'dns')",
+                                 ((stamp * 1000 - offset,) for offset in range(400)))
+        self.db.conn.commit()
+        queried = []
+        execute = self.service.execute
+
+        def observe(*args, **kwargs):
+            name = kwargs['event_query'][0]
+            queried.append((name, self.service.recent.warming))
+            return execute(*args, **kwargs)
+
+        self.service.execute = observe
+        self.service.start()
+        page = self.wait_for_first_page(lambda value: value['network']['records'] > 0)
+        self.assertEqual(page['source'], 'memory')
+        self.assertEqual(queried[0], ('overview', True))
+        self.wait_for_first_page(lambda value: value['network']['records'] == 400)
+        self.assertTrue(all(name == 'overview' or not warming for name, warming in queried))
+
+    def test_overview_preserves_snapshot_when_pruning_older_rows(self):
+        self.service.close()
+        recent = self.app.recent_events = m.RecentEvents(self.db, 96 << 10)
+        self.service = self.app.data = m.DataService(self.app, self.cache)
+        self.app.overview_runtime = lambda panel: {}
+        self.app.ingest_lag = lambda: 0
+        stamp = int(m.now()) - 60
+        raw = m.zlib.compress(random.Random(197).randbytes(7000))
+        self.db.conn.executemany("INSERT INTO events (ts,type,raw) VALUES (?,'dns',?)",
+                                 (((stamp - offset)*1000, raw) for offset in range(25)))
+        self.db.conn.commit()
+        while recent.refresh(self.service.ingest_revision, self.service.stop):
+            pass
+        scope = {'scope':'cache', 'view':'panel'}
+        page = self.app.overview(scope)
+        with self.db.lock:
+            self.assertEqual(self.db._prune("SELECT id FROM events WHERE ts<?",
+                                            ((stamp - 22)*1000,)), 2)
+        self.assertEqual(self.app.overview(scope)['as_of'], page['as_of'])
+        with mock.patch.object(recent, '_warm', side_effect=AssertionError('unexpected full warmup')):
+            self.assertFalse(recent.refresh(self.service.ingest_revision, self.service.stop))
+        self.assertEqual(recent.bounds, tuple(page['range']))
+        with self.db.lock:
+            self.assertEqual(self.db._prune("SELECT id FROM events WHERE ts=?", (stamp*1000,)), 1)
+        while recent.refresh(self.service.ingest_revision, self.service.stop):
+            pass
+        self.assertEqual(self.app.overview(scope)['range'][1], stamp)
+
+    def test_resident_events_survive_disk_retention_and_receive_commits_directly(self):
+        self.service.close()
+        recent = self.app.recent_events = m.RecentEvents(self.db, 256 << 10)
+        self.service = self.app.data = m.DataService(self.app, self.cache)
+        self.app.overview_runtime = lambda panel: {}
+        self.app.ingest_lag = lambda: 0
+        stamp = int(m.now()) - 60
+        for kind in ('flow', 'dns', 'tls'):
+            self.add(kind, stamp)
+        while recent.refresh(self.service.ingest_revision, self.service.stop):
+            pass
+        scope = {'scope':'cache', 'view':'panel'}
+        page = self.app.overview(scope)
+        self.assertEqual(page['network']['records'], 3)
+        token = page['recent'][0]['record_id']
+        retained = recent.conn.execute('SELECT id FROM events ORDER BY id').fetchall()
+        with self.db.lock:
+            self.assertEqual(self.db._prune('SELECT id FROM events'), 3)
+        with mock.patch.object(recent, '_warm', side_effect=AssertionError('unexpected warmup')):
+            self.assertFalse(recent.refresh(self.service.ingest_revision, self.service.stop))
+        self.assertEqual(self.app.overview(scope)['network']['records'], 3)
+        self.assertNotIn('error', self.app.record({'key':token}))
+        self.add('http', stamp + 1)
+        self.assertEqual(recent.conn.execute('SELECT COUNT(*) FROM events').fetchone()[0], 4)
+        self.assertGreater(self.db.last_id, max(row[0] for row in retained))
+        with mock.patch.object(m.sqlite3, 'connect', side_effect=AssertionError('unexpected disk read')):
+            self.assertEqual(self.app.overview(dict(scope, src='192.0.2.1'))['network']['records'], 4)
+
+    def test_resident_tied_timestamps_keep_newest_rows_and_overview_counts_every_row(self):
+        self.service.close()
+        recent = self.app.recent_events = m.RecentEvents(self.db, 96 << 10)
+        self.service = self.app.data = m.DataService(self.app, self.cache)
+        self.app.overview_runtime = lambda panel: {}
+        self.app.ingest_lag = lambda: 0
+        stamp = int(m.now()) - 60
+        raw = m.zlib.compress(random.Random(202).randbytes(7000))
+        self.db.conn.executemany("INSERT INTO events (ts,type,raw) VALUES (?,'dns',?)",
+                                 ((stamp * 1000, raw) for _ in range(40)))
+        self.db.conn.commit()
+        while recent.refresh(self.service.ingest_revision, self.service.stop):
+            pass
+        count, newest = recent.conn.execute('SELECT COUNT(*),MAX(id) FROM events').fetchone()
+        self.assertGreater(count, 0)
+        self.assertLess(count, 40)
+        self.assertEqual(newest, 40)
+        self.assertEqual(self.app.overview({'scope':'cache','view':'panel'})['network']['records'], count)
+        self.assertLessEqual(recent.bytes, 96 << 10)
+        self.add('tls', stamp + 1)
+        actual, = recent.conn.execute('SELECT COUNT(*) FROM events').fetchone()
+        page = self.app.overview({'scope':'cache','view':'panel','type':'tls'})
+        self.assertEqual(page['network']['tls'], 1)
+        self.assertGreater(actual, 0)
 
     def wait_for_first_page(self, predicate):
         deadline = time.monotonic() + 5

@@ -430,8 +430,12 @@ class DataService:
                 if value is not None and value != ''}
 
     def key(self, name, params):
-        return json.dumps(['page', self.generation, self.revision, name, self.normalized(params)],
+        return json.dumps(['page', self._query_generation(name, params)[0], self.revision, name, self.normalized(params)],
                           sort_keys=True, separators=(',', ':'))
+
+    def _query_generation(self, name, params):
+        resident = self.recent is not None and name == 'overview' and params.get('scope') == 'cache'
+        return (self.app.db.history_generation if resident else self.app.db.network_generation, self.revision)
 
     def first_page(self, name, params):
         expected = self.FIRST_PAGES.get(name)
@@ -444,9 +448,14 @@ class DataService:
             actual.setdefault('offset', '0')
         return expected if actual == expected else None
 
-    def ingested(self):
+    def ingested(self, rows=None, epoch=None):
+        if self.stop.is_set():
+            return
         with self.lock:
             self.ingest_revision += 1
+            revision = self.ingest_revision
+        if self.recent is not None and rows is not None:
+            self.recent.committed(rows, epoch, revision)
         self.wake.set()
 
     def _first_due(self, name):
@@ -485,7 +494,7 @@ class DataService:
         recent = self.recent
         if recent.error:
             return dict(state='error', message='最近事件缓存读取失败：' + recent.error)
-        if recent.bounds is None or recent.generation != self.app.db.network_generation:
+        if recent.bounds is None or recent.generation != self.app.db.history_generation:
             return dict(state='pending', message='正在预热最近事件缓存')
         key = self.key('overview', self.FIRST_PAGES['overview'])
         with self.lock:
@@ -495,14 +504,24 @@ class DataService:
             return dict(state='warning' if snapshot else 'error', message='概览统计更新失败：' + error)
         if snapshot is None:
             return dict(state='pending', message='正在生成概览统计')
+        if not snapshot['network']['records'] and (recent.has_events or self.app.db.last_id):
+            return dict(state='pending', message='正在生成常驻事件统计')
         return dict(state='ok', message='已生成内存概览统计', range=snapshot['range'], at=snapshot['as_of'])
 
     def _sync_generation(self):
         if self.generation != self.app.db.network_generation:
             with self.lock:
-                if self.generation != self.app.db.network_generation:
-                    self.generation = self.app.db.network_generation
+                db = self.app.db
+                generation = db.network_generation
+                if self.generation != generation:
+                    overview = self.FIRST_PAGES.get('overview') if self.recent is not None else None
+                    snapshot = self.cache.get(self.key('overview', overview)) if overview is not None else None
+                    update = self.first_updates.get('overview')
+                    preserve = snapshot and self.recent.generation == db.history_generation
+                    self.generation = generation
                     self._clear_cache()
+                    if preserve and self.cache.put(self.key('overview', overview), snapshot, resident=True) and update:
+                        self.first_updates['overview'] = update
 
     def _clear_cache(self):
         self.queue.clear()
@@ -516,11 +535,11 @@ class DataService:
             return False, None
         name, params = event_query
         defaults = {'overview':1440, 'incidents':1440, 'hunt':60, 'events':60, 'aggregate':60}
-        if name not in defaults or params.get('source') in ('file','memory','db'):
+        if name not in (*defaults, 'record') or params.get('source') in ('file','memory','db'):
             return False, None
         all_history = name == 'hunt' and params.get('all') == '1'
-        cache_scope = name == 'overview' and params.get('scope') == 'cache' and not (
-            params.get('from') or params.get('to'))
+        cache_scope = name == 'record' or (name == 'overview' and params.get('scope') == 'cache' and not (
+            params.get('from') or params.get('to')))
         stamp = now()
         if all_history:
             if recent.warming or recent.floor >= 0 or recent.revision != self.ingest_revision:
@@ -543,7 +562,7 @@ class DataService:
             raise RuntimeError('最近事件缓存查询繁忙，请稍后重试')
         try:
             source = self.app.db
-            if recent.bounds is None or recent.generation != source.network_generation:
+            if recent.bounds is None or recent.generation != source.history_generation:
                 if cache_scope:
                     raise RuntimeError('正在准备最近事件缓存，请稍后重试')
                 return False, None
@@ -556,7 +575,7 @@ class DataService:
                 return False, None
             deadline = time.monotonic() + min(20, max(.01, seconds))
             def interrupted():
-                return cancelled() or time.monotonic() > deadline or recent.generation != source.network_generation
+                return cancelled() or time.monotonic() > deadline or recent.generation != source.history_generation
             if interrupted():
                 raise RuntimeError('查询已取消或历史记录已变更')
             conn = recent.conn
@@ -576,6 +595,8 @@ class DataService:
                 value = producer(reader)
                 if interrupted():
                     raise RuntimeError('最近事件缓存查询中断或超时')
+                if name == 'record' and value.get('error'):
+                    return False, None
                 return True, value
             except sqlite3.OperationalError as exc:
                 if getattr(exc, 'sqlite_errorcode', None) == sqlite3.SQLITE_INTERRUPT:
@@ -606,11 +627,11 @@ class DataService:
                         acquired.append(slot);break
             if self.stop.is_set():raise RuntimeError('查询服务正在关闭')
             source = self.app.db
-            if source.conn is None:
-                raise RuntimeError(source.last_error or '事件库不可用')
             handled, result = self._read_recent(producer, event_query, is_cancelled, seconds)
             if handled:
                 return result
+            if source.conn is None:
+                raise RuntimeError(source.last_error or '事件库不可用')
             conn = sqlite3.connect(Path(source.path).resolve().as_uri()+'?mode=ro', uri=True, timeout=1)
             conn.execute('PRAGMA query_only=ON')
             conn.execute('PRAGMA cache_size=-2048')
@@ -678,11 +699,11 @@ class DataService:
     def query(self, function, params, ttl=2, pages=False, background=False):
         if self.stop.is_set():raise RuntimeError('查询服务正在关闭')
         self._sync_generation()
-        requested_generation = (self.generation,self.revision)
         name = function.__name__
         if name == 'overview' and self.recent is not None and not any(
                 params.get(key) for key in ('scope','window','from','to')):
             params = dict(params, scope='cache')
+        requested_generation = self._query_generation(name, params)
         first = self.first_page(name, params)
         if first is not None:
             params = first
@@ -691,6 +712,9 @@ class DataService:
         # Same query/range/page only. Keep a bounded last success while one
         # background refresh retries; never cache or substitute failed results.
         stale = fresh if fresh is not None or background else self.cache.get(key, 900)
+        if (name == 'overview' and first is not None and self.recent is not None
+                and self.recent.has_events and stale is not None and not stale['network']['records']):
+            fresh = stale = None
         if stale is not None:
             if fresh is None:
                 self.schedule(key, lambda: self.query(function, dict(params), ttl, False, True))
@@ -722,6 +746,9 @@ class DataService:
                     def produce(reader):
                         reader._building_first_page = first is not None
                         value = function(reader, params)
+                        if (first is not None and name == 'overview' and self.recent is not None
+                                and self.recent.has_events and not value['network']['records']):
+                            raise RuntimeError('常驻事件统计尚未完成')
                         if first is not None and reader.db.last_error and not value.get('error'):
                             value = dict(value, error=reader.db.last_error)
                         good = not value.get('error') and not (value.get('security') or {}).get('error')
@@ -735,7 +762,7 @@ class DataService:
                     result = dict(result, as_of=result.get('as_of') or now())
                     flight['result'] = result
                     with self.lock:
-                        if generation == (self.app.db.network_generation,self.revision):
+                        if generation == self._query_generation(name, params):
                             error = result.get('error') or (result.get('security') or {}).get('error')
                             if error:
                                 self._retry(key, error)
@@ -750,7 +777,7 @@ class DataService:
                 except Exception as exc:
                     flight['error'] = str(exc)
                     with self.lock:
-                        if generation == (self.app.db.network_generation,self.revision):
+                        if generation == self._query_generation(name, params):
                             self._retry(key, exc)
                     raise
                 finally:
@@ -782,7 +809,7 @@ class DataService:
         write_error = self.app.db.write_error
         if write_error:
             result = dict(result, error='事件入库失败，查询结果可能未更新：' + write_error)
-        if requested_generation != (self.app.db.network_generation,self.revision):
+        if requested_generation != self._query_generation(name, params):
             raise RuntimeError('历史记录已变更，请重新查询')
         return result
 
@@ -821,10 +848,18 @@ class DataService:
                 self.cache.pressure()
                 pressure_at = stamp + 30
             with self.lock:
-                due, name = min(((self._first_due(name), name) for name, params in self.FIRST_PAGES.items()
+                pages = self.FIRST_PAGES
+                warming = self.recent is not None and (self.recent.warming or
+                    self.recent.generation != self.app.db.history_generation)
+                if warming:
+                    # Let the overview publish the newest rows while warming.
+                    # Historical log prefetch can otherwise spend the whole
+                    # warmup budget on uncached disk ranges.
+                    pages = {'overview': pages['overview']}
+                due, name = min(((self._first_due(name), name) for name, params in pages.items()
                                  if self.key(name, params) not in self.inflight),
                                 key=lambda item:item[0], default=(float('inf'), ''))
-                task = self.queue.popitem(last=False)[1] if due > stamp and self.queue else None
+                task = self.queue.popitem(last=False)[1] if not warming and due > stamp and self.queue else None
             if due <= stamp or task:
                 try:
                     if due <= stamp:
@@ -1079,12 +1114,14 @@ class EventDB:
         self.summary_cache = {}
         self.visibility_cache = {}
         self.network_generation = 0
+        self.history_generation = 0
+        self.last_id = 0
         self.stream_cutoff = None
         self.names = [name for name, _ in self.COLUMNS]
         self.select_sql = ("SELECT " + ", ".join(self.names) + " FROM events"
                            " WHERE ts >= ? AND ts <= ?")
-        self.insert_sql = ("INSERT OR IGNORE INTO events (" + ", ".join(self.names) +
-                           ") VALUES (" + ",".join("?" * len(self.names)) + ")")
+        self.insert_sql = ("INSERT OR IGNORE INTO events (id, " + ", ".join(self.names) +
+                           ") VALUES (" + ",".join("?" * (len(self.names) + 1)) + ")")
         try:
             self.conn = sqlite3.connect(path, check_same_thread=False, timeout=10)
             self.conn.execute("PRAGMA journal_mode=WAL")
@@ -1117,6 +1154,7 @@ class EventDB:
             self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_events_key ON events(event_key)"
                               " WHERE event_key IS NOT NULL")
             self.conn.commit()
+            self.last_id, = self.conn.execute('SELECT COALESCE(MAX(id),0) FROM events').fetchone()
         except sqlite3.Error as exc:  # noqa: BLE001
             if self.conn is not None:
                 try:self.conn.close()
@@ -1206,23 +1244,33 @@ class EventDB:
         if self.conn is None or self.write_blocked or not self.buf:
             return
         inserted = 0
+        committed = None
         with self.lock:
             if self.write_blocked or not self.buf:
                 return
             rows, self.buf = self.buf, []
             try:
-                cursor = self.conn.executemany(self.insert_sql, rows)
-                self.conn.commit()
+                newest, = self.conn.execute('SELECT COALESCE(MAX(id),0) FROM events').fetchone()
+                first = max(self.last_id, newest)
+                numbered = [(first + index + 1, *row) for index, row in enumerate(rows)]
+                cursor = self.conn.executemany(self.insert_sql, numbered)
                 inserted = cursor.rowcount
+                if inserted and getattr(self, 'on_insert_commit', None) is not None:
+                    committed = self.conn.execute('SELECT id,' + ','.join(self.names) +
+                        ' FROM events WHERE id>? ORDER BY id', (first,)).fetchall()
+                epoch = self.history_generation
+                self.conn.commit()
+                self.last_id = first + len(rows)
                 self.last_error = ""
                 self.write_error = ""
             except sqlite3.Error as exc:  # noqa: BLE001
+                inserted = 0
                 self.buf = rows + self.buf
                 self._rollback_write(exc)
         self.last_flush = now()
         on_commit = getattr(self, 'on_insert_commit', None)
         if inserted > 0 and on_commit is not None:
-            on_commit()
+            on_commit(committed, epoch)
 
     # -- 回收 ---------------------------------------------------------
     def _size(self):
@@ -1239,6 +1287,13 @@ class EventDB:
         free = self.conn.execute('PRAGMA freelist_count').fetchone()[0]
         page_size = self.conn.execute('PRAGMA page_size').fetchone()[0]
         return (pages - free) * page_size
+
+    def _prune(self, selection, args=()):
+        cursor = self.conn.execute('DELETE FROM events WHERE id IN (' + selection + ')', args)
+        self.conn.commit()
+        if cursor.rowcount > 0:
+            self.network_generation += 1
+        return cursor.rowcount
 
     def maintain(self, force=False):
         """分层回收：小批量删除，避免长时间持锁把查询卡住"""
@@ -1257,45 +1312,23 @@ class EventDB:
         with self.lock:
             try:
                 for _ in range(40):
-                    cur = self.conn.execute(
-                        "DELETE FROM events WHERE id IN (SELECT id FROM events"
-                        " WHERE tier = 2 AND ts < ? LIMIT 5000)", (t2_cut,))
-                    self.conn.commit()
-                    if cur.rowcount > 0:
-                        self.network_generation += 1
-                    if cur.rowcount <= 0:
+                    count = self._prune("SELECT id FROM events WHERE tier = 2 AND ts < ? LIMIT 5000", (t2_cut,))
+                    if not count:
                         break
-                    deleted += cur.rowcount
+                    deleted += count
                 for _ in range(20):
-                    cur = self.conn.execute(
-                        "DELETE FROM events WHERE id IN (SELECT id FROM events"
-                        " WHERE tier = 1 AND ts < ? LIMIT 5000)", (t1_cut,))
-                    self.conn.commit()
-                    if cur.rowcount > 0:
-                        self.network_generation += 1
-                    if cur.rowcount <= 0:
+                    count = self._prune("SELECT id FROM events WHERE tier = 1 AND ts < ? LIMIT 5000", (t1_cut,))
+                    if not count:
                         break
-                    deleted += cur.rowcount
+                    deleted += count
                 # 容量到顶：优先删上下文层
                 size = self._used_pages_bytes()
                 guard = 0
                 while size > self.cap and guard < 20:
                     guard += 1
-                    cur = self.conn.execute(
-                        "DELETE FROM events WHERE id IN (SELECT id FROM events"
-                        " WHERE tier = 2 ORDER BY ts ASC LIMIT 5000)")
-                    self.conn.commit()
-                    if cur.rowcount > 0:
-                        self.network_generation += 1
-                    if cur.rowcount <= 0:
-                        cur = self.conn.execute(
-                            "DELETE FROM events WHERE id IN (SELECT id FROM events"
-                            " ORDER BY ts ASC LIMIT 5000)")
-                        self.conn.commit()
-                        if cur.rowcount > 0:
-                            self.network_generation += 1
-                        if cur.rowcount <= 0:
-                            break
+                    count = self._prune("SELECT id FROM events WHERE tier = 2 ORDER BY ts ASC LIMIT 5000")
+                    if not count and not self._prune("SELECT id FROM events ORDER BY ts ASC LIMIT 5000"):
+                        break
                     size = self._used_pages_bytes()
                 if deleted or self._size() > self.cap:
                     self.conn.execute("PRAGMA incremental_vacuum(2000)").fetchall()
@@ -2096,8 +2129,10 @@ class EventDB:
                 self.conn.execute('INSERT INTO event_state VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',('stream_cutoff',json.dumps(stream_cutoff)))
                 self.conn.commit()
                 self.buf=[]
+                self.last_id = 0
                 self.stream_cutoff=stream_cutoff
                 self.network_generation += 1
+                self.history_generation += 1
                 self.read_health.clear()
                 # Keep the request bounded; normal maintenance reclaims free pages.
                 self.last_error = ''
@@ -2108,7 +2143,7 @@ class EventDB:
 
 
 class RecentEvents:
-    """A byte-bounded, timestamp-ordered suffix of the committed event database."""
+    """Resident newest events, independent of automatic disk retention."""
 
     BATCH = 128
 
@@ -2127,19 +2162,32 @@ class RecentEvents:
         self.columns = ['id', *source.names]
         self.ts_index = self.columns.index('ts')
         self.select = 'SELECT ' + ','.join(self.columns) + ' FROM events'
-        self.insert = 'INSERT INTO events VALUES (' + ','.join('?' for _ in self.columns) + ')'
+        self.insert = 'INSERT OR IGNORE INTO events VALUES (' + ','.join('?' for _ in self.columns) + ')'
+        self.budget = budget
         self.generation = None
         self.version = 0
         self.as_of = None
         self.revision = None
         self.floor = -1
+        self.edge = None
         self.before = None
         self.cursor = 0
         self.warming = True
         self.bounds = None
-        self.future = None
+        self.has_events = False
         self.bytes = 0
         self.error = ''
+
+    def _reset(self, epoch):
+        with self.conn:
+            self.conn.execute('DELETE FROM events')
+        self.generation = epoch
+        self.cursor = 0
+        self.floor, self.edge, self.before = -1, None, None
+        self.warming = True
+        self.bounds = None
+        self.has_events = False
+        self.version += 1
 
     def _insert(self, rows):
         try:
@@ -2166,30 +2214,56 @@ class RecentEvents:
                     break
                 count += 1
         if count < len(rows):
-            self.floor, self.warming = rows[count][self.ts_index], False
-            with self.conn:
-                self.conn.execute('DELETE FROM events WHERE ts<=?', (self.floor,))
+            row = rows[count]
+            self.edge = max(self.edge or (-1, -1), (row[self.ts_index], row[0]))
+            self.floor, self.warming = self.edge[0], False
         elif len(rows) < self.BATCH:
-            self.floor, self.warming = -1, False
+            self.warming = False
+            self.floor = self.edge[0] if self.edge is not None else -1
         else:
-            self.floor = rows[-1][self.ts_index]
-            self.before = (self.floor, rows[-1][0])
+            self.before = (rows[-1][self.ts_index], rows[-1][0])
+            self.floor = max(self.floor, self.before[0])
         return bool(rows)
+
+    def _merge(self, rows):
+        incoming = [row for row in rows if row[self.ts_index] is not None and row[self.ts_index] >= 0
+                    and (self.edge is None or (row[self.ts_index], row[0]) > self.edge)]
+        if incoming and not self._insert(incoming):
+            for row in sorted(incoming, key=lambda item: (item[self.ts_index], item[0])):
+                position = (row[self.ts_index], row[0])
+                while (self.edge is None or position > self.edge) and not self._insert((row,)):
+                    removed = self.conn.execute('SELECT ts,id FROM events WHERE (ts,id)<(?,?) '
+                                                'ORDER BY ts,id LIMIT 128', position).fetchall()
+                    if not removed:
+                        break
+                    self.edge = removed[-1]
+                    self.floor = max(self.floor, self.edge[0])
+                    with self.conn:
+                        self.conn.execute('DELETE FROM events WHERE (ts,id)<=(?,?)', self.edge)
+
+    def committed(self, rows, epoch, revision):
+        with self.lock:
+            if epoch != self.source.history_generation:
+                return
+            if self.generation != epoch:
+                self._reset(epoch)
+            try:
+                self._merge(rows)
+                caught_up = self.revision is None or self.revision >= revision - 1
+                if caught_up:
+                    self.cursor = max(self.cursor, max((row[0] for row in rows), default=0))
+                    self.revision = max(self.revision or 0, revision)
+                self.as_of = now()
+                self._update_bounds()
+                self.version += 1
+                self.error = ''
+            except sqlite3.Error as exc:
+                self.error = str(exc)
 
     def _advance(self, disk, stamp, revision):
         rows = disk.execute(self.select + ' WHERE id>? ORDER BY id LIMIT ?',
                             (self.cursor, self.BATCH)).fetchall()
-        incoming = [row for row in rows if row[self.ts_index] is not None and row[self.ts_index] > self.floor]
-        if incoming and not self._insert(incoming):
-            # Keep the newest suffix even when a whole ingestion batch cannot fit.
-            for row in sorted(incoming, key=lambda item: item[self.ts_index]):
-                timestamp = row[self.ts_index]
-                while timestamp > self.floor and not self._insert((row,)):
-                    removed = self.conn.execute('SELECT ts FROM events WHERE ts<? ORDER BY ts LIMIT 8',
-                                                (timestamp,)).fetchall()
-                    self.floor = removed[-1][0] if removed else timestamp
-                    with self.conn:
-                        self.conn.execute('DELETE FROM events WHERE ts<=?', (self.floor,))
+        self._merge(rows)
         if rows:
             self.cursor = rows[-1][0]
         if len(rows) < self.BATCH:
@@ -2200,28 +2274,19 @@ class RecentEvents:
         if self.source.conn is None or not self.lock.acquire(blocking=False):
             return False
         try:
-            generation = self.source.network_generation
+            generation = self.source.history_generation
             if generation == self.generation and not self.warming and self.revision == revision:
-                stamp = now()
-                if self.future is not None and stamp >= self.future:
-                    self.as_of = stamp
-                    self._update_bounds()
-                    self.version += 1
                 return False
             uri = Path(self.source.path).resolve().as_uri() + '?mode=ro'
             with closing(sqlite3.connect(uri, uri=True, timeout=1)) as disk:
-                disk.set_progress_handler(lambda: stopped.is_set() or generation != self.source.network_generation, 10000)
+                disk.set_progress_handler(lambda: stopped.is_set() or generation != self.source.history_generation, 10000)
                 stamp = now()
                 disk.execute('BEGIN')
                 if generation != self.generation:
-                    with self.conn:
-                        self.conn.execute('DELETE FROM events')
-                    self.cursor, = disk.execute('SELECT COALESCE(MAX(id),0) FROM events').fetchone()
-                    self.generation = generation
-                    self.as_of, self.revision = stamp, revision
-                    self.floor, self.before, self.warming = -1, None, True
-                    self.bounds = None
-                    self.version += 1
+                    self._reset(generation)
+                if self.warming and self.before is None:
+                    self.cursor = max(self.cursor, disk.execute('SELECT COALESCE(MAX(id),0) FROM events').fetchone()[0])
+                self.as_of = stamp
                 was_warming = self.warming
                 changed = self._warm(disk) if was_warming else self._advance(disk, stamp, revision)
             if changed or was_warming:
@@ -2230,22 +2295,17 @@ class RecentEvents:
             self.error = ''
             return self.warming or self.revision != revision
         except sqlite3.Error as exc:
-            # A failed refresh must not advertise a partially updated range.
-            self.generation, self.bounds = None, None
-            self.version += 1
-            if not stopped.is_set() and generation == self.source.network_generation:
+            if not stopped.is_set() and generation == self.source.history_generation:
                 self.error = str(exc)
             raise
         finally:
             self.lock.release()
 
     def _update_bounds(self):
-        args = (self.floor, self.as_of * 1000)
-        low, = self.conn.execute('SELECT MIN(ts) FROM events WHERE ts>? AND ts<=?', args).fetchone()
-        high, = self.conn.execute('SELECT MAX(ts) FROM events WHERE ts>? AND ts<=?', args).fetchone()
-        future, = self.conn.execute('SELECT MIN(ts) FROM events WHERE ts>?', (max(args),)).fetchone()
+        low, = self.conn.execute('SELECT MIN(ts) FROM events').fetchone()
+        high, = self.conn.execute('SELECT MAX(ts) FROM events').fetchone()
         self.bounds = (low / 1000, high / 1000) if low is not None else (self.as_of, self.as_of)
-        self.future = future / 1000 if future is not None else None
+        self.has_events = low is not None
         self.bytes = self.conn.execute('PRAGMA page_count').fetchone()[0] * self.page_size
 
     def covers(self, low, high, stamp, revision):
@@ -5911,7 +5971,7 @@ class App:
         self.db.cpu = shared_cpu()
         self.cache_budget = SharedCache.budget(config)
         self.cache = SharedCache(self.cache_budget//8)
-        self.recent_events = RecentEvents(self.db, self.cache_budget*5//8)
+        self.recent_events = RecentEvents(self.db, self.cache_budget)
         self.network = NetworkSnapshots(self.db,cache=self.cache)
         self.network.entries[self.network.DEFAULT_KEY]['prewarm'] = False
         self.analytics = StoredNetworkStats(self.db,config.get('stats_batch_size',1024),
@@ -6479,7 +6539,7 @@ class App:
         recent = getattr(self, 'recent_events', None)
         return dict(responses=self.cache.stats(),budget_bytes=self.cache_budget,
                     recent_events_bytes=recent.bytes if recent is not None else 0,
-                    recent_events_range=recent.bounds if recent is not None and recent.generation == self.db.network_generation else None,
+                    recent_events_range=recent.bounds if recent is not None and recent.generation == self.db.history_generation else None,
                     read_workers=self.data.read_workers,statistics_batch_size=self.analytics.batch_size,
                     statistics_duty_percent=self.analytics.duty_percent,
                     record_buffer_bytes=sum(getattr(pool,'bytes',0) for pool in (self.store.events,self.store.strong)),
@@ -7460,8 +7520,12 @@ button:disabled{opacity:.4;cursor:not-allowed}
         try:
             if path == "/healthz":
                 db = self.app.db
+                data = getattr(self.app, 'data', None)
+                overview_ready = bool(getattr(data, 'recent', None)
+                                      and data.overview_health()['state'] in ('ok', 'warning'))
                 return self._json({"ok": True, "uptime": int(now() - self.app.started),"ingest_lag_bytes":self.app.ingest_lag(),
                                    "event_db_ready": db.conn is not None and not db.write_error,
+                                   "overview_ready": overview_ready,
                                    "sqlite_version": sqlite3.sqlite_version})
             if path == "/login" and self.command == "GET":
                 return self._login_page(params)
