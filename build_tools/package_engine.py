@@ -6,12 +6,14 @@ import io
 import json
 from pathlib import Path
 import tarfile
+# Stable deployed location shared by existing units, wrappers and rollback tools.
 PREFIX=Path('/opt/ips-snort3/3.12.4.0')
 ROOT=Path(__file__).resolve().parents[1]
+SOURCE_PREFIX=Path('/opt/ips-snort3')/json.loads((ROOT/'build_tools/snort-sources.json').read_text())['snort']['version']
 
 
-def build(output,prefix=PREFIX):
-    prefix=Path(prefix).resolve()
+def build(output,prefix=None):
+    prefix=Path(prefix or SOURCE_PREFIX).resolve()
     if prefix.parent!=Path('/opt/ips-snort3'):
         raise ValueError('Unexpected engine prefix')
     output=Path(output).resolve()
@@ -72,6 +74,6 @@ def build(output,prefix=PREFIX):
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output',required=True)
-    parser.add_argument('--prefix',default=str(PREFIX))
+    parser.add_argument('--prefix',default=str(SOURCE_PREFIX))
     args=parser.parse_args()
     build(args.output,args.prefix)

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-only
-# Snort 3.12.4.0 matching fragments: https://github.com/snort3/snort3/tree/3.12.4.0
+# Snort 3.13.2.0 matching fragments: https://github.com/snort3/snort3/tree/3.13.2.0
 # NDR session changes maintained by this project, 2026-11-04.
 # Upstream terms and notices: ../LICENSES/Snort-COPYING.txt.
 """Add connection identities and suppressed block records to the pinned Snort."""
@@ -87,10 +87,11 @@ void Flow::end_ndr_session()
     edit('flow/flow.cc','void Flow::restart(bool dump_flow_data)\n{\n    DetectionEngine::onload(this);','void Flow::restart(bool dump_flow_data)\n{\n    DetectionEngine::onload(this);\n    end_ndr_session();')
     edit('flow/flow_control.cc','    p->flow = flow;\n    p->disable_inspect = flow->is_inspection_disabled();','    p->flow = flow;\n    flow->begin_ndr_session();\n    p->disable_inspect = flow->is_inspection_disabled();')
     edit('stream/tcp/tcp_session.cc','void TcpSession::init_new_tcp_session(const TcpSegmentDescriptor& tsd)\n{','void TcpSession::init_new_tcp_session(const TcpSegmentDescriptor& tsd)\n{\n    flow->begin_ndr_session();')
-    edit('stream/udp/udp_session.cc','        flow->restart();','        flow->restart();\n        flow->begin_ndr_session();')
+    edit('flow/flow.cc','    // A packet-triggered restart begins a new logical session',
+         '    begin_ndr_session();\n\n    // A packet-triggered restart begins a new logical session')
     edit('network_inspectors/extractor/extractors.cc','    {"uid", ExtractorEvent::get_uid},','    {"uid", ExtractorEvent::get_uid},\n    {"session_id", [](const DataEvent*, const Flow* flow) -> uint64_t { return flow->ndr_session_id; }},')
     edit('network_inspectors/extractor/extractor_service.cc','    "uid",','    "uid",\n    "session_id",')
-    edit('network_inspectors/extractor/extractors.h','    template<typename T, class... Context>\n    void log(', '''    void log(const std::vector<NumField>& fields, DataEvent* event, Flow* flow)
+    edit('network_inspectors/extractor/extractors.h','    template<typename T, class... Context>\n    static void log(', '''    static void log(const std::vector<NumField>& fields, DataEvent* event, Flow* flow)
     {
         for (const auto& field : fields)
             if (std::string(field.name) == "session_id")
@@ -100,7 +101,7 @@ void Flow::end_ndr_session()
     }
 
     template<typename T, class... Context>
-    void log(''')
+    static void log(''')
     patch_suppressed_blocks(edit)
     (root.parent/'ndr-session-patch.txt').write_text(REVISION+'\n')
 
@@ -119,7 +120,7 @@ def patch_suppressed_blocks(edit):
 
         // Reassembled packets share the wire packet's eventual DAQ verdict.
         auto* wire = p->context->wire_packet;
-        if (filterEvent < 0 && wire && p->flow && p->active && !already_dropping &&
+        if (event_filter < 0 && wire && p->flow && p->active && !already_dropping &&
             p->active->packet_was_dropped() && p->active->can_act() &&
             !wire->context->suppressed_block_rule)
         {

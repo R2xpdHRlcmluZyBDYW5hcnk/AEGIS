@@ -71,6 +71,76 @@ class ArchiveTests(unittest.TestCase):
 
 
 class ConsoleUpdateTests(unittest.TestCase):
+    def test_engine_version_upgrade_requires_release_pins_and_preserves_target_abi(self):
+        with mock.patch.dict(sys.modules,{'fcntl':types.SimpleNamespace()} if sys.platform=='win32' else {}):
+            module=load('deploy-session-engine')
+        expected=json.loads((ROOT/'build_tools/snort-sources.json').read_text())
+        previous={'sources':dict(expected,snort={'version':'previous'})}
+        manifest=dict(sources=expected,session_patch='ndr-session-2')
+        module.validate_upgrade_sources(manifest,previous,expected)
+        for key in ('snort','libdaq','target'):
+            with self.subTest(source=key):
+                altered=dict(expected);altered[key]={}
+                with self.assertRaisesRegex(ValueError,'pinned'):
+                    module.validate_upgrade_sources(dict(manifest,sources=altered),previous,expected)
+        with self.assertRaisesRegex(ValueError,'ABI'):
+            module.validate_upgrade_sources(manifest,{'sources':{'target':{}}},expected)
+
+    @unittest.skipIf(sys.platform=='win32','The engine deployment uses Linux absolute runtime paths')
+    def test_full_runtime_switch_and_failures_restore_libraries_lua_and_configuration(self):
+        import ips_control
+        for failure in ('none','startup','rename'):
+            with self.subTest(failure=failure),tempfile.TemporaryDirectory() as temporary:
+                module=load('deploy-session-engine');root=Path(temporary)
+                prefix=root/'runtime';release=root/'release';program=root/'program'
+                backups=root/'backups';stage=root/'staging';static=root/'static'
+                for path in (prefix/'bin',prefix/'lib',prefix/'etc/snort',release/'build_tools',program,stage,static):path.mkdir(parents=True)
+                expected=json.loads((ROOT/'build_tools/snort-sources.json').read_text())
+                (release/'build_tools/snort-sources.json').write_text(json.dumps(expected))
+                (release/'RELEASE').write_text('fixture')
+                for name in ('bin/snort','lib/libdaq.so.3','etc/snort/snort.lua'):(prefix/name).write_text('old '+name)
+                (prefix/'engine-manifest.json').write_text(json.dumps({'sources':dict(expected,snort={'version':'old'})}))
+                (program/'ips-web').write_text('old web');(static/'index.html').write_text('old ui')
+                config=root/'snort.lua';config.write_text("local common = 'ts uid session_id '\n-- alert_suppressed\n")
+                web=root/'web.json';web.write_text('{"authentication":"fixture"}')
+                layout=root/'layout.json';layout.write_text('{}')
+                database=root/'events.db';database.write_bytes(b'preserved data')
+                def unpack(_,destination):
+                    candidate=destination/str(prefix).lstrip('/')
+                    for name in ('bin/snort','lib/libdaq.so.3','etc/snort/snort.lua'):
+                        path=candidate/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_text('new '+name)
+                    manifest=dict(sources=expected,session_patch='ndr-session-2',sha256=hashlib.sha256(b'new bin/snort').hexdigest())
+                    (candidate/'engine-manifest.json').write_text(json.dumps(manifest));return {}
+                active=types.SimpleNamespace(unpack_engine=unpack,private_json=lambda p,v:p.write_text(json.dumps(v)))
+                def apply(*args):
+                    (program/'ips-web').write_text('new web')
+                    if failure=='startup':raise RuntimeError('candidate startup failed')
+                native=types.SimpleNamespace(PROGRAMS=('ips-web',),apply=apply)
+                modules={'deploy-snort3':active,'deploy-native-backend':native,
+                    'deploy-backend':types.SimpleNamespace(wait_ready=mock.Mock()),'deploy-angular':types.SimpleNamespace(snapshot=mock.Mock())}
+                client=mock.Mock();client.request.return_value={'ok':True}
+                rename=Path.rename
+                def move(path,target):
+                    if failure=='rename' and '.upgrade-session-' in path.name:raise OSError('candidate rename failed')
+                    return rename(path,target)
+                with mock.patch.multiple(module,PREFIX=prefix,PROGRAM=program,BACKUPS=backups,STATE=stage,CONFIG=config,
+                    WEB_CONFIG=web,STATIC=static,LAYOUT=layout,SESSION_RECEIPT=root/'receipt',ROTATION=root/'rotation'), \
+                    mock.patch.object(module,'load',side_effect=lambda _,name:modules[name]),mock.patch.object(module,'run'), \
+                    mock.patch.object(module.subprocess,'run',return_value=types.SimpleNamespace(returncode=0,stdout='',stderr='')), \
+                    mock.patch.object(module,'ready_engine'),mock.patch.object(module,'resume_manager'), \
+                    mock.patch.object(ips_control,'Client',return_value=client),mock.patch.object(Path,'rename',move):
+                    if failure=='none':
+                        module.upgrade(release,root/'engine.tar')
+                        self.assertEqual((prefix/'lib/libdaq.so.3').read_text(),'new lib/libdaq.so.3')
+                        module.rollback(next(backups.iterdir()))
+                    else:
+                        with self.assertRaisesRegex((RuntimeError,OSError),'failed'):module.upgrade(release,root/'engine.tar')
+                for name in ('bin/snort','lib/libdaq.so.3','etc/snort/snort.lua'):
+                    self.assertEqual((prefix/name).read_text(),'old '+name)
+                self.assertEqual((program/'ips-web').read_text(),'old web')
+                self.assertEqual(json.loads(web.read_text()),{'authentication':'fixture'})
+                self.assertEqual(database.read_bytes(),b'preserved data')
+
     def test_engine_upgrade_enables_suppressed_block_field_on_existing_notice(self):
         with mock.patch.dict(sys.modules,{'fcntl':types.SimpleNamespace()} if sys.platform=='win32' else {}):
             module=load('deploy-session-engine')

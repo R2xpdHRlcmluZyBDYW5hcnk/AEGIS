@@ -1,13 +1,13 @@
 {
   "snort": {
-    "version": "3.12.4.0",
-    "url": "https://codeload.github.com/snort3/snort3/tar.gz/refs/tags/3.12.4.0",
-    "sha256": "5bab33f703ca09b74bc2de72d16d8be59c67ebb98dbd45e50c30989b5cdd510f"
+    "version": "3.13.2.0",
+    "url": "https://codeload.github.com/snort3/snort3/tar.gz/refs/tags/3.13.2.0",
+    "sha256": "298367524a31f0d4725ef12b2b06265b4e76e6545f990ae3dc3b5e4c10f6e0ea"
   },
   "libdaq": {
-    "version": "3.0.28",
-    "url": "https://codeload.github.com/snort3/libdaq/tar.gz/refs/tags/v3.0.28",
-    "sha256": "a72bc8882abdcfaf475b18d547b5a08785d574005584ce258e533d247bc62771"
+    "version": "3.0.29",
+    "url": "https://codeload.github.com/snort3/libdaq/tar.gz/refs/tags/v3.0.29",
+    "sha256": "136deba78d195163687eb71a6dc81b725c27fde7765b7ef70eb741c371e887a8"
   },
   "openappid": {
     "url": "https://www.snort.org/downloads/openappid/33380",

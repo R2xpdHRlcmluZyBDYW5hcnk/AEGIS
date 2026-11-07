@@ -19,10 +19,11 @@ sys.path.insert(0, str(ROOT / 'build_tools'))
 from patch_snort import patch, REVISION
 
 
-def build(output, engine, prefix='/opt/ips-snort3/3.12.4.0', archive=None):
+def build(output, engine, prefix=None, archive=None):
     output = Path(output).resolve(); engine = Path(engine)
     if output.is_relative_to(ROOT): raise ValueError('Export outside the source directory')
     spec = json.loads((ROOT / 'build_tools/snort-sources.json').read_text())['snort']
+    prefix=prefix or str(Path('/opt/ips-snort3')/spec['version'])
     compiler = shutil.which('aarch64-linux-gnu-g++')
     if not compiler: raise RuntimeError('Prepare the pinned ARM64 engine build environment first')
     with tempfile.TemporaryDirectory(prefix='ndr-session-build-') as directory:
@@ -53,5 +54,5 @@ def build(output, engine, prefix='/opt/ips-snort3/3.12.4.0', archive=None):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', required=True); parser.add_argument('--engine', required=True)
-    parser.add_argument('--prefix', default='/opt/ips-snort3/3.12.4.0'); parser.add_argument('--archive')
+    parser.add_argument('--prefix',help='SDK prefix; defaults to the pinned engine version'); parser.add_argument('--archive')
     args = parser.parse_args(); build(args.output, args.engine, args.prefix, args.archive)

@@ -4,14 +4,24 @@ set -euo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PYTHONDONTWRITEBYTECODE=1
 project=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
-work=${SNORT_BUILD_WORK:-/var/tmp/ips-snort3-build}
-prefix=${SNORT_ENGINE_PREFIX:-/opt/ips-snort3/3.12.4.0}
+version=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["snort"]["version"])' "$project/build_tools/snort-sources.json")
+daq_version=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["libdaq"]["version"])' "$project/build_tools/snort-sources.json")
+work=${SNORT_BUILD_WORK:-$(mktemp -d /var/tmp/ips-snort3-build-XXXXXX)}
+prefix=${SNORT_ENGINE_PREFIX:-/opt/ips-snort3/$version}
 case "$work" in /var/tmp/ips-snort3-*) ;; *) echo 'Build workspace must be /var/tmp/ips-snort3-*' >&2; exit 1;; esac
 case "$prefix" in /opt/ips-snort3/*) ;; *) echo 'Engine prefix must be /opt/ips-snort3/<version>' >&2; exit 1;; esac
+if [ -z "${SNORT_BUILD_WORK:-}" ]; then
+    cleanup() {
+        resolved=$(realpath -- "$work")
+        case "$resolved" in /var/tmp/ips-snort3-build-*) rm -rf -- "$resolved" ;; *) echo 'Refusing unexpected build cleanup path' >&2;; esac
+    }
+    trap cleanup EXIT
+fi
 mkdir -p "$work/src" "$work/logs" "$prefix"
 python3 "$project/build_tools/prepare_engine_runtime.py" "$project/build_tools/snort-sources.json" "$work" "$prefix"
 if [ "${1:-}" = '--verify-existing' ]; then
-    exec python3 "$project/build_tools/verify_snort3.py" "$project/build_tools/snort-sources.json" "$prefix"
+    python3 "$project/build_tools/verify_snort3.py" "$project/build_tools/snort-sources.json" "$prefix"
+    exit 0
 fi
 if [ -x "$prefix/bin/snort" ] && [ -f "$prefix/engine-manifest.json" ]; then
     python3 - "$project/build_tools/snort-sources.json" "$prefix/engine-manifest.json" "$project/build_tools" <<'PY'
@@ -46,8 +56,8 @@ for key in ('libdaq', 'snort'):
 PY
 export PKG_CONFIG_LIBDIR="$prefix/lib/pkgconfig:/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig"
 export CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++
-daq="$work/src/libdaq-3.0.28"
-snort="$work/src/snort3-3.12.4.0"
+daq="$work/src/libdaq-$daq_version"
+snort="$work/src/snort3-$version"
 python3 "$project/build_tools/patch_snort.py" "$snort"
 (
     cd "$daq"

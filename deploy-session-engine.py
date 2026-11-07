@@ -15,6 +15,7 @@ import tempfile
 import time
 
 sys.dont_write_bytecode=True
+# Historical installation location; the manifest records the actual version.
 PREFIX=Path('/opt/ips-snort3/3.12.4.0')
 PROGRAM=Path('/opt/ips-console/bin')
 BACKUPS=Path('/var/backups/ips-snort3')
@@ -91,6 +92,25 @@ def extractor_config(current, revision):
     return current
 
 
+def validate_upgrade_sources(manifest, previous, expected):
+    if manifest.get('session_patch') not in ('ndr-session-1','ndr-session-2'):
+        raise ValueError('Engine session patch does not match')
+    for key in ('snort','libdaq','target'):
+        if manifest.get('sources',{}).get(key)!=expected.get(key):
+            raise ValueError('Engine sources differ from the pinned release: '+key)
+    if previous.get('sources',{}).get('target')!=expected.get('target'):
+        raise ValueError('Engine target ABI differs from the installed runtime')
+
+
+def restore_engine_tree(backup):
+    """Restore the complete runtime, including DAQ, default Lua and old extensions."""
+    previous=Path(backup)/'engine-before'
+    if not previous.exists():return
+    if previous.is_symlink() or PREFIX.is_symlink():raise ValueError('Unexpected engine tree link')
+    if PREFIX.exists():PREFIX.rename(Path(backup)/'engine-failed')
+    previous.rename(PREFIX)
+
+
 def rollback(backup):
     backup=Path(backup).resolve()
     if backup.parent!=BACKUPS or not backup.name.startswith('session-'):
@@ -102,6 +122,7 @@ def rollback(backup):
             raise ValueError('Unexpected rollback destination')
     for unit in ('ips-web','ips-event-bridge','ips','ips-rule-manager'):
         subprocess.run(['systemctl','stop',unit],check=False,capture_output=True)
+    if state.get('engine_tree'):restore_engine_tree(backup)
     for index,(name,saved) in enumerate(state['files'].items()):
         target=Path(name)
         if saved is None:
@@ -133,21 +154,26 @@ def upgrade(release,engine,plugin=None):
     backup=BACKUPS/('session-'+time.strftime('%Y%m%d-%H%M%S')+'-'+secrets.token_hex(3))
     backup.mkdir(mode=0o700)
     state=dict(files={},home_timer=subprocess.run(['systemctl','is-active','--quiet','snort-home-net.timer']).returncode==0)
-    paused=False;switched=False
+    paused=False;switched=False;prepared=None
     try:
         pause=Client().request('maintenance',enabled=True)
         if not pause.get('ok'): raise RuntimeError('A rule task is running; engine was left unchanged')
         paused=True
         run('systemctl','stop','snort-home-net.timer')
-        with configuration_lock(), tempfile.TemporaryDirectory(prefix='session-engine-',dir=STATE) as temporary:
+        with configuration_lock(CONFIG), tempfile.TemporaryDirectory(prefix='session-engine-',dir=STATE) as temporary:
             stage=Path(temporary)
             sums=active.unpack_engine(engine,stage)
             candidate=stage/str(PREFIX).lstrip('/')
             manifest=json.loads((candidate/'engine-manifest.json').read_text())
             previous=json.loads((PREFIX/'engine-manifest.json').read_text())
             revision=manifest.get('session_patch')
-            if revision not in ('ndr-session-1','ndr-session-2') or any(manifest['sources'][key]!=previous['sources'][key] for key in ('snort','libdaq','target')):
-                raise ValueError('Engine sources or session patch do not match')
+            expected=json.loads((release/'build_tools/snort-sources.json').read_text())
+            validate_upgrade_sources(manifest,previous,expected)
+            if PREFIX.is_symlink() or PREFIX.parent.stat().st_dev!=backup.stat().st_dev:
+                raise ValueError('Engine runtime and rollback directory must share a local filesystem')
+            prepared=PREFIX.with_name(PREFIX.name+'.upgrade-'+backup.name)
+            if prepared.exists():raise ValueError('Engine preparation directory already exists')
+            shutil.copytree(candidate,prepared,symlinks=True)
             updated=extractor_config(CONFIG.read_text(),revision)
             extension_changes={}
             plugin_path=None
@@ -173,24 +199,29 @@ def upgrade(release,engine,plugin=None):
                     raise ValueError('Supply the matching session extension to upgrade this engine')
                 validation_args=session_logger.plugin_arguments()
             conf=stage/'snort.lua';conf.write_text(updated);conf.chmod(0o600)
-            environment=dict(os.environ,LD_LIBRARY_PATH=str(PREFIX/'lib'))
-            result=subprocess.run([str(candidate/'bin/snort'),*validation_args,'-T','-c',str(conf)],env=environment,capture_output=True,text=True)
+            validation=stage/'validate.lua'
+            validation.write_text(updated.replace(str(PREFIX/'etc/snort'),str(prepared/'etc/snort'))
+                .replace(str(PREFIX/'lib/daq'),str(prepared/'lib/daq')))
+            validation.chmod(0o600)
+            environment=dict(os.environ,LD_LIBRARY_PATH=str(prepared/'lib'))
+            result=subprocess.run([str(prepared/'bin/snort'),*validation_args,'-T','-c',str(validation)],env=environment,capture_output=True,text=True)
             if result.returncode: raise RuntimeError('Session engine configuration failed validation\n'+result.stdout[-4000:]+result.stderr[-4000:])
-            for path in (CONFIG,WEB_CONFIG,LAYOUT,PREFIX/'bin/snort',PREFIX/'engine-manifest.json',*[PROGRAM/name for name in native.PROGRAMS],*extension_changes):
+            for path in (CONFIG,WEB_CONFIG,LAYOUT,*[PROGRAM/name for name in native.PROGRAMS],*extension_changes):
                 if path.exists():
                     name='saved-'+str(len(state['files']));shutil.copy2(path,backup/name)
                     state['files'][str(path)]=name
                 else: state['files'][str(path)]=None
             if STATIC.is_symlink(): raise ValueError('Unexpected static directory link')
             shutil.copytree(STATIC,backup/'static-before')
+            state['engine_tree']=True
             active.private_json(backup/'state.json',state)
             shutil.copy2(Path(__file__),backup/'deploy-session-engine.py')
             (backup/'rollback.sh').write_text('#!/bin/sh\nset -eu\nexec python3 -B '+str(backup/'deploy-session-engine.py')+' --rollback '+str(backup)+'\n')
             (backup/'rollback.sh').chmod(0o700)
             switched=True
             run('systemctl','stop','ips-web','ips-event-bridge','ips')
-            install(candidate/'bin/snort',PREFIX/'bin/snort',0o755)
-            install(candidate/'engine-manifest.json',PREFIX/'engine-manifest.json',0o644)
+            PREFIX.rename(backup/'engine-before')
+            prepared.rename(PREFIX)
             install(conf,CONFIG,0o600)
             if plugin_path:
                 extension.install(library,plugin_path,0o755)
@@ -209,18 +240,24 @@ def upgrade(release,engine,plugin=None):
             run(sys.executable,'-B',str(release/'deploy-angular.py'),'--release',str(release))
             if hashlib.sha256((PREFIX/'bin/snort').read_bytes()).hexdigest()!=manifest['sha256']:
                 raise RuntimeError('Installed engine digest changed')
-            layout=json.loads(LAYOUT.read_text());layout.update(session_backup=str(backup),engine_patch=revision,release=(release/'RELEASE').read_text().strip())
+            layout=json.loads(LAYOUT.read_text());layout.update(session_backup=str(backup),engine_patch=revision,
+                engine_version=manifest['sources']['snort']['version'],release=(release/'RELEASE').read_text().strip())
             active.private_json(LAYOUT,layout)
             (backup/'complete').write_text('Session engine and console healthy\n')
         resume_manager()
         if state['home_timer']: run('systemctl','start','snort-home-net.timer')
-        print(json.dumps(dict(ok=True,engine_patch=revision,backup=str(backup),port=9000)))
+        print(json.dumps(dict(ok=True,engine_patch=revision,engine_version=manifest['sources']['snort']['version'],backup=str(backup),port=9000)))
     except BaseException:
         if switched: rollback(backup)
         elif paused:
             resume_manager()
             if state['home_timer']: run('systemctl','start','snort-home-net.timer')
         raise
+    finally:
+        if prepared is not None and prepared.exists():
+            if prepared.parent!=PREFIX.parent or not prepared.name.startswith(PREFIX.name+'.upgrade-session-'):
+                raise ValueError('Unexpected engine preparation cleanup path')
+            shutil.rmtree(prepared)
 
 
 if __name__=='__main__':

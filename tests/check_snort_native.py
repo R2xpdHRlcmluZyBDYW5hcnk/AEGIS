@@ -48,7 +48,7 @@ def prepare(root):
     (root/'suppress.lua').write_text('suppress = {}\n')
     for name in ('snort.rules','local.rules','ips-web-hunting.rules','ips-web-bans.rules'):
         (rules/name).write_text('')
-    config=(ROOT/'snort.lua').read_text().replace("include '/etc/snort/","include '"+str(root)+'/').replace('/var/lib/snort/rules',str(rules)).replace('/var/lib/snort/appid',str(appid))
+    config=(ROOT/'snort.lua').read_text().replace('/opt/ips-snort3/3.12.4.0',PREFIX).replace("include '/etc/snort/","include '"+str(root)+'/').replace('/var/lib/snort/rules',str(rules)).replace('/var/lib/snort/appid',str(appid))
     (root/'snort.lua').write_text("io.stdout:setvbuf('no')\n"+config)
     return root/'snort.lua'
 
@@ -300,6 +300,55 @@ def check_suppressed_passive(root,config):
     print('Suppressed would-block in passive mode produces no block record')
 
 
+def check_suppressed_dump(root,config):
+    """Exercise real inline verdicts without requiring a host network queue."""
+    pcap=root/'suppressed-input.pcap';capture(pcap)
+    for index,action in enumerate(('block','reject','drop','alert')):
+        sid=9000030+index
+        (root/'rules/local.rules').write_text(action+' http any any -> any any '
+            '(msg:"suppressed inline replay"; http_uri; content:"/ndr-smoke"; sid:'+str(sid)+'; rev:1;)\n')
+        (root/'suppress.lua').write_text('suppress = {{gid=1,sid='+str(sid)+'}}\n')
+        logs=root/('suppressed-'+action);logs.mkdir()
+        execute(engine()+['-c',str(config),'-r',str(pcap),'-l',str(logs),
+            '--daq','pcap','--daq-mode','read-file','--daq','dump','--daq-mode','inline','-Q'],cwd=logs,timeout=90)
+        hits=[row for row in records(logs) if row.get('sid')==sid]
+        if action=='alert':assert not hits
+        else:
+            assert hits and all(row.get('alert_suppressed')==1 for row in hits),(action,hits)
+            assert len({row['pkt_num'] for row in hits})==len(hits)
+            assert all(native_event(dict(engine='snort3',data=row,rule_metadata={}))['event_type']=='drop' for row in hits)
+    print('Suppressed inline block/reject/drop preserve unique verdict records; suppressed alerts stay silent')
+
+
+def check_weird_sampling(root,config):
+    """Verify the default sampling window without reducing NOTICE coverage."""
+    import struct
+    from tests.check_native_rule_management import read_frames,write_frames
+    source=root/'weird-source.pcap';capture(source)
+    frames=read_frames(source)
+    query=frames[8][2];response=bytearray(frames[9][2])
+    # Obsolete MD resource records produce DNS builtin 131:1.
+    response[-14:-12]=struct.pack('!H',3)
+    anchor=bytearray(query);anchor[42:44]=struct.pack('!H',5678)
+    # An outstanding query keeps the DNS flow open across completed transactions.
+    repeated=[(1700000000,0,bytes(anchor))]
+    for index in range(2050):
+        repeated.extend(((1700000000,index*200+1,query),
+            (1700000000,index*200+101,bytes(response))))
+    repeated.extend((1700000000+second,0,bytes(anchor)) for second in range(20,600,20))
+    repeated.extend(((1700000600,0,query),(1700000600,100,bytes(response))))
+    pcap=root/'weird-sampling.pcap';write_frames(pcap,repeated)
+    logs=root/'weird-sampling';logs.mkdir()
+    execute(engine()+['-c',str(config),'-r',str(pcap),'-l',str(logs)],timeout=90)
+    hits=[row for row in records(logs) if row.get('gid')==131 and row.get('sid')==1]
+    weird=[row for row in hits if row.get('source')=='dns']
+    expected=[3+2*index for index in range(25)]+[2051,4051,len(repeated)]
+    assert [row['pkt_num'] for row in weird]==expected
+    assert len({row['session_id'] for row in hits})==1,'Fixture must retain one flow'
+    assert len([row for row in hits if 'ips_action' in row])==2051,'NOTICE was sampled'
+    print('WEIRD defaults verified: first 25, every 1000, reset at 600s; all 2051 NOTICE events retained')
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--inline',action='store_true')
@@ -311,9 +360,12 @@ def main():
     binary=Path(PREFIX)/'bin/snort';before=hashlib.sha256(binary.read_bytes()).hexdigest()
     with tempfile.TemporaryDirectory(prefix='ips-snort-native-') as temporary:
         root=Path(temporary);config=prepare(root)
-        if args.suppressed_blocks: check_suppressed_passive(root,config)
+        if args.suppressed_blocks:
+            check_suppressed_passive(root,config)
+            if not args.inline:check_suppressed_dump(root,config)
         if args.inline: check_inline(root,config,args.workers,args.ipv6,args.suppressed_blocks)
         else:
+            check_weird_sampling(root,config)
             check_offline(root,config)
             check_pulledpork(root,args.online_rules)
     assert hashlib.sha256(binary.read_bytes()).hexdigest()==before

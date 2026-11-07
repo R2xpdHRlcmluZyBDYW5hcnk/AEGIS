@@ -1,6 +1,6 @@
 # Snort 原生字段与查询语义
 
-字段依据为固定发布版 [extractor 定义](https://github.com/snort3/snort3/blob/3.12.4.0/doc/user/extractor.txt)、实现源码及合成流量的实际 JSON。实际输出优先于手册中不一致的字段名。
+字段依据为固定发布版 [extractor 定义](https://github.com/snort3/snort3/blob/3.13.2.0/doc/user/extractor.txt)、实现源码及合成流量的实际 JSON。实际输出优先于手册中不一致的字段名。
 
 | 原始字段 | 控制台查询 / 展示 |
 | --- | --- |

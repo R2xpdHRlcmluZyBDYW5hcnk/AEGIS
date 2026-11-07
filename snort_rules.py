@@ -193,7 +193,7 @@ def pulledpork_config(source, settings, output, work):
     values = dict(community_ruleset=source=='snort/community' or source.startswith('custom/'),
                   registered_ruleset=source=='snort/registered',
                   LightSPD_ruleset=source=='snort/lightspd',
-                  snort_version='3.12.4.0', rule_mode='simple',
+                  snort_version='3.13.2.0', rule_mode='simple',
                   ips_policy=settings.get('ips_policy','balanced'),
                   include_disabled_rules=True,
                   ignored_files='includes.rules,snort3-deleted.rules',

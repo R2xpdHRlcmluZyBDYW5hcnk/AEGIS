@@ -4,9 +4,11 @@
 
 ## 来源和构建边界
 
-可选引擎工具固定 Snort 3.12.4.0、LibDAQ 3.0.28 与 OpenAppID 来源，版本、URL 和 SHA-256 见 `build_tools/snort-sources.json`。归档哈希由项目固定，不等同于上游签名。第三方源码、下载物和二进制在源码树外处理，不提交到面板仓库。
+可选引擎工具固定 Snort 3.13.2.0、LibDAQ 3.0.29 与 OpenAppID 来源，版本、URL 和 SHA-256 见 `build_tools/snort-sources.json`。归档哈希由项目固定，不等同于上游签名。第三方源码、下载物和二进制在源码树外处理，不提交到面板仓库。
 
 `build_tools/build-snort3-arm64.sh` 在 Linux 交叉构建 Debian 13 ARM64、glibc 2.41 目标；`setup_wsl.py` 为 WSL Debian 安装该工具所需软件包。该路径是可选集成工具，不是面板的通用运行要求。构建和安装会修改指定的工具目录，执行前审阅路径与依赖。
+
+构建目录默认按清单版本隔离，当前为 `/opt/ips-snort3/3.13.2.0`。默认临时源码与缓存退出即清理；显式指定 `SNORT_BUILD_WORK` 时由调用者清理。导出包映射至已有实例的固定安装位置 `/opt/ips-snort3/3.12.4.0`，目录名仅为历史路径；运行版本以 `snort -V` 和 `engine-manifest.json` 为准。二进制使用相对 RPATH 寻找随包 LibDAQ，不依赖构建目录。
 
 PulledPork3 独立安装。面板仅通过 `IPS_PULLEDPORK` 指定的入口传递配置并读取候选结果，不包含更新器修改，也不负责它的安装或升级。
 
@@ -20,17 +22,27 @@ PulledPork3 独立安装。面板仅通过 `IPS_PULLEDPORK` 指定的入口传�
 
 已有实例通过 `deploy.ps1 -UpdateBackend -UpdateEngine -EnginePackage <归档>` 同时更新引擎和控制台。已启用可选会话扩展时，使用与新引擎摘要匹配的扩展目录并传入 `-SessionLoggerDirectory`。`build_tools/check_arm64_inline.py --suppressed-blocks` 验证被抑制的 block、drop、reject，以及普通告警和检测模式下的模拟阻断。
 
+跨版本升级校验发布清单与已安装目标 ABI，先用候选 LibDAQ、默认 Lua 和匹配插件验证现有规则配置，再短暂停止检测进程，整体替换引擎运行目录。备份保留旧二进制、LibDAQ、Lua、数据文件和扩展；启动失败自动恢复整棵运行目录及控制台配置，成功后仍保留 `rollback.sh`。升级不清空数据库、认证、规则及设备设置。
+
+## 3.13.2.0 兼容性
+
+2026-11-07 15:53 UTC，复查已有维护记录后，通过 GitHub CLI 读取 [官方发行说明](https://github.com/snort3/snort3/releases/tag/3.13.2.0)，并核对清单归档的源码与构建结果。该稳定版发布于 2026-11-05，要求 LibDAQ 3.0.29。上游列出的 LibML 2.0.0 为可选 ML 功能依赖；本构建沿用关闭状态，依据为 [QUIET 查找](https://github.com/snort3/snort3/blob/3.13.2.0/cmake/include_libraries.cmake)和 [最低版本检查](https://github.com/snort3/snort3/blob/3.13.2.0/cmake/FindML.cmake)。
+
+3.13 的公开 C++ API 有变化，会话补丁按新 Flow restart 和 extractor 静态接口移植，会话扩展须针对新引擎重新编译。LightSPD 的 SO 规则要求 2026-09-14-001 或更新归档；面板当前只导入文本规则，不加载归档中的 SO 库。规则更新配置默认传入实际引擎版本 3.13.2.0；registered 自动快照使用官方下载目录存在的 3.13.0.0，显式旧快照配置仍保留。
+
+WEIRD extractor 新增按连接、绑定与 gid/sid 采样，沿用 [上游默认值](https://github.com/snort3/snort3/blob/3.13.2.0/src/network_inspectors/extractor/dev_notes.txt)：先记录 25 次，随后每 1000 次记录一次，600 秒固定窗口后重置。此采样仅影响异常元数据日志，不改变规则检测、NOTICE 告警或包处置。现有正文检测继续启用，payload、PCAP 与文件内容捕获保持关闭。
+
 ## 验证
 
 `tests/check_snort_native.py` 提供本地合成流量回放；`build_tools/check_arm64_inline.py` 提供完整 ARM64 内核下的 NFQUEUE 测试。用户态 QEMU 的结果不能替代内核内联测试。引擎、测试虚拟机和规则归档均单独准备，不随源码分发。
 
-官方接口来源：[extractor 字段](https://github.com/snort3/snort3/blob/3.12.4.0/doc/user/extractor.txt)、[LibDAQ NFQ 实现](https://github.com/snort3/libdaq/blob/v3.0.28/modules/nfq/daq_nfq.c)、[Snort 规则动作](https://docs.snort.org/rules/headers/actions)。日志字段以实际引擎输出为准，缺失内容不作推断。
+官方接口来源：[extractor 字段](https://github.com/snort3/snort3/blob/3.13.2.0/doc/user/extractor.txt)、[LibDAQ NFQ 实现](https://github.com/snort3/libdaq/blob/v3.0.29/modules/nfq/daq_nfq.c)、[Snort 规则动作](https://docs.snort.org/rules/headers/actions)。日志字段以实际引擎输出为准，缺失内容不作推断。
 
 ## QUIC 与 HTTP/3 能力边界
 
 核查时间：2026-11-04 12:31 UTC。查询前检查本文与已有规则来源记录，既有记录没有覆盖 QUIC 解析来源。MCP Search Service 查询条件为固定标签 `3.12.4.0` 的 QUIC extractor、QUIC 事件发布接口、AppID 实现及检查器目录；同时只读核对已部署二进制的版本、模块与插件列表、已加载协议库以及配置，不读取真实会话日志、不回放流量。
 
-核查结果：当前二进制为 3.12.4.0，包含 `stream_udp`、AppID、extractor、HTTP 和 HTTP/2 检查器，模块和插件清单未列出 QUIC 或 HTTP/3 检查器。核查时配置包含 QUIC handshake 日志绑定及版本、连接 ID、SNI、客户端应用协议字段，但配置接收日志事件不等价于具有生成事件的协议解析器。没有发现当前进程加载额外 QUIC / HTTP/3 协议解析库。
+核查结果：核查时二进制为 3.12.4.0，包含 `stream_udp`、AppID、extractor、HTTP 和 HTTP/2 检查器，模块和插件清单未列出 QUIC 或 HTTP/3 检查器。核查时配置包含 QUIC handshake 日志绑定及版本、连接 ID、SNI、客户端应用协议字段，但配置接收日志事件不等价于具有生成事件的协议解析器。没有发现当前进程加载额外 QUIC / HTTP/3 协议解析库。
 
 - [extractor 文档](https://github.com/snort3/snort3/blob/3.12.4.0/doc/user/extractor.txt)列出 QUIC handshake 及连接 ID、SNI、客户端协议字段，并定义 UDP 连接计数与状态。
 - [extractor_quic.cc](https://github.com/snort3/snort3/blob/3.12.4.0/src/network_inspectors/extractor/extractor_quic.cc)订阅 QUIC ClientHello 与握手完成事件后记录数据。

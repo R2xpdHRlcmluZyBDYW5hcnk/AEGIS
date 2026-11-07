@@ -13,8 +13,9 @@ OFFICIAL = {
 
 def registered_snapshot(version='auto'):
     # Rules snapshots are published per supported engine line, not every engine patch.
-    # The former 3.12.4.0 default requested the unavailable 31240 archive.
-    return '3.12.0.0' if version in ('auto','3.12.4.0','') else version
+    # The pinned 3.13 engine line uses the published 31300 snapshot, not 31320.
+    if version in ('auto','3.13.2.0',''):return '3.13.0.0'
+    return '3.12.0.0' if version=='3.12.4.0' else version
 
 
 def private_write(path, value):

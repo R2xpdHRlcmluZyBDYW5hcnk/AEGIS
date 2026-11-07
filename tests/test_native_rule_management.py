@@ -137,9 +137,11 @@ class NativeRuleManagementCase(unittest.TestCase):
             self.assertEqual(target.read_bytes(),before)
 
     def test_registered_default_uses_published_snapshot(self):
-        for version in ('auto','','3.12.4.0'):
+        for version in ('auto','','3.13.2.0'):
             result=snort_rules.pulledpork_config('snort/registered',dict(oinkcode='a'*40,registered_version=version),Path('output'),Path('work'))
-            self.assertIn('snort_version = 3.12.0.0',result)
+            self.assertIn('snort_version = 3.13.0.0',result)
+        legacy=snort_rules.pulledpork_config('snort/registered',dict(oinkcode='a'*40,registered_version='3.12.4.0'),Path('output'),Path('work'))
+        self.assertIn('snort_version = 3.12.0.0',legacy)
 
     def test_checksum_mismatch_retries_with_fresh_workspace_and_remains_bounded(self):
         import tempfile
