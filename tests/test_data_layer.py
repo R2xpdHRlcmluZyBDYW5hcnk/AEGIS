@@ -578,7 +578,7 @@ class DataLayerCase(unittest.TestCase):
         service = self.service
         service.FIRST_PAGES = {'hunt':service.FIRST_PAGES['hunt']}
         service.FIRST_REFRESH_SECONDS = .05
-        self.add('flow', m.now()-86400+.5)
+        self.add('flow', m.now()-3600+.5)
         service.start()
         self.wait_for_first_page(lambda page:page['total']==1)
         revision = service.ingest_revision

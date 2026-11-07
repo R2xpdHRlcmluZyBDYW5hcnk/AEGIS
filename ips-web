@@ -393,9 +393,9 @@ class DataService:
     """Shared response cache, bounded read concurrency and first-page prefetch."""
     FIRST_PAGES = {
         'overview': {'window': '1440', 'view': 'panel'},
-        'hunt': {'window': '1440', 'limit': '50', 'offset': '0', 'view': 'list', 'icase': '1'},
-        'incidents': {'window': '1440', 'limit': '50', 'offset': '0', 'view': 'list'},
-        'events': {'window': '1440', 'limit': '50', 'offset': '0', 'view': 'list', 'type': 'drop'},
+        'hunt': {'window': '60', 'limit': '50', 'offset': '0', 'view': 'list', 'icase': '1'},
+        'incidents': {'window': '60', 'limit': '50', 'offset': '0', 'view': 'list'},
+        'events': {'window': '60', 'limit': '50', 'offset': '0', 'view': 'list', 'type': 'drop'},
     }
     FIRST_REFRESH_SECONDS = 15
 
@@ -900,6 +900,9 @@ class DataService:
     def _run_recent(self):
         while not self.stop.is_set():
             try:
+                if self.recent.warming and getattr(self.app.db, 'background_busy', lambda: False)():
+                    self.stop.wait(1)
+                    continue
                 pending = self.recent.refresh(self.ingest_revision, self.stop)
                 self.stop.wait(.05 if pending else 1)
             except sqlite3.Error:
@@ -914,19 +917,20 @@ class DataService:
             if stamp >= pressure_at:
                 self.cache.pressure()
                 pressure_at = stamp + 30
+            busy = getattr(self.app.db, 'background_busy', lambda: False)()
             with self.lock:
                 pages = self.FIRST_PAGES
                 warming = self.recent is not None and (self.recent.warming or
                     self.recent.generation != self.app.db.history_generation)
-                if warming:
+                if warming or busy:
                     # Let the overview publish the newest rows while warming.
                     # Historical log prefetch can otherwise spend the whole
                     # warmup budget on uncached disk ranges.
-                    pages = {'overview': pages['overview']}
+                    pages = {name: params for name, params in pages.items() if name == 'overview'}
                 due, name = min(((self._first_due(name), name) for name, params in pages.items()
                                  if self.key(name, params) not in self.inflight),
                                 key=lambda item:item[0], default=(float('inf'), ''))
-                task = self.queue.popitem(last=False)[1] if not warming and due > stamp and self.queue else None
+                task = self.queue.popitem(last=False)[1] if not (warming or busy) and due > stamp and self.queue else None
             if due <= stamp or task:
                 try:
                     if due <= stamp:
@@ -1097,7 +1101,7 @@ class EventDB:
 
     CAP_BYTES = DB_CAP_BYTES
     RETENTION_DAYS = DB_RETENTION_DAYS
-    BATCH = 200
+    BATCH = 1000
     MIN_CAP_MIB = 64
     MAX_CAP_MIB = 1048576
 
@@ -1188,6 +1192,8 @@ class EventDB:
         self.history_generation = 0
         self.last_id = 0
         self.stream_cutoff = None
+        self.stream_cursor = None
+        self.pending_cursor = None
         self.names = [name for name, _ in self.COLUMNS]
         self.select_sql = ("SELECT " + ", ".join(self.names) + " FROM events"
                            " WHERE ts >= ? AND ts <= ?")
@@ -1199,6 +1205,8 @@ class EventDB:
             self.conn.execute("PRAGMA synchronous=FULL")
             self.conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
             self.conn.execute("PRAGMA journal_size_limit=67108864")
+            # Retain hot index pages across bounded commits on slower flash.
+            self.conn.execute('PRAGMA cache_size=-65536')
             # Only an identical source record is a duplicate. Timestamp, tuple
             # and SID can coincide across generators, packets and sessions.
             self.conn.execute(self.event_schema())
@@ -1206,6 +1214,8 @@ class EventDB:
             self.conn.execute('INSERT OR IGNORE INTO event_state VALUES(?,?)',('clear_epoch',secrets.token_hex(16)))
             floor=self.conn.execute("SELECT value FROM event_state WHERE key='stream_cutoff'").fetchone()
             if floor: self.stream_cutoff=json.loads(floor[0])
+            cursor=self.conn.execute("SELECT value FROM event_state WHERE key='stream_cursor'").fetchone()
+            if cursor: self.stream_cursor=json.loads(cursor[0])
             existing = {row[1] for row in self.conn.execute("PRAGMA table_info(events)")}
             for column, _ in self.COLUMNS:
                 if column not in existing:
@@ -1312,12 +1322,12 @@ class EventDB:
         return values[self.names.index('event_key')]
 
     def flush(self):
-        if self.conn is None or self.write_blocked or not self.buf:
+        if self.conn is None or self.write_blocked or (not self.buf and self.pending_cursor is None):
             return
         inserted = 0
         committed = None
         with self.lock:
-            if self.write_blocked or not self.buf:
+            if self.write_blocked or (not self.buf and self.pending_cursor is None):
                 return
             rows, self.buf = self.buf, []
             try:
@@ -1330,7 +1340,13 @@ class EventDB:
                     committed = self.conn.execute('SELECT id,' + ','.join(self.names) +
                         ' FROM events WHERE id>? ORDER BY id', (first,)).fetchall()
                 epoch = self.history_generation
+                checkpoint = self.pending_cursor
+                if checkpoint is not None:
+                    self.conn.execute('INSERT INTO event_state VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+                                      ('stream_cursor', json.dumps(checkpoint)))
                 self.conn.commit()
+                if checkpoint is not None:
+                    self.stream_cursor, self.pending_cursor = checkpoint, None
                 self.last_id = first + len(rows)
                 self.last_error = ""
                 self.write_error = ""
@@ -2198,10 +2214,12 @@ class EventDB:
                 self.conn.execute("DELETE FROM events")
                 self.conn.execute("UPDATE event_state SET value=? WHERE key='clear_epoch'",(secrets.token_hex(16),))
                 self.conn.execute('INSERT INTO event_state VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',('stream_cutoff',json.dumps(stream_cutoff)))
+                self.conn.execute("DELETE FROM event_state WHERE key='stream_cursor'")
                 self.conn.commit()
                 self.buf=[]
                 self.last_id = 0
                 self.stream_cutoff=stream_cutoff
+                self.stream_cursor = self.pending_cursor = None
                 self.network_generation += 1
                 self.history_generation += 1
                 self.read_health.clear()
@@ -2473,12 +2491,18 @@ class StoredNetworkStats:
                          [(key,str(value)) for key,value in values.items()])
 
     def _source_rows(self, conn, sql, args=(), one=False):
+        self._wait_for_ingest()
         try:
             cursor = conn.execute(sql, args)
             return cursor.fetchone() if one else cursor.fetchall()
         except sqlite3.Error as exc:
             self.db.note_read_failure(exc)
             raise RuntimeError('读取事件库失败：' + str(exc)) from exc
+
+    def _wait_for_ingest(self):
+        while getattr(self.db, 'background_busy', lambda: False)():
+            if self.stop.wait(.5):
+                raise InterruptedError('Statistics worker stopped')
 
     def _reconcile(self, source, conn):
         """Bounded identity checks remove deleted/replaced rows after retention or restart."""
@@ -2590,6 +2614,7 @@ class StoredNetworkStats:
             while not self.stop.is_set():
                 batch_started = time.monotonic()
                 try:
+                    self._wait_for_ingest()
                     with self.lock:
                         complete = self.sync(source,conn,initial,self.batch_size)
                     initial = False
@@ -3145,6 +3170,59 @@ class EventStore:
         return rec, line
 
     # -- 增量读取 -------------------------------------------------------
+    @staticmethod
+    def _cursor_at(handle, info, offset):
+        handle.seek(max(0, offset - 128))
+        tail = handle.read(min(128, offset))
+        return dict(device=info.st_dev, inode=info.st_ino, offset=offset,
+                    digest=hashlib.sha256(tail).hexdigest())
+
+    def _starting_offset(self, info):
+        """Resume only durable rows; bootstrap older databases from retained raw evidence."""
+        db = self.db
+        if db is None:
+            return max(0, info.st_size - self.initial_tail)
+        cutoff = getattr(db, 'stream_cutoff', None)
+        has_floor = bool(cutoff and (info.st_dev, info.st_ino) ==
+                         (cutoff['device'], cutoff['inode']) and info.st_size >= cutoff['offset'])
+        floor = cutoff['offset'] if has_floor else 0
+        cursor = getattr(db, 'stream_cursor', None)
+        with open(self.path, 'rb') as handle:
+            if (cursor and (info.st_dev, info.st_ino) == (cursor.get('device'), cursor.get('inode'))
+                    and floor <= cursor.get('offset', -1) <= info.st_size
+                    and self._cursor_at(handle, info, cursor['offset']) == cursor):
+                return cursor['offset']
+            if has_floor:
+                return floor
+            with db.lock:
+                rows = db.conn.execute('SELECT raw FROM events ORDER BY id DESC LIMIT 128').fetchall()
+            if not rows:
+                return max(0, info.st_size - self.initial_tail)
+            raw = next((row[0] for row in rows if row[0]), None)
+            if not raw:
+                return 0
+            try:
+                needle = b'\n' + zlib.decompress(raw) + b'\n'
+            except zlib.error:
+                return 0
+            # First occurrence is conservative if the bridge repeated an older
+            # record later. A reverse search could skip unseen intervening rows.
+            handle.seek(0)
+            carry, position = b'\n', -1
+            while True:
+                if getattr(self, 'stopped', None) is not None and self.stopped.is_set():
+                    raise InterruptedError('Event ingestion stopped')
+                chunk = handle.read(4 << 20)
+                if not chunk:
+                    return 0
+                data = carry + chunk
+                match = data.find(needle)
+                if match >= 0:
+                    return position + match + len(needle)
+                keep = min(len(data), len(needle) - 1)
+                position += len(data) - keep
+                carry = data[-keep:]
+
     def ingest(self, budget=3):
         for _ in range(budget):
             if not self._ingest_once():
@@ -3155,9 +3233,9 @@ class EventStore:
         with self.lock:
             if self.db is not None and (self.db.conn is None or self.db.write_blocked):
                 return False
-            if self.db is not None and len(self.db.buf) >= self.db.BATCH:
+            if self.db is not None and (len(self.db.buf) >= self.db.BATCH or self.db.pending_cursor is not None):
                 self.db.flush()
-                if len(self.db.buf) >= self.db.BATCH:
+                if len(self.db.buf) >= self.db.BATCH or self.db.pending_cursor is not None:
                     return False
             t = now()
             if t - self.last_ingest < (.05 if self.pending else .7):
@@ -3172,7 +3250,7 @@ class EventStore:
                 first_open = self.ino is None
                 self.ino = st.st_ino
                 self.buf = b""
-                self.offset = max(0, st.st_size - self.initial_tail) if first_open else 0
+                self.offset = self._starting_offset(st) if first_open else 0
                 floor=getattr(self.db,'stream_cutoff',None) if self.db is not None else None
                 if first_open and floor and (st.st_dev,st.st_ino)==(floor['device'],floor['inode']) and st.st_size>=floor['offset']:
                     self.offset=max(self.offset,floor['offset'])
@@ -3191,7 +3269,11 @@ class EventStore:
             start = self.offset
             try:
                 with open(self.path, "rb") as fh:
-                    fh.seek(start)
+                    info = os.fstat(fh.fileno())
+                    if (info.st_dev, info.st_ino) != (st.st_dev, st.st_ino):
+                        return True
+                    fh.seek(max(0, start - 128))
+                    prefix = fh.read(min(128, start))
                     chunk = fh.read(4 << 20)
                     self.offset = fh.tell()
                     self.pending = self.offset < st.st_size
@@ -3268,6 +3350,14 @@ class EventStore:
                     for mapping in (self.minute_index,self.buckets):
                         while len(mapping)>self.minute_cap:
                             mapping.pop(next(iter(mapping)))
+            if self.db is not None and parts:
+                # Hash the bytes actually consumed, not a second read that may
+                # observe a copytruncate while this batch is being committed.
+                end = len(prefix) + len(chunk) - len(self.buf)
+                digest = hashlib.sha256((prefix + chunk)[:end][-128:]).hexdigest()
+                self.db.pending_cursor = dict(device=st.st_dev, inode=st.st_ino,
+                    offset=self.offset - len(self.buf), digest=digest)
+                self.db.flush()
             return len(parts) >= 0 and (self.offset < st.st_size or bool(self.buf))
 
     def coverage(self):
@@ -6072,6 +6162,8 @@ class App:
                                 initial_tail=tail,memory_budget=self.cache_budget//4)
         self.store.db = self.db
         self.store.cpu = shared_cpu()
+        self.store.stopped = self.stop
+        self.db.background_busy = lambda: (self.ingest_lag() or 0) > (8 << 20)
         self.sys = SysInfo()
         self.rules = RuleBook()
         self.sessions = Sessions(int(config.get("session_ttl") or SESSION_TTL))
