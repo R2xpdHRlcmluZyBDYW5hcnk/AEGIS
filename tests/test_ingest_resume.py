@@ -2,6 +2,8 @@
 import json
 from pathlib import Path
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -41,6 +43,28 @@ class IngestResumeCase(unittest.TestCase):
 
     def count(self):
         return self.db.conn.execute('SELECT COUNT(*) FROM events').fetchone()[0]
+
+    def test_abrupt_writer_exit_keeps_committed_rows_and_stream_cursor_together(self):
+        path=self.root/'interrupted.db'
+        code='''import os
+from event_processing import backend
+m=backend();db=m.EventDB(PATH)
+db.add({'ts':1700000000,'type':'dns','dns':'fixture.example.test'},'{}')
+db.pending_cursor={'device':1,'inode':2,'offset':64,'digest':'fixture'}
+db.flush()
+assert not db.write_error
+assert db.conn.execute('PRAGMA synchronous').fetchone()[0]==2
+os._exit(0)
+'''.replace('PATH',repr(str(path)))
+        subprocess.run([sys.executable,'-B','-c',code],cwd=Path(__file__).resolve().parents[1],check=True,timeout=20)
+        self.assertTrue(Path(str(path)+'-wal').is_file(),'exit must leave committed WAL for recovery')
+        conn=sqlite3.connect(path)
+        try:
+            self.assertEqual(conn.execute('SELECT dnsname FROM events').fetchall(),[('fixture.example.test',)])
+            cursor=json.loads(conn.execute("SELECT value FROM event_state WHERE key='stream_cursor'").fetchone()[0])
+            self.assertEqual(cursor['offset'],64)
+            self.assertEqual(conn.execute('PRAGMA integrity_check').fetchone()[0],'ok')
+        finally:conn.close()
 
     def test_new_database_enables_incremental_vacuum_and_reclaims_pages(self):
         self.assertEqual(self.db.conn.execute('PRAGMA auto_vacuum').fetchone()[0], 2)

@@ -32,7 +32,7 @@ build_tools/build-snort3-arm64.sh tests/snort_pcap.py tests/test_snort_engine.py
 EXECUTABLE = {'ips-event-bridge','ips-snort-rules','snort-home-net','ips-web', 'ips-supervisor', 'ips-log-maintenance', 'ips-rule-manager','deploy.sh'}
 FILES.append('tests/test-rule-job-logs.cjs')
 FILES.append('tests/test_ingest_resume.py')
-FILES.extend(('tests/check_ndr_metadata.py','tests/benchmark_network_summary.py','docs/ndr-observability.md'))
+FILES.extend(('tests/check_ndr_metadata.py','tests/benchmark_network_summary.py','tests/benchmark_ingest_wal.py','docs/ndr-observability.md'))
 FILES.extend(('deploy-snort-config.py','tests/test_snort_config_deploy.py'))
 
 

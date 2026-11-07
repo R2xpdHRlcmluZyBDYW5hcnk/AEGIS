@@ -126,7 +126,9 @@ public:
     }
     void observe(Flow* flow,const Packet* packet,bool end)
     {
-        if (!supported(flow) || !flow->ndr_session_id) return;
+        // A blocked/restarted flow can receive FINALIZE_PACKET after FLOW_END
+        // freed its evidence. That callback must not reopen the closed identity.
+        if (!supported(flow) || !flow->ndr_session_id || !flow->ndr_session_open) return;
         auto* state=static_cast<Evidence*>(flow->get_flow_data(flow_slot));
         if (state && state->identity!=flow->ndr_session_id)
         {

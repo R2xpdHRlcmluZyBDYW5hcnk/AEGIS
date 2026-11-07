@@ -39,6 +39,7 @@ def verify(plugin,binary=None,previous=None):
     if binary:command[1 if command[0].endswith('qemu-aarch64') else 0]=str(binary)
     with tempfile.TemporaryDirectory(prefix='ndr-session-logger-') as directory:
         root=Path(directory);config=prepare(root);base=config.read_text()
+        (root/'rules/local.rules').write_text('reject icmp any any -> any any (msg:"blocked echo lifecycle"; itype:8; sid:9000092; rev:1;)\n')
         pcap=root/'fixture.pcap';fixture(pcap)
         replacement=root/'replacement.so';shutil.copy2(plugin,replacement)
         for mode in ('startup','enable','reconfigure','replace')+(('legacy',) if previous else ()):
@@ -79,6 +80,15 @@ def verify(plugin,binary=None,previous=None):
                         process.wait(timeout=90)
                     finally:stop(process)
             events=[json.loads(line)['data'] for path in logs.glob('*ndr_session.json') for line in path.read_text().splitlines()]
+            by_session={event['session_id'] for event in events}
+            for identity in by_session:
+                timeline=[event for event in events if event['session_id']==identity]
+                beginnings=[i for i,event in enumerate(timeline) if event['event'] in ('start','first_observed')]
+                endings=[i for i,event in enumerate(timeline) if event['event']=='end']
+                assert len(endings)<=1,(mode,'duplicate end',[event['event'] for event in timeline])
+                assert not endings or endings[-1]==len(timeline)-1,(mode,'event after session end',[event['event'] for event in timeline])
+                if mode not in ('replace','legacy'):
+                    assert len(beginnings)<=1,(mode,'duplicate start',[event['event'] for event in timeline])
             http=[event for event in events if event['dport']==80]
             assert http and {'start','state','update','end'}<={event['event'] for event in http},mode
             if mode in ('startup','enable'):
@@ -93,6 +103,18 @@ def verify(plugin,binary=None,previous=None):
             assert {event.get('icmp_type') for event in events if event['proto']=='ICMP'}>={0,8}
             assert all('NDR-test' not in json.dumps(event) for event in events)
             print('Native lifecycle, periodic snapshots, AppID and extractor identity verified:',mode)
+        # Dump wraps readback in inline mode, so the reject action really closes
+        # the ICMP flow before FINALIZE_PACKET. Passive replay misses this edge.
+        logs=root/'blocked-inline';logs.mkdir();config.write_text(enabled)
+        execute(command+['--plugin-path',str(plugin),'-c',str(config),'-r',str(pcap),'-l',str(logs),
+            '--daq','pcap','--daq-mode','read-file','--daq','dump','--daq-mode','inline','-Q'],cwd=logs,timeout=90)
+        events=[json.loads(line)['data'] for path in logs.glob('*ndr_session.json') for line in path.read_text().splitlines()]
+        echoes=[event for event in events if event['proto']=='ICMP' and event.get('icmp_type')==8]
+        assert echoes and any(event['event']=='end' for event in echoes),'Reject fixture did not end the ICMP flow'
+        for identity in {event['session_id'] for event in echoes}:
+            timeline=[event['event'] for event in events if event['session_id']==identity]
+            assert timeline==['first_observed','end'],('blocked ICMP reopened',timeline)
+        print('Blocked ICMP cannot reopen a closed observation after finalization')
 
 
 if __name__=='__main__':

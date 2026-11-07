@@ -132,6 +132,17 @@ class HuntQueryMatrix(unittest.TestCase):
         for query in ('level: *','level: unknown','level: 未评级','NOT level: *','level:high'):
             self.check(query)
 
+    def test_native_anomaly_identifiers_survive_storage_and_are_not_alert_signatures(self):
+        envelope=dict(engine='snort3',kind='weird',data=dict(ts=m.now()-5,uid=1,
+            gid=129,sid=12,msg='reassembly queue limit',source='stream_tcp',proto='TCP'))
+        record,raw=m.EventStore._parse(json.dumps(envelope))
+        self.assertEqual((record['type'],record['anomaly_gid'],record['anomaly_sid']),('anomaly',129,12))
+        self.assertFalse(record['sig_id']);self.assertFalse(record['level'])
+        self.db.add(record,raw);self.db.flush();self.records.append(record)
+        for query in ('anomaly_gid:129 AND anomaly_sid:12','anomaly_sid:[10 TO 20]',
+                      'NOT anomaly_gid:*','anomaly_sid:>=12','level:*'):
+            self.check(query)
+
     def test_networks_and_free_text(self):
         for query in ('src: "2001:db8::/64"', 'src: 192.0.2.0/24', 'dst: 198.51.100.0/24',
                       'NOT src: "2001:db8::/64"', 'src: invalid/24',

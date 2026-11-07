@@ -52,6 +52,7 @@ NATIVE_FIELDS = {
     'ips_action': 'ips_action', 'ids_reason': 'ids_reason',
     'dns_ttl': 'dns_ttl',
     'request_body_len': 'http_request_bytes',
+    'anomaly_gid': 'anomaly_gid', 'anomaly_sid': 'anomaly_sid',
     'client.version':'ssh_client','server.version':'ssh_server','kex_alg':'ssh_kex','host_key_alg':'ssh_hostkey',
     'cipher_alg':'ssh_cipher','mac_alg':'ssh_mac','compression_alg':'ssh_compression',
     **{name:name for name in ('packet_ts','packet_len','data_len','packet_direction','ip_ttl','ip_tos','ip_id','ip_offset','ip_flags','ip_proto','ip_header_len',
@@ -268,6 +269,10 @@ def native_event(envelope, metadata=None):
                 obj['drop']['alert_suppressed'] = True
     elif kind == 'weird':
         obj['anomaly'] = dict(type=data.get('source', ''), event=data.get('msg', ''))
+        for name in ('gid','sid'):
+            value=data.get(name)
+            if type(value) is int and 0 < value <= 0xffffffff:
+                obj['snort_native']['anomaly_'+name]=value
     elif kind == 'conn':
         duration = float(data.get('duration') or 0)
         # Extractor ts belongs to the packet that triggers logging, including

@@ -1153,7 +1153,7 @@ class EventDB:
                        "clen", "fsize", "flow_id", "vlan", "gid", "rev", "tx",
                        "icmp_type", "icmp_code", "bytes_toserver", "bytes_toclient",
                        "pkts_toserver", "pkts_toclient", "flow_start", "flow_end", "flow_age", "observed_first", "observed_last",
-                       "dns_ttl", "http_request_bytes", "wire_bytes_toserver", "wire_bytes_toclient", *__import__('snort_engine').PACKET_NUMBER_FIELDS,
+                       "dns_ttl", "http_request_bytes", "anomaly_gid", "anomaly_sid", "wire_bytes_toserver", "wire_bytes_toclient", *__import__('snort_engine').PACKET_NUMBER_FIELDS,
                        *["appid_"+name+"_id" for name in ("service","client","payload","misc","referred")]}
 
     @classmethod
@@ -1208,6 +1208,9 @@ class EventDB:
             self.conn.execute("PRAGMA journal_mode=WAL")
             self.conn.execute("PRAGMA synchronous=FULL")
             self.conn.execute("PRAGMA journal_size_limit=67108864")
+            # Amortize index-page rewrites on flash while retaining FULL commit
+            # durability. The default 1000-page threshold can checkpoint each batch.
+            self.conn.execute('PRAGMA wal_autocheckpoint=4096')
             # Retain hot index pages across bounded commits on slower flash.
             self.conn.execute('PRAGMA cache_size=-65536')
             # Only an identical source record is a duplicate. Timestamp, tuple
@@ -4955,7 +4958,7 @@ HUNT_CI_FIELDS = {"proto", "action", "dir", "type", "app", "state", "rrtype",
                   "rcode", "method", "pkt_src", "tlsver", "iif", "httpver"}
 HUNT_NUMBER_FIELDS = {"ts", "sport", "dport", "sig_id", "ip_version", "vlan", "gid", "rev", "tx",
                       "icmp_type", "icmp_code", "size", "status", "clen", "flow_id", *FLOW_METRIC_FIELDS,
-                      "dns_ttl","http_request_bytes","observed_first","observed_last","wire_bytes_toserver","wire_bytes_toclient",*__import__('snort_engine').PACKET_NUMBER_FIELDS,
+                      "dns_ttl","http_request_bytes","anomaly_gid","anomaly_sid","observed_first","observed_last","wire_bytes_toserver","wire_bytes_toclient",*__import__('snort_engine').PACKET_NUMBER_FIELDS,
                       *["appid_"+name+"_id" for name in ("service","client","payload","misc","referred")]}
 
 
@@ -6912,6 +6915,7 @@ class App:
             ('wire_bytes_toserver','客户端方向报文字节数'),('wire_bytes_toclient','服务端方向报文字节数')]})
         native_labels['dns_ttl']='最小 DNS 应答 TTL（秒）'
         native_labels['http_request_bytes']='HTTP 请求体字节数'
+        native_labels.update(anomaly_gid='协议异常生成器编号',anomaly_sid='协议异常签名编号')
         native_labels.update({'client.version':'SSH 客户端版本','server.version':'SSH 服务端版本','kex_alg':'SSH 密钥交换','host_key_alg':'SSH 主机密钥算法','cipher_alg':'SSH 加密算法','mac_alg':'SSH MAC 算法','compression_alg':'SSH 压缩算法'})
         native_labels.update(packet_ts='采样包时间',packet_len='采样包长度',data_len='采样包数据长度',packet_direction='采样包方向',
             ip_ttl='IP TTL / 跳数限制',ip_tos='IP TOS / 流量类别',ip_id='IP 标识',ip_offset='IP 分片偏移（字节）',ip_flags='IP 分片标志',

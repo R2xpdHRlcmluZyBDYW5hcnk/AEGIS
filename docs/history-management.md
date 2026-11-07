@@ -1,5 +1,11 @@
 # 历史事件与原始证据
 
+## 写入与检查点
+
+事件库保持 `synchronous=FULL`，自动 WAL 检查点阈值为 4096 页，默认 4 KiB 页对应约 16 MiB；自动检查点仍为 PASSIVE。这样可合并更多批次中的重复索引页回写，代价是检查点之间的 WAL 较大。64 MiB 日志保留上限继续生效；长读事务可能暂时阻止检查点完成，因此不是 WAL 文件的硬上限。事件记录与读取位置仍在同一事务内提交。
+
+核查：2026-11-07，Australia/Perth，直接读取 [SQLite 官方 WAL 文档](https://www.sqlite.org/wal.html#performance_considerations)，核对默认 1000 页阈值、FULL 同步、PASSIVE 检查点及读写取舍。本地复制事件流的对照回放包含最终检查点，并比较完整行；开发电脑计时不能等同于部署设备吞吐量。可用 `python -B tests/benchmark_ingest_wal.py <系统临时目录中的事件流副本>` 复现。
+
 ## 只清空事件库
 
 维护请求 history-reset 可指定 scope=database，HTTP 接口为 `POST /api/db/clear`，请求体 `{"scope":"database"}`。该模式只暂停控制台，将事件库、WAL、SHM 和派生统计库整体移入受保护备份，创建带新世代及事件流读取位置的空库后恢复控制台。检测引擎、原始日志、桥接采集持续运行，历史 JSON 不重新入库；认证、规则、配置、资产和容量设置保留。

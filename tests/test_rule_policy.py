@@ -34,6 +34,17 @@ class PolicyRuntimeTests(unittest.TestCase):
         self.assertEqual(runtime.apply_policy(text,{},disabled=['msg:*'],workers=1),text)
         self.assertTrue(runtime.apply_policy(text,{},disabled=['re:sid:1;'],workers=1).startswith('# '))
 
+    def test_global_signature_disable_covers_overlapping_sources_but_keeps_other_generators(self):
+        text='reject icmp any any -> any any (sid:101; rev:1;)\nalert icmp any any -> any any (gid:129; sid:101; rev:1;)\n'
+        groups={'101':{'icmp'},'129:101':{'icmp'}}
+        scoped=['group-source:example%2Fprimary:icmp']
+        self.assertTrue(runtime.apply_policy(text,groups,disabled=scoped,source='example/primary',workers=1).startswith('# '))
+        self.assertTrue(runtime.apply_policy(text,groups,disabled=scoped,source='example/community',workers=1).startswith('reject '))
+        for source in ('example/primary','example/community'):
+            result=runtime.apply_policy(text,groups,disabled=['sid:1:101'],source=source,workers=1)
+            self.assertTrue(result.startswith('# reject '))
+            self.assertIn('\nalert icmp',result)
+
     def test_serial_and_parallel_outputs_match_including_continuations_and_empty_lines(self):
         line='alert tcp any any -> any any (msg:"'+('padding '*90)+'"; sid:1; rev:1;)\n'
         text=line*14000+'\n# comment\nalert udp any any -> any any (\\\nsid:2;)'
