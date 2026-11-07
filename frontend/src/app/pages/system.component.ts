@@ -9,8 +9,8 @@ import { TableComponent, Column } from '../table.component';
  .component-health dd { display: flex; align-items: baseline; justify-content: flex-end; flex-wrap: wrap; gap: 6px 12px; }
 `],template:`
  <p class="error" role="alert" *ngIf="error">{{error}}</p><ng-container *ngIf="data as d;else loading">
- <section class="card component-health" *ngIf="d.components?.length"><header><h2>组件健康</h2><span *ngIf="componentProblems" class="badge danger">{{componentProblems}} 项需关注</span></header>
-  <dl class="key-values"><ng-container *ngFor="let component of d.components;trackBy:trackComponent"><dt>{{component.name}}</dt><dd [attr.data-component]="component.id"><span class="badge" [class.good]="component.state==='ok'" [class.danger]="component.state==='error'">{{componentLabels[component.state] || '未读取'}}</span><span>{{component.message}}</span><small class="muted" *ngIf="component.range as range">{{time(range[0])}} 至 {{time(range[1])}}</small><small class="muted" *ngIf="component.at && !component.range">{{time(component.at)}}</small></dd></ng-container></dl>
+ <section class="card component-health" *ngIf="components.length"><header><h2>组件健康</h2><span *ngIf="componentProblems" class="badge danger">{{componentProblems}} 项需关注</span></header>
+  <dl class="key-values"><ng-container *ngFor="let component of components;trackBy:trackComponent"><dt>{{component.name}}</dt><dd [attr.data-component]="component.id"><span class="badge" [class.good]="component.state==='ok'" [class.danger]="component.state==='error'">{{componentLabels[component.state] || '未读取'}}</span><span>{{component.message}}</span><small class="muted" *ngIf="component.range as range">{{time(range[0])}} 至 {{time(range[1])}}</small><small class="muted" *ngIf="component.at && !component.range">{{time(component.at)}}</small></dd></ng-container></dl>
  </section>
  <p class="muted telemetry-status" role="status" *ngIf="d.telemetry?.stale||d.telemetry?.updating">{{d.telemetry?.as_of?'引擎指标采样于 '+time(d.telemetry.as_of):'尚未取得引擎指标样本'}} <span class="badge">{{d.telemetry?.updating?'规则任务进行中':'等待新样本'}}</span></p><div class="system-grid"><section class="card" *ngFor="let section of sections;trackBy:trackSection"><header><h2>{{section.title}}</h2></header><dl class="key-values"><ng-container *ngFor="let pair of section.rows;trackBy:trackPair"><dt>{{pair[0]}}</dt><dd>{{pair[1]===null||pair[1]===undefined||pair[1]===''?'未读取':pair[1]}}</dd></ng-container></dl></section></div>
  <section class="card"><header><h2>日志文件</h2></header><ndr-table id="system-logs" [rows]="d.storage?.logs || []" [columns]="logColumns" keyField="name"/></section>
@@ -22,7 +22,8 @@ export class SystemComponent implements OnInit,OnDestroy {
  private dbLoaded=false;private alive=true;
  readonly componentLabels:Record<string,string>={ok:'正常',warning:'需关注',error:'异常',pending:'等待',idle:'按需'};
  constructor(private api:Api,private state:ConsoleState,private host:ElementRef<HTMLElement>){this.live=new LiveQuery(api,d=>{this.pending=d;this.applyPending();this.error='';if(this.dbLoaded)this.state.viewReady('system');},e=>{this.error=e;if(this.dbLoaded)this.state.viewReady('system');});}
- get componentProblems():number{return (this.data?.components||[]).filter((component:any)=>component.state==='error'||component.state==='warning').length;}
+ get components():any[]{return (this.data?.components||[]).filter((component:any)=>component.id!=='projection'&&component.id!=='history-network');}
+ get componentProblems():number{return this.components.filter((component:any)=>component.state==='error'||component.state==='warning').length;}
  trackComponent(_index:number,component:any):string{return component.id;}
  trackSection(_index:number,section:any):string{return section.title;}
  trackPair(_index:number,pair:any[]):string{return pair[0];}
