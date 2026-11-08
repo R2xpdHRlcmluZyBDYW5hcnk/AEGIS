@@ -93,6 +93,18 @@ func TestBrowserFixture(t *testing.T) {
 		}
 		json.NewEncoder(f).Encode(event)
 	}
+	// Suppression removes alert evidence from detection views, while a real
+	// blocking action remains visible in enforcement views and raw history.
+	json.NewEncoder(f).Encode(Object{"engine": "snort3", "kind": "notice", "data": Object{
+		"ts": stamp - 5, "session_id": session, "gid": 119, "sid": 261, "priority": 1,
+		"msg": "Fixture suppressed block", "action": "block", "alert_suppressed": true,
+		"proto": "TCP", "id.orig_h": "192.0.2.10", "id.orig_p": 51000, "id.resp_h": "198.51.100.4", "id.resp_p": 443,
+	}})
+	json.NewEncoder(f).Encode(Object{"event_type": "alert", "timestamp": utc(stamp - 10),
+		"src_ip": "192.0.2.10", "src_port": 51000, "dest_ip": "198.51.100.4", "dest_port": 443, "proto": "TCP",
+		"snort_native": Object{"session_id": session},
+		"alert":        Object{"gid": 119, "signature_id": 262, "signature": "Fixture suppressed alert", "severity": 1, "action": "allowed", "alert_suppressed": 1},
+	})
 	f.Close()
 	cfg := Config{User: "admin", PasswordPBKDF: hash, StaticDir: static, EventDB: filepath.Join(root, "events.db"), Stream: stream, ManagerSocket: socket, ReadWorkers: 4, PreloadBytes: 16 << 20, SessionTTL: time.Hour, Raw: Object{"local_llm": Object{"enabled": false}}}
 	app, err := NewApp(ctx, cfg)

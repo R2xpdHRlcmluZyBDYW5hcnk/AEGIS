@@ -13,7 +13,7 @@ import (
 	"sync"
 )
 
-const detectionSQL = "(type='alert' OR (type='drop' AND sid>0 AND alert_suppressed IS NULL))"
+const detectionSQL = "((type='alert' OR (type='drop' AND sid>0)) AND COALESCE(alert_suppressed,0)=0)"
 const blockedSQL = "(type='drop' OR action='blocked')"
 const incidentKeySQL = "CASE WHEN COALESCE(session_id,'')!='' THEN 'session:'||session_id ELSE COALESCE('event:'||event_key,'record:'||id||':'||ts) END"
 
@@ -363,7 +363,8 @@ func securitySummary(ctx context.Context, g *Snapshot, low, high float64, parts 
 	if dedup {
 		extra = " WHERE "
 	}
-	queries := []statement{{"SELECT COUNT(*) total,SUM(" + detectionSQL + ") alerts,SUM(" + blockedSQL + ") drops,SUM(" + detectionSQL + " AND sev=1) high,COUNT(DISTINCT NULLIF(src,'')) sources_count,COUNT(DISTINCT NULLIF(dst,'')) destinations_count,MAX(ts) newest" + source, bound}, {"SELECT sig,sev,sid,COUNT(*) count" + source + " GROUP BY sig,sev,sid ORDER BY count DESC,sig LIMIT ?", append(append([]any{}, bound...), top)}}
+	detections := securitySource(where+" AND "+detectionSQL, dedup)
+	queries := []statement{{"SELECT COUNT(*) total,SUM(" + detectionSQL + ") alerts,SUM(" + blockedSQL + ") drops,SUM(" + detectionSQL + " AND sev=1) high,COUNT(DISTINCT NULLIF(src,'')) sources_count,COUNT(DISTINCT NULLIF(dst,'')) destinations_count,MAX(ts) newest" + source, bound}, {"SELECT sig,sev,sid,COUNT(*) count" + detections + " GROUP BY sig,sev,sid ORDER BY count DESC,sig LIMIT ?", append(append([]any{}, bound...), top)}}
 	for _, column := range []string{"src", "dst", "reason", "proto"} {
 		queries = append(queries, statement{"SELECT " + column + " value,COUNT(*) count" + source + extra + column + "!='' GROUP BY " + column + " ORDER BY count DESC," + column + " LIMIT ?", append(append([]any{}, bound...), top)})
 	}

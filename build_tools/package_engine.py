@@ -62,7 +62,7 @@ def build(output,prefix=None):
         sums=json.dumps(checksums,sort_keys=True,indent=2).encode()+b'\n'
         info=tarfile.TarInfo('ENGINE_SHA256SUMS.json');info.size=len(sums);info.mode=0o644
         package.addfile(info,io.BytesIO(sums))
-    suffix={'ndr-session-1':'-session1','ndr-session-2':'-session2'}.get(manifest.get('session_patch'),'')
+    suffix={'ndr-session-1':'-session1','ndr-session-2':'-session2','ndr-session-3':'-session3'}.get(manifest.get('session_patch'),'')
     archive=output/('ips-snort3-arm64-'+manifest['sources']['snort']['version']+suffix+'.tar.gz')
     archive.write_bytes(gzip.compress(stream.getvalue(),mtime=0))
     digest=hashlib.sha256(archive.read_bytes()).hexdigest()

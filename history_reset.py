@@ -236,7 +236,16 @@ def main():
     args=parser.parse_args()
     if os.geteuid()!=0 or not args.run:raise SystemExit('Run as root for an explicitly queued reset')
     if args.state_dir.resolve()!=STATE.resolve():raise SystemExit('Unexpected reset state directory')
-    run(args.state_dir,args.job)
+    # The supported isolated installation runs the Go maintenance transaction.
+    # Keep this module importable for legacy compatibility tests, but do not
+    # fall back to its detector-stopping implementation on a deployed console.
+    from deployment_layout import layout
+    native=Path(layout()['program_dir'])/'ips-rule-manager'
+    if not native.is_file():
+        raise SystemExit('Update the console backend before clearing history')
+    with native.open('rb') as handle:
+        if handle.read(4)!=b'\x7fELF':raise SystemExit('Update the console backend before clearing history')
+    os.execv(str(native),[str(native),'history-reset','--run','--job',args.job,'--state-dir',str(args.state_dir)])
 
 
 if __name__=='__main__':main()

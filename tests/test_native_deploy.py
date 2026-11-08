@@ -78,6 +78,7 @@ class ConsoleUpdateTests(unittest.TestCase):
         previous={'sources':dict(expected,snort={'version':'previous'})}
         manifest=dict(sources=expected,session_patch='ndr-session-2')
         module.validate_upgrade_sources(manifest,previous,expected)
+        module.validate_upgrade_sources(dict(manifest,session_patch='ndr-session-3'),previous,expected)
         for key in ('snort','libdaq','target'):
             with self.subTest(source=key):
                 altered=dict(expected);altered[key]={}
@@ -101,6 +102,8 @@ class ConsoleUpdateTests(unittest.TestCase):
                 for name in ('bin/snort','lib/libdaq.so.3','etc/snort/snort.lua'):(prefix/name).write_text('old '+name)
                 (prefix/'engine-manifest.json').write_text(json.dumps({'sources':dict(expected,snort={'version':'old'})}))
                 (program/'ips-web').write_text('old web');(static/'index.html').write_text('old ui')
+                (program/'backend-build.json').write_text('old backend manifest')
+                (release/'backend-build.json').write_text('candidate backend manifest')
                 config=root/'snort.lua';config.write_text("local common = 'ts uid session_id '\n-- alert_suppressed\n")
                 web=root/'web.json';web.write_text('{"authentication":"fixture"}')
                 layout=root/'layout.json';layout.write_text('{}')
@@ -114,6 +117,7 @@ class ConsoleUpdateTests(unittest.TestCase):
                 active=types.SimpleNamespace(unpack_engine=unpack,private_json=lambda p,v:p.write_text(json.dumps(v)))
                 def apply(*args):
                     (program/'ips-web').write_text('new web')
+                    (program/'backend-build.json').write_text('new backend manifest')
                     if failure=='startup':raise RuntimeError('candidate startup failed')
                 native=types.SimpleNamespace(PROGRAMS=('ips-web',),apply=apply)
                 modules={'deploy-snort3':active,'deploy-native-backend':native,
@@ -138,6 +142,7 @@ class ConsoleUpdateTests(unittest.TestCase):
                 for name in ('bin/snort','lib/libdaq.so.3','etc/snort/snort.lua'):
                     self.assertEqual((prefix/name).read_text(),'old '+name)
                 self.assertEqual((program/'ips-web').read_text(),'old web')
+                self.assertEqual((program/'backend-build.json').read_text(),'old backend manifest')
                 self.assertEqual(json.loads(web.read_text()),{'authentication':'fixture'})
                 self.assertEqual(database.read_bytes(),b'preserved data')
 

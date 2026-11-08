@@ -83,7 +83,7 @@ def extractor_config(current, revision):
         if current.count("local common = 'ts uid ")!=1:
             raise ValueError('Unrecognized extractor common-field configuration')
         current=current.replace("local common = 'ts uid ","local common = 'ts uid session_id ",1)
-    if revision=='ndr-session-2' and 'alert_suppressed' not in current:
+    if revision in ('ndr-session-2','ndr-session-3') and 'alert_suppressed' not in current:
         notice="service = 'notice', on_events = 'ips_logging', fields = "
         if current.count(notice)!=1:
             raise ValueError('Unrecognized extractor notice configuration')
@@ -93,7 +93,7 @@ def extractor_config(current, revision):
 
 
 def validate_upgrade_sources(manifest, previous, expected):
-    if manifest.get('session_patch') not in ('ndr-session-1','ndr-session-2'):
+    if manifest.get('session_patch') not in ('ndr-session-1','ndr-session-2','ndr-session-3'):
         raise ValueError('Engine session patch does not match')
     for key in ('snort','libdaq','target'):
         if manifest.get('sources',{}).get(key)!=expected.get(key):
@@ -206,7 +206,8 @@ def upgrade(release,engine,plugin=None):
             environment=dict(os.environ,LD_LIBRARY_PATH=str(prepared/'lib'))
             result=subprocess.run([str(prepared/'bin/snort'),*validation_args,'-T','-c',str(validation)],env=environment,capture_output=True,text=True)
             if result.returncode: raise RuntimeError('Session engine configuration failed validation\n'+result.stdout[-4000:]+result.stderr[-4000:])
-            for path in (CONFIG,WEB_CONFIG,LAYOUT,*[PROGRAM/name for name in native.PROGRAMS],*extension_changes):
+            programs=(*native.PROGRAMS,*(['backend-build.json'] if (release/'backend-build.json').is_file() else []))
+            for path in (CONFIG,WEB_CONFIG,LAYOUT,*[PROGRAM/name for name in programs],*extension_changes):
                 if path.exists():
                     name='saved-'+str(len(state['files']));shutil.copy2(path,backup/name)
                     state['files'][str(path)]=name

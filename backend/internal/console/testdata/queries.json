@@ -2602,12 +2602,6 @@
         "count": 1
       },
       {
-        "sig": "engine drop: policy",
-        "sev": 0,
-        "sid": null,
-        "count": 1
-      },
-      {
         "sig": "fixture",
         "sev": 2,
         "sid": 1234,

@@ -32,7 +32,7 @@ def verified_plugin(release, plugin, engine):
     plugin = Path(plugin)
     manifest = json.loads((plugin/'session-logger.json').read_text())
     library = (plugin/'ndr_session.so').read_bytes()
-    if (manifest.get('session_patch') not in ('ndr-session-1', 'ndr-session-2') or manifest.get('version') != 1
+    if (manifest.get('session_patch') not in ('ndr-session-1', 'ndr-session-2', 'ndr-session-3') or manifest.get('version') != 1
             or hashlib.sha256(Path(engine).read_bytes()).hexdigest() != manifest['engine_sha256']
             or hashlib.sha256(library).hexdigest() != manifest['sha256']
             or hashlib.sha256((release/'native_session_logger.cc').read_bytes()).hexdigest() != manifest['source_sha256']):

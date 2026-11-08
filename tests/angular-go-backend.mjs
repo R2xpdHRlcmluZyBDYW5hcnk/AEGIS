@@ -96,6 +96,11 @@ try {
   await until(`[...document.querySelectorAll('.network-summary .stat-card strong')].length===4 && [...document.querySelectorAll('.network-summary .stat-card strong')].every(e=>e.textContent.trim()!=='—')`);
   assert.deepEqual(await evaluate(`[...document.querySelectorAll('.network-summary .stat-card strong')].map(e=>e.textContent.trim())`),['1','2','1','1'],'network counters render');
   assert.equal(await evaluate(`document.querySelector('[data-testid="high-total"]').textContent.trim()`),'1');
+  assert.equal(await evaluate(`document.querySelector('[data-testid="drops-total"]').textContent.trim()`),'2','suppressed blocking actions remain visible');
+  const overview=await api('/api/overview?scope=cache&view=panel');
+  assert.equal(overview.security.alerts,3);assert.equal(overview.security.high,1);assert.equal(overview.security.drops,2);
+  assert.deepEqual(overview.series.reduce((sum,p)=>[sum[0]+p.alerts,sum[1]+p.drops],[0,0]),[3,2],'alert trend excludes suppression and block trend retains enforcement');
+  assert.ok(overview.top.signatures.length>0&&overview.top.signatures.every(r=>!r.sig.includes('suppressed')),'signature ranks exclude suppressed records');
   await until(`!!document.querySelector('ndr-chart .echarts-surface svg')`);
   await shot('go-overview-desktop.png');
   await nav('system');await until(`!!document.querySelector('.database-card')`);
@@ -109,12 +114,13 @@ try {
   await until(`!!document.querySelector('.incident-heading')`);
   assert.equal(await evaluate(`document.querySelector('dialog').textContent.includes('会话 ID')`),true);
   await shot('go-incident-desktop.png');await closeModal();
-  await nav('hunt');await until(`document.querySelectorAll('ndr-events ndr-table tbody tr').length===8`);
+  await nav('hunt');await until(`document.querySelectorAll('ndr-events ndr-table tbody tr').length===10`);
   await set('[aria-label="搜索查询"]','proto:tcp AND type:(http OR tls)');await clickText('查询 →');
   await until(`document.querySelectorAll('ndr-events ndr-table tbody tr').length===2`);
   await set('[aria-label="搜索查询"]','unknown_field:bad');await clickText('查询 →');await until(`!!document.querySelector('ndr-events>.error')`);
   await set('[aria-label="搜索查询"]','');await clickText('查询 →');await until(`!document.querySelector('ndr-events>.error')`);
-  await nav('drops');await until(`document.querySelectorAll('ndr-events>section:last-of-type ndr-table tbody tr').length===1`);
+  await nav('drops');await until(`document.querySelectorAll('ndr-events>section:last-of-type ndr-table tbody tr').length===2`);
+  assert.ok(await evaluate(`document.querySelector('ndr-events>section:last-of-type').textContent.includes('Fixture suppressed block')`),'suppressed drop remains in the raw block list');
   await nav('rules');await ruleTab('检测签名');await until(`document.querySelectorAll('ndr-rules ndr-table tbody tr').length===50`);
   await clickText('下一页 →',`document.querySelector('ndr-rules ndr-table')`);await until(`document.querySelector('ndr-rules .pager')?.textContent.includes('2 / 3')`);
   await ruleTab('禁用策略');await clickText('＋ 新建');await until(`document.querySelectorAll('ndr-picker tbody input').length===50`);

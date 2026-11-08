@@ -69,6 +69,7 @@ func present(values ...any) any {
 	}
 	return ""
 }
+func suppressedAlert(value any) bool { return value == true || number(value) == 1 }
 func strictInt(v any, low, high int64) bool {
 	switch n := v.(type) {
 	case json.Number:
@@ -247,7 +248,7 @@ func nativeEvent(envelope Object) (Object, error) {
 		metadata := object(envelope["rule_metadata"])
 		action := strings.ToLower(text(d["action"]))
 		blocked := action == "drop" || action == "block" || action == "reject" || action == "reset" || action == "blacklist"
-		suppressed := integer(d["alert_suppressed"]) == 1
+		suppressed := suppressedAlert(d["alert_suppressed"])
 		if suppressed && !blocked {
 			return nil, nil
 		}
@@ -456,9 +457,6 @@ func ParseEvent(line []byte) (*Prepared, error) {
 		r["reason"] = get(drop, "reason", "")
 		if kind == "drop" {
 			r["action"] = present(a["action"], "blocked")
-			if drop["alert_suppressed"] == true {
-				r["alert_suppressed"] = 1
-			}
 		}
 	case "dns":
 		if dns["type"] == "response" {
@@ -524,6 +522,11 @@ func ParseEvent(line []byte) (*Prepared, error) {
 	}
 	for k, v := range object(o["observer_fields"]) {
 		r[k] = v
+	}
+	if suppressedAlert(o["alert_suppressed"]) || suppressedAlert(a["alert_suppressed"]) || suppressedAlert(drop["alert_suppressed"]) || suppressedAlert(r["alert_suppressed"]) {
+		r["alert_suppressed"] = 1
+	} else {
+		delete(r, "alert_suppressed")
 	}
 	if o["snort_native"] != nil {
 		r["_native_snort"] = true

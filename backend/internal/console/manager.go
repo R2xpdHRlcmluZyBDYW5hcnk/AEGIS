@@ -402,6 +402,15 @@ func (m *RuleManager) Dispatch(ctx context.Context, request Object, rootPeer boo
 		if value["id"] != request["job"] || !m.paused {
 			return nil, errors.New("未知历史维护任务")
 		}
+		if op == "history-reset-begin" {
+			if value["state"] != "queued" {
+				return nil, errors.New("历史维护任务已经开始")
+			}
+			value["state"], value["phase"] = "running", "准备清空历史"
+			if err := writeJSON(filepath.Join(m.state, "history-reset.json"), value); err != nil {
+				return nil, err
+			}
+		}
 		if op == "history-reset-finish" {
 			if value["state"] != "done" && value["state"] != "failed" {
 				return nil, errors.New("历史维护尚未完成")
@@ -410,6 +419,7 @@ func (m *RuleManager) Dispatch(ctx context.Context, request Object, rootPeer boo
 				return nil, err
 			}
 			m.paused = false
+			m.policyAfter = time.Now().Add(time.Minute)
 		}
 		return Object{"ok": true}, nil
 	case "mutate":

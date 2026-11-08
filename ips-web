@@ -2110,7 +2110,7 @@ class EventDB:
         return summarize(conn,start,end,push=push,parallel=parallel,publish_base=publish_base)
 
     # Detection and enforcement are overlapping facts, not exclusive log types.
-    DETECTION_SQL = "(type='alert' OR (type='drop' AND sid>0 AND alert_suppressed IS NULL))"
+    DETECTION_SQL = "((type='alert' OR (type='drop' AND sid>0)) AND COALESCE(alert_suppressed,0)=0)"
     BLOCKED_SQL = "(type='drop' OR action='blocked')"
 
     def security_summary(self, window=60, topn=5, etype="all", start=None, end=None, dedup=False,
@@ -2146,7 +2146,7 @@ class EventDB:
                     "), SUM("+self.DETECTION_SQL+" AND sev=1)" +
                     ", COUNT(DISTINCT NULLIF(src,'')), COUNT(DISTINCT NULLIF(dst,'')), MAX(ts)" +
                     where, args),
-                    ("SELECT sig, sev, sid, COUNT(*)" + where +
+                    ("SELECT sig, sev, sid, COUNT(*)" + self._security_from(conditions+' AND '+self.DETECTION_SQL,dedup) +
                      " GROUP BY sig, sev, sid ORDER BY COUNT(*) DESC, sig LIMIT ?", args + (topn,))]
                 dimensions = (("sources", "src", "ip"),("destinations", "dst", "ip"),
                               ("reasons", "reason", "reason"))

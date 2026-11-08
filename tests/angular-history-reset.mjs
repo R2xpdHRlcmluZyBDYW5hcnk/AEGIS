@@ -61,7 +61,8 @@ try {
  await click('清空历史事件',`document.querySelector('ndr-system')`);
  await until(`!!document.querySelector('ndr-app > ndr-modal .modal-actions')||!!document.querySelector('.modal-actions .danger-button')`);
  const message=await evaluate(`document.querySelector('ndr-modal .modal-content').textContent`);
- assert.ok(message.includes('暂停检测')&&message.includes('原始日志')&&message.includes('重新登录'));
+ assert.ok(message.includes('检测与阻断将保持运行')&&message.includes('日志采集')&&message.includes('原始日志')&&message.includes('重新登录'));
+ assert.equal(message.includes('暂停检测'),false);
  await click('取消',`document.querySelector('ndr-modal')`);await until(`!document.querySelector('ndr-modal')`);assert.equal(attempt,0);
  await click('清空历史事件',`document.querySelector('ndr-system')`);await click('确认',`document.querySelector('ndr-modal')`);
  await until(`document.body.textContent.includes('synthetic recovery error')`);assert.ok(polls>=2);

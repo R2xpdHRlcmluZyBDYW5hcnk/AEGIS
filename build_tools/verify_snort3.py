@@ -18,6 +18,8 @@ def verify(sources_path, prefix):
         raise ValueError('Engine session identity patch missing')
     if b'alert_suppressed' not in compiled:
         raise ValueError('Engine suppressed block logging patch missing')
+    if b'NDR_LOGS_REOPENED' not in compiled:
+        raise ValueError('Engine event-log reopen barrier missing')
     subprocess.run(['patchelf', '--set-rpath', '$ORIGIN/../lib', str(binary)], check=True)
     architecture = subprocess.check_output(['aarch64-linux-gnu-readelf', '-h', str(binary)], text=True)
     if 'AArch64' not in architecture:

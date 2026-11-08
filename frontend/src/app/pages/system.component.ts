@@ -48,11 +48,11 @@ export class SystemComponent implements OnInit,OnDestroy {
  ngOnInit():void{this.live.start('/api/system',{},'system');void this.loadDb();}
  async loadDb():Promise<void>{try{this.db=await this.api.get('/api/db/stats');if(this.capacity===null)this.capacity=this.db.cap/(this.capacityUnit==='GiB'?1073741824:1048576);}catch(e:any){this.state.toast(e.message);}finally{this.dbLoaded=true;if(this.data||this.error)this.state.viewReady('system');}}
  async clearDb():Promise<void>{
-  if(this.clearing||!await this.state.confirm('清空历史事件','将暂停检测和采集，永久删除全部历史事件及尚未入库的原始日志，再重新启动。控制台会短暂断开，可能需要重新登录。规则和系统配置会保留。确定继续？'))return;
+  if(this.clearing||!await this.state.confirm('清空历史事件','检测与阻断将保持运行。将暂时停止日志采集和控制台，永久删除全部历史事件及尚未入库的原始日志。控制台会短暂断开，可能需要重新登录。规则和系统配置会保留。确定继续？'))return;
   this.clearing=true;
   try{
    const result=await this.api.post('/api/db/clear');
-   if(result.pending){this.live.stop();this.state.toast('正在停止检测并清空历史，请等待服务恢复');await this.waitForReset(result.reset_id);}
+   if(result.pending){this.live.stop();this.state.toast('正在清空历史，检测持续运行，请等待采集恢复');await this.waitForReset(result.reset_id);}
    else {this.state.toast('历史事件已清空');await this.loadDb();}
   }catch(e:any){this.state.toast(e.message);if(this.alive)this.live.start('/api/system',{},'system');}finally{this.clearing=false;}
  }

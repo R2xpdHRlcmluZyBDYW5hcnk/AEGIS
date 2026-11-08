@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -60,8 +59,15 @@ func (m *RuleManager) StartHistoryReset(scope string) (Object, error) {
 	return Object{"ok": true, "pending": true, "reset_id": id}, nil
 }
 func historyMembers(database string) ([]string, error) {
-	if database != filepath.Join(resetWebState, "snort-ndr.db") {
+	return historyMembersAt(database, resetWebState)
+}
+func historyMembersAt(database, webState string) ([]string, error) {
+	if database != filepath.Join(webState, "snort-ndr.db") {
 		return nil, errors.New("事件库清理目标不符合安装布局")
+	}
+	canonical, err := historyStateDirectory(webState)
+	if err != nil {
+		return nil, err
 	}
 	paths := []string{}
 	for _, suffix := range []string{"", "-wal", "-shm", ".summary.db", ".summary.db-wal", ".summary.db-shm"} {
@@ -74,15 +80,31 @@ func historyMembers(database string) ([]string, error) {
 			return nil, errors.New("事件库成员类型异常")
 		}
 		resolved, err := filepath.EvalSymlinks(filepath.Dir(p))
-		if err != nil || resolved != resetWebState {
+		if err != nil || resolved != canonical {
 			return nil, errors.New("事件库目录被替换")
 		}
 		paths = append(paths, p)
 	}
 	return paths, nil
 }
+func historyStateDirectory(path string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(path)
+	// DynamicUser StateDirectory exposes this precise private-directory alias.
+	// Accept that systemd layout, while rejecting arbitrary redirected roots.
+	private := filepath.Join(filepath.Dir(path), "private", filepath.Base(path))
+	if err != nil || resolved != path && resolved != private {
+		return "", errors.New("事件库目录被替换")
+	}
+	return resolved, nil
+}
 func resetHistoryDatabase(database, stream string) (string, error) {
-	targets, err := historyMembers(database)
+	return resetHistoryDatabaseAt(database, stream, resetWebState)
+}
+func resetHistoryDatabaseAt(database, stream, webState string) (string, error) {
+	return switchHistoryDatabase(database, stream, webState, os.Rename)
+}
+func switchHistoryDatabase(database, stream, webState string, move func(string, string) error) (string, error) {
+	targets, err := historyMembersAt(database, webState)
 	if err != nil {
 		return "", err
 	}
@@ -98,21 +120,24 @@ func resetHistoryDatabase(database, stream string) (string, error) {
 	}
 	owner, err := os.Stat(database)
 	if errors.Is(err, os.ErrNotExist) {
-		owner, err = os.Stat(resetWebState)
+		owner, err = os.Stat(webState)
 	}
 	if err != nil {
 		return "", err
 	}
-	backup, err := os.MkdirTemp(resetWebState, "history-backup-"+time.Now().UTC().Format("20060102T150405")+"-")
+	backup, err := os.MkdirTemp(webState, "history-backup-"+time.Now().UTC().Format("20060102T150405")+"-")
 	if err != nil {
 		return "", err
 	}
 	moved := []string{}
 	success := false
+	replacing := false
 	defer func() {
 		if !success {
-			for _, suffix := range []string{"", "-wal", "-shm"} {
-				os.Remove(database + suffix)
+			if replacing {
+				for _, suffix := range []string{"", "-wal", "-shm"} {
+					os.Remove(database + suffix)
+				}
 			}
 			for _, p := range moved {
 				os.Rename(filepath.Join(backup, filepath.Base(p)), p)
@@ -121,12 +146,13 @@ func resetHistoryDatabase(database, stream string) (string, error) {
 	}()
 	for _, p := range targets {
 		if fileExists(p) {
-			if err = os.Rename(p, filepath.Join(backup, filepath.Base(p))); err != nil {
+			if err = move(p, filepath.Join(backup, filepath.Base(p))); err != nil {
 				return "", err
 			}
 			moved = append(moved, p)
 		}
 	}
+	replacing = true
 	db, err := sql.Open("aegis-sqlite", "file:"+database+"?_auto_vacuum=incremental")
 	if err != nil {
 		return "", err
@@ -151,7 +177,7 @@ func resetHistoryDatabase(database, stream string) (string, error) {
 	if err = syncDirectory(backup); err != nil {
 		return "", err
 	}
-	if err = syncDirectory(resetWebState); err != nil {
+	if err = syncDirectory(webState); err != nil {
 		return "", err
 	}
 	success = true
@@ -249,133 +275,4 @@ func historyWebReady(ctx context.Context) bool {
 	defer res.Body.Close()
 	var value Object
 	return res.StatusCode == 200 && json.NewDecoder(res.Body).Decode(&value) == nil && value["ok"] == true && value["event_db_ready"] == true
-}
-func RunHistoryReset(ctx context.Context, state, id string) (failure error) {
-	if os.Geteuid() != 0 || state != resetState || !jobIDPattern.MatchString(id) {
-		return errors.New("历史维护参数无效")
-	}
-	var value Object
-	if err := readJSON(filepath.Join(state, "history-reset.json"), &value); err != nil || value["id"] != id || value["state"] != "queued" {
-		return errors.New("历史任务无效或已执行")
-	}
-	socket := "/run/ips-rule-manager/control.sock"
-	if _, err := managerRequest(ctx, socket, "history-reset-begin", Object{"job": id}); err != nil {
-		return err
-	}
-	root := "/var/lib/ips-snort-logs"
-	stream := filepath.Join(root, "events/events.json")
-	timers, recoverUnits := []string{}, []string{}
-	command := func(args ...string) error { _, err := commandOutput(ctx, 150*time.Second, args...); return err }
-	active := func(unit string) bool { return command("systemctl", "is-active", "--quiet", unit) == nil }
-	phase := func(s string) error {
-		value["state"], value["phase"] = "running", s
-		return writeJSON(filepath.Join(state, "history-reset.json"), value)
-	}
-	stop := func(unit string) error {
-		if err := command("systemctl", "stop", unit); err != nil {
-			return err
-		}
-		out, err := commandOutput(ctx, 5*time.Second, "systemctl", "show", unit, "-p", "MainPID", "--value")
-		if err != nil || strings.TrimSpace(out) != "0" {
-			return errors.New("服务未完全停止")
-		}
-		return nil
-	}
-	defer func() {
-		if failure != nil {
-			value["state"], value["phase"], value["finished"], value["error"] = "failed", "清空或重启失败", now(), failure.Error()
-			writeJSON(filepath.Join(state, "history-reset.json"), value)
-			for _, unit := range recoverUnits {
-				command("systemctl", "start", unit)
-			}
-		}
-		for _, unit := range timers {
-			command("systemctl", "start", unit)
-		}
-		managerRequest(ctx, socket, "history-reset-finish", Object{"job": id})
-	}()
-	for _, unit := range []string{"ips-log-maintenance.timer", "snort-home-net.timer"} {
-		if active(unit) {
-			timers = append(timers, unit)
-			if err := command("systemctl", "stop", unit); err != nil {
-				return err
-			}
-		}
-	}
-	if err := command("systemctl", "stop", "ips-log-maintenance.service", "snort-home-net.service"); err != nil {
-		return err
-	}
-	if value["scope"] == "database" {
-		phase("停止控制台")
-		recoverUnits = []string{"ips-web"}
-		if err := stop("ips-web"); err != nil {
-			return err
-		}
-		phase("切换空事件库")
-		backup, err := resetHistoryDatabase(filepath.Join(resetWebState, "snort-ndr.db"), stream)
-		if err != nil {
-			return err
-		}
-		value["backup"] = backup
-		phase("恢复控制台")
-		if err = command("systemctl", "start", "ips-web"); err != nil {
-			return err
-		}
-	} else if value["scope"] == "all" {
-		observer := active("ips-quic-observer")
-		recoverUnits = []string{"ips", "ips-event-bridge", "ips-web"}
-		if observer {
-			recoverUnits = append(recoverUnits, "ips-quic-observer")
-			if err := stop("ips-quic-observer"); err != nil {
-				return err
-			}
-		}
-		phase("停止检测和采集")
-		for _, unit := range []string{"ips", "ips-event-bridge", "ips-web"} {
-			if err := stop(unit); err != nil {
-				return err
-			}
-		}
-		phase("清空事件和未入库日志")
-		old, _ := os.Stat(stream)
-		if err := removeHistory(filepath.Join(resetWebState, "snort-ndr.db"), root); err != nil {
-			return err
-		}
-		if err := atomicWrite(stream, nil, 0644); err != nil {
-			return err
-		}
-		if old != nil {
-			os.Chmod(stream, old.Mode().Perm())
-			copyOwnership(old, stream)
-		}
-		phase("重新启动检测和采集")
-		for _, unit := range recoverUnits {
-			if err := command("systemctl", "start", unit); err != nil {
-				return err
-			}
-		}
-	} else {
-		return errors.New("历史任务范围无效")
-	}
-	deadline := time.Now().Add(150 * time.Second)
-	for {
-		ready := active("ips-web") && historyWebReady(ctx)
-		if value["scope"] == "all" {
-			_, err := engineCommand(ctx, "show_config_generation()", 2*time.Second)
-			ready = ready && err == nil && active("ips-event-bridge")
-		}
-		if ready {
-			break
-		}
-		if time.Now().After(deadline) {
-			return errors.New("服务重启后未就绪，备份和故障状态已保留")
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(500 * time.Millisecond):
-		}
-	}
-	value["state"], value["phase"], value["finished"], value["error"] = "done", "已清空并恢复采集", now(), ""
-	return writeJSON(filepath.Join(state, "history-reset.json"), value)
 }

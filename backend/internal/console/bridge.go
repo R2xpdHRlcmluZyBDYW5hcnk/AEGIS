@@ -346,10 +346,10 @@ func (b *Bridge) Poll(ctx context.Context) (int64, error) {
 	}
 	state := b.state
 	state.Files = map[string]bridgeFile{}
-	if epoch == b.state.Epoch {
-		for k, v := range b.state.Files {
-			state.Files[k] = v
-		}
+	// Native logs survive an engine restart. Their inode, length and tail hash
+	// still fence the cursor; a new engine epoch alone must not replay them.
+	for k, v := range b.state.Files {
+		state.Files[k] = v
 	}
 	state.Epoch = epoch
 	paths := []string{}
@@ -379,7 +379,9 @@ func (b *Bridge) Poll(ctx context.Context) (int64, error) {
 		if err != nil {
 			return 0, err
 		}
-		if !info.Mode().IsRegular() || float64(info.ModTime().UnixNano())/1e9 < started {
+		_, ino := fileIdentity(info)
+		previous := state.Files[filepath.Base(p)]
+		if !info.Mode().IsRegular() || float64(info.ModTime().UnixNano())/1e9 < started && previous.Inode != ino {
 			continue
 		}
 		f, err := os.Open(p)
@@ -391,8 +393,6 @@ func (b *Bridge) Poll(ctx context.Context) (int64, error) {
 			f.Close()
 			return 0, errors.New("原始日志读取时被替换")
 		}
-		_, ino := fileIdentity(info)
-		previous := state.Files[filepath.Base(p)]
 		offset, discard := int64(0), false
 		if previous.Inode == ino && previous.Offset <= info.Size() {
 			offset, discard = previous.Offset, previous.Discarding

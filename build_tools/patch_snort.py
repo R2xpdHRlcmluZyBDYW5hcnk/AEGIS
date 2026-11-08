@@ -5,7 +5,7 @@
 """Add connection identities and suppressed block records to the pinned Snort."""
 from pathlib import Path
 
-REVISION = 'ndr-session-2'
+REVISION = 'ndr-session-3'
 
 
 def replace_once(text, old, new):
@@ -103,6 +103,7 @@ void Flow::end_ndr_session()
     template<typename T, class... Context>
     static void log(''')
     patch_suppressed_blocks(edit)
+    patch_log_rotation(edit)
     (root.parent/'ndr-session-patch.txt').write_text(REVISION+'\n')
 
 
@@ -155,6 +156,133 @@ void CallLogFuncs(Packet* p, const OptTreeNode* otn, ListHead* head)''')
     if (!contextual && find(fields.begin(), fields.end(), "alert_suppressed") != fields.end())
         DataBus::subscribe_global(de_pub_key, DetectionEventIds::SUPPRESSED_BLOCK,
             new IpsUser(*this, S_NAME), i.get_snort_config());''')
+
+
+def patch_log_rotation(edit):
+    # Reopen output handles on their owning packet thread. No DAQ, flow, rule,
+    # inspector or session lifecycle is stopped or reset by this command.
+    edit('log/text_log.cc', '#include <cstdarg>', '#include <cstdarg>\n#include <vector>')
+    edit('log/text_log.cc', 'namespace snort\n{', 'static thread_local std::vector<TextLog*> active_text_logs;\n\nnamespace snort\n{')
+    edit('log/text_log.cc', '    TextLog_Reset(txt);\n\n    return txt;', '    TextLog_Reset(txt);\n    active_text_logs.push_back(txt);\n\n    return txt;')
+    edit('log/text_log.cc', '    snort_free(txt->name);', '    active_text_logs.erase(std::remove(active_text_logs.begin(), active_text_logs.end(), txt), active_text_logs.end());\n    snort_free(txt->name);')
+    edit('log/text_log.h', 'SO_PUBLIC void TextLog_Term(TextLog*);', 'SO_PUBLIC void TextLog_Term(TextLog*);\nSO_PUBLIC bool TextLog_ReopenAll();')
+    edit('log/text_log.cc', 'void TextLog_Term(TextLog* const txt)', '''bool TextLog_ReopenAll()
+{
+    std::vector<std::pair<TextLog*, FILE*>> replacements;
+    bool ready = true;
+    for (auto* log : active_text_logs)
+    {
+        if (log->file == stdout) continue;
+        FILE* next = TextLog_Open(log->name, false);
+        if (!next) { ready = false; break; }
+        replacements.emplace_back(log, next);
+        size_t limit = log->maxFile;
+        log->maxFile = 0;
+        bool flushed = !log->pos || TextLog_Flush(log);
+        log->maxFile = limit;
+        if (!flushed || fflush(log->file))
+        { ready = false; break; }
+    }
+    if (!ready)
+    {
+        for (auto& entry : replacements) fclose(entry.second);
+        return false;
+    }
+    for (auto& entry : replacements)
+    {
+        auto* log = entry.first;
+        TextLog_Close(log->file);
+        log->file = entry.second;
+        log->size = TextLog_Size(log->file);
+        log->last = time(nullptr);
+    }
+    return true;
+}
+
+void TextLog_Term(TextLog* const txt)''')
+    edit('connectors/file_connector/file_connector.h', '    { file.flush(); return file.good(); }', '''    { file.flush(); return file.good() && !rotation_failed; }
+
+    void reinit() override;
+    std::string output_path;
+    bool rotation_failed = false;''')
+    edit('connectors/file_connector/file_connector.cc', '    file_conn->file.open(pathname,\n', '    file_conn->output_path = pathname;\n    file_conn->file.open(pathname,\n')
+    edit('connectors/file_connector/file_connector.cc', '(std::ios::out | (cfg.text_format', '(std::ios::out | std::ios::app | (cfg.text_format')
+    edit('connectors/file_connector/file_connector.cc', 'bool FileConnector::internal_transmit_message', '''void FileConnector::reinit()
+{
+    if (output_path.empty()) return;
+    file.flush();
+    std::fstream next;
+    next.open(output_path, std::ios::out | std::ios::app |
+        (cfg.text_format ? (std::ios::openmode)0 : std::ios::binary));
+    rotation_failed = !next.good() || !file.good();
+    if (!rotation_failed) file.swap(next);
+}
+
+bool FileConnector::internal_transmit_message''')
+    edit('managers/connector_manager.h', '    static void thread_reinit();', '    static void thread_reinit();\n    static bool reopen_log_files();')
+    edit('managers/connector_manager.cc', 'void ConnectorManager::thread_reinit()', '''bool ConnectorManager::reopen_log_files()
+{
+    bool ready = true;
+    unsigned instance = get_instance_id();
+    for (auto* entry : PluginManager::get_interfaces(PT_CONNECTOR))
+    {
+        auto* group = static_cast<ConnectorCommonElem*>(entry);
+        if (std::string(group->api->base.name) != "file_connector") continue;
+        for (auto& item : group->connectors)
+        {
+            auto* connector = item.second.thread_connectors[instance];
+            if (!connector || connector->get_connector_direction() != Connector::CONN_TRANSMIT) continue;
+            connector->reinit();
+            if (!connector->flush()) ready = false;
+        }
+    }
+    return ready;
+}
+
+void ConnectorManager::thread_reinit()''')
+    edit('main/analyzer_command.h', 'class ACRotate :', '''class ACReopenLogs : public snort::AnalyzerCommand
+{
+public:
+    explicit ACReopenLogs(ControlConn* conn) : AnalyzerCommand(conn) { }
+    ~ACReopenLogs() override;
+    bool execute(Analyzer&) override;
+    const char* stringify() override { return "REOPEN_LOGS"; }
+private:
+    std::atomic<unsigned> failures{0};
+    std::atomic<unsigned> completed{0};
+};
+
+class ACRotate :''')
+    edit('main/analyzer_command.h', '#define ANALYZER_COMMANDS_H', '#define ANALYZER_COMMANDS_H\n#include <atomic>')
+    edit('main/analyzer_command.cc', '#include "control/control.h"', '#include "control/control.h"\n#include "log/text_log.h"\n#include "managers/connector_manager.h"')
+    edit('main/analyzer_command.cc', 'bool ACRotate::execute', '''bool ACReopenLogs::execute(Analyzer&)
+{
+    bool text_ready = TextLog_ReopenAll();
+    bool connector_ready = ConnectorManager::reopen_log_files();
+    if (!text_ready || !connector_ready) ++failures;
+    ++completed;
+    return true;
+}
+
+ACReopenLogs::~ACReopenLogs()
+{
+    if (failures || !completed)
+        log_message("NDR_LOGS_REOPEN_FAILED threads=%u failures=%u\\n", completed.load(), failures.load());
+    else
+        log_message("NDR_LOGS_REOPENED threads=%u\\n", completed.load());
+}
+
+bool ACRotate::execute''')
+    edit('main.h', 'int main_rotate_stats(lua_State* = nullptr);', 'int main_rotate_stats(lua_State* = nullptr);\nint main_reopen_logs(lua_State* = nullptr);')
+    edit('main.cc', 'int main_rotate_stats(lua_State* L)', '''int main_reopen_logs(lua_State* L)
+{
+    ControlConn* connection = ControlConn::query_from_lua(L);
+    main_broadcast_command(new ACReopenLogs(connection), connection);
+    return 0;
+}
+
+int main_rotate_stats(lua_State* L)''')
+    edit('main/snort_module.cc', '    { "rotate_stats", main_rotate_stats, nullptr, "roll perfmonitor log files" },', '    { "rotate_stats", main_rotate_stats, nullptr, "roll perfmonitor log files" },\n    { "reopen_logs", main_reopen_logs, nullptr, "reopen event log files on every packet thread" },')
 
 
 if __name__=='__main__':
