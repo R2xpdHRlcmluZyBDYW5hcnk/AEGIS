@@ -9,10 +9,8 @@ import { Details } from '../details.component';
 import { eventType } from '../event-fields';
 @Component({changeDetection:ChangeDetectionStrategy.Eager,selector:'ndr-overview',standalone:true,imports:[ModalComponent,CommonModule,ChartComponent,TableComponent],template:`
  <div class="overview-filters" *ngIf="filters.length" aria-label="概览筛选"><span>当前筛选</span><button class="quiet" *ngFor="let filter of filters" (click)="removeFilter(filter.key)" [attr.aria-label]="'移除筛选 '+filter.label">{{filter.label}} ×</button><button class="quiet" (click)="clearFilters()">清除筛选</button></div>
- <p *ngIf="filterPending || showingPrevious" class="muted" data-testid="overview-filter-status" role="status">{{filterPending ? '正在应用筛选' : refreshing ? '正在更新概览' : '更新尚未完成'}}{{showingPrevious ? '，暂显示上一次结果' : ''}}</p>
  <p *ngIf="error" class="error" role="alert">{{error}}</p>
  <div *ngIf="!data && !error" class="overview-loading" role="status" aria-label="正在加载概览" aria-busy="true" data-testid="overview-loading"><svg class="overview-spinner" viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="13"/></svg></div>
-  <p class="muted telemetry-status" role="status" *ngIf="data?.telemetry?.stale || data?.telemetry?.updating">{{data.telemetry.as_of?'引擎指标采样于 '+time(data.telemetry.as_of):'尚未取得引擎指标样本'}} <span class="badge">{{data.telemetry.updating?'规则任务进行中':'等待新样本'}}</span></p>
  <ng-container *ngIf="data as d"><div class="stats-grid resource-summary"><h2>检测概况</h2>
   <button class="stat-card alert" (click)="filterKind('alerts','检测告警')" [attr.aria-pressed]="hasKind('alerts')"><span>检测告警</span><strong data-testid="alerts-total">{{d.security?.alerts | number}}</strong></button>
   <button class="stat-card critical" (click)="filterKind('high','高危告警')" [attr.aria-pressed]="hasKind('high')"><span>高危告警</span><strong data-testid="high-total">{{d.security?.high | number}}</strong></button>

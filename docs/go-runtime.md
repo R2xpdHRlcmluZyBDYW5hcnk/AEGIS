@@ -82,3 +82,18 @@ QUIC 仍由 Wireshark 解码，不新增自制解密器。Go 并行解析字段�
 - [Netfilter libnftables 接口说明](https://wiki.nftables.org/wiki-nftables/index.php/Portal:DeveloperDocs/nftables_internals)及 [Debian 13 libnftables 手册](https://manpages.debian.org/trixie/libnftables1/libnftables.3.en.html)定义上下文、命令缓冲和输出缓冲 API。系统库按运行主机已有包提供，不随 Go 程序重新分发。
 
 同日通过 MCP 读取 [Go 官方发布索引](https://go.dev/dl/?mode=json)，最新稳定条目仍为 Go 1.27.3，归档摘要与 build_tools/go-sources.json 一致。规则兼容性以已有规则源记录和已安装固定版本更新器的只读源码为参照，源码副本仅用于开发核对；没有向外部 PulledPork3 仓库写入。
+
+
+## PostgreSQL 持久事件库
+
+启用 database_url 后，持久事件进入 PostgreSQL 和 TimescaleDB，SQLite 仅用于有界内存事件池、不可变概览快照和旧库离线恢复。生产部署与回滚入口见 README-deploy.md 的 PostgreSQL 事件存储。
+
+时间、端口与计数采用明确的 PostgreSQL 类型，原始 JSON 继续保持字节一致的 zlib BLOB。MITRE 查询元数据、元组关联摘要和流量显示文字在入库时生成，避免数据库查询时执行 Go 回调。查询层只转换项目生成的 SQL 和参数标记，值始终绑定；SQLite 与 PostgreSQL 共用搜索条件语义。持久只读事务使用 REPEATABLE READ，平行查询导入同一 PostgreSQL 快照。
+
+安全事件的非空会话镜像通过会话、精确时间和分区时间查找，复用现有会话时间索引；其余可空原生字段仍采用空值安全比较。分页最多执行四次查询，签名摘要和阻断状态按整页批量读取，签名条数限制分别作用于每个事件。实时连接已建立时不再为等待首个结果额外启动 HTTP 数据库查询，连接失败的回退与取消机制保留。
+
+规则目录只为当前页构造 JSON，匹配总数继续完整统计。规则管理界面保留最多 12 个近期页签结果，30 秒内返回页签先显示已有结果并立即刷新；手动刷新及编辑后的刷新清空这些结果，过期结果不用于即时展示。
+
+查询依据核对时间：2026-11-09 Australia/Perth（UTC+08:00）。查询条件为 PostgreSQL B-tree 等值比较、部分索引谓词匹配和 Timescale 分块裁剪；来源为 [PostgreSQL 索引类型](https://www.postgresql.org/docs/18/indexes-types.html)、[部分索引](https://www.postgresql.org/docs/18/indexes-partial.html)和 [Timescale 索引](https://www.tigerdata.com/docs/build/performance-optimization/indexing)。执行计划与回归均在开发机临时数据库中验证。
+
+历史清空通过事务内封存应用 schema 和重建读取边界实现，禁止在设备上创建数据库工作副本。只清空事件库保留封存 schema；完整历史清空在采集健康后删除本次封存 schema。失败不会覆盖旧 schema，部署切换支持恢复封存 schema 与旧配置。

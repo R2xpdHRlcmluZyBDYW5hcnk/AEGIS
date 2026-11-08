@@ -128,6 +128,7 @@ func TestBrowserFixture(t *testing.T) {
 	f.Close()
 	cfg := Config{User: "admin", PasswordPBKDF: hash, StaticDir: static, EventDB: filepath.Join(root, "events.db"), Stream: stream, ManagerSocket: socket, ReadWorkers: 4, PreloadBytes: 16 << 20, SessionTTL: time.Hour, Raw: Object{"local_llm": Object{"enabled": false}}}
 	cfg.snapshotDir = filepath.Join(root, "snapshots")
+	cfg.DatabaseURL = os.Getenv("AEGIS_TEST_POSTGRES_URL")
 	if err = os.Mkdir(cfg.snapshotDir, 0700); err != nil {
 		t.Fatal(err)
 	}

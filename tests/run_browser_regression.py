@@ -21,6 +21,7 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--release',type=Path,required=True)
     parser.add_argument('--go-workspace',help='Optional existing temporary Go build workspace')
+    parser.add_argument('--postgresql',action='store_true',help='Run against a local temporary PostgreSQL and TimescaleDB cluster')
     args=parser.parse_args()
     with tempfile.TemporaryDirectory(prefix='aegis-browser-') as directory:
         work=Path(directory);static=work/'static';static.mkdir()
@@ -33,7 +34,7 @@ def main():
                 (static/name).write_bytes(data)
         (static/'frontend-build.json').write_text(json.dumps(manifest))
         (static/'favicon.svg').write_bytes((ROOT/'favicon.svg').read_bytes())
-        stop=work/'stop';command,env=native_fixture_command(static,stop,19096)
+        stop=work/'stop';command,env=native_fixture_command(static,stop,19096,postgresql=args.postgresql)
         if args.go_workspace:
             index=max(i for i,value in enumerate(command) if value=='--');command[index:index]=['--workspace',args.go_workspace]
         node,_=toolchain(work);env.update(environment(node,work),NDR_PREVIEW_URL='http://127.0.0.1:19096')

@@ -72,8 +72,7 @@ try {
     await cdp('Input.dispatchMouseEvent',{type:'mouseReleased',...point,button:'left',clickCount:1});
   }
   const api=url=>evaluate(`fetch(${JSON.stringify(url)}).then(r=>r.json())`);
-  const filterStatus = '[data-testid="overview-filter-status"]';
-  const untilFiltered = condition => until(`!document.querySelector('${filterStatus}') && (${condition})`);
+  const untilFiltered = condition => until(`document.querySelector('ndr-overview ndr-table#recent .table-scroll')?.getAttribute('aria-busy')==='false' && (${condition})`);
   const overview=await api('/api/overview?window=15');
   assert.ok(overview.recent.some(r=>r.sig_id===498),'native reject-only fixture exists');
   assert.equal(overview.security.alerts,overview.series.reduce((sum,p)=>sum+p.alerts,0));
@@ -230,13 +229,14 @@ try {
   const alertCount = '[data-testid="alerts-total"]';
   const oldCount = await evaluate(`document.querySelector('${alertCount}').textContent.trim()`);
   await evaluate(`document.querySelector('.resource-summary .stat-card.blocked').click()`);
-  await until(`window.overviewTestParams.detection==='drops' && document.querySelector('${filterStatus}')?.textContent.includes('暂显示上一次结果')`);
+  await until(`window.overviewTestParams.detection==='drops' && document.querySelector('ndr-overview ndr-table#recent .table-scroll')?.getAttribute('aria-busy')==='true'`);
+  assert.equal(await evaluate(`!!document.querySelector('ndr-overview>[role="status"]:not(.overview-loading)')`),false,'filter changes add no status text');
   assert.equal(await evaluate(`document.querySelector('${alertCount}').textContent.trim()`),oldCount);
   await emitOverview({...overview,security:{alerts:0,error:'筛选查询超时'}});
-  await until(`${errorText}?.includes('筛选查询超时') && document.querySelector('${filterStatus}')?.textContent.includes('当前筛选尚无结果')`);
+  await until(`${errorText}?.includes('筛选查询超时') && document.querySelector('ndr-overview ndr-table#recent .table-scroll')?.getAttribute('aria-busy')==='false'`);
   assert.equal(await evaluate(`document.querySelector('${alertCount}').textContent.trim()`),oldCount);
   await emitOverview({...overview,security:{...overview.security,alerts:987},network:settledNetwork});
-  await until(`!document.querySelector('${filterStatus}') && document.querySelector('${alertCount}')?.textContent.trim()==='987'`);
+  await untilFiltered(`document.querySelector('${alertCount}')?.textContent.trim()==='987'`);
   assert.deepEqual(exceptions,[]);
   console.log('PASS: overview chart loading and error states, log-based ranks, session-cohort filters, DNS-to-UDP statistics, evidence details and native-alert CSV download');
 } finally {

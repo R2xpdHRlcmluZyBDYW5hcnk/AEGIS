@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 //go:embed schema.json
@@ -626,20 +627,22 @@ func pythonFloat(n float64) string {
 	}
 	return strconv.FormatFloat(n, 'e', -1, 64)
 }
+
+var eventCompressors = sync.Pool{New: func() any { writer, _ := zlib.NewWriterLevel(io.Discard, 6); return writer }}
+
 func eventValues(r Object, raw []byte) ([]any, error) {
 	values := make([]any, 0, len(schema.Columns))
 	var compressed []byte
 	keep := boolean(r["_native_snort"]) || r["observer"] != nil || r["type"] == "alert" || (r["type"] == "drop" && integer(r["sig_id"]) > 0)
 	if keep {
 		var b bytes.Buffer
-		writer, err := zlib.NewWriterLevel(&b, 6)
-		if err != nil {
+		writer := eventCompressors.Get().(*zlib.Writer)
+		writer.Reset(&b)
+		defer func() { writer.Reset(io.Discard); eventCompressors.Put(writer) }()
+		if _, err := writer.Write(raw); err != nil {
 			return nil, err
 		}
-		if _, err = writer.Write(raw); err != nil {
-			return nil, err
-		}
-		if err = writer.Close(); err != nil {
+		if err := writer.Close(); err != nil {
 			return nil, err
 		}
 		compressed = b.Bytes()

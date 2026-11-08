@@ -136,7 +136,7 @@ func (r *RecentEvents) Snapshot(ctx context.Context, low, high float64, overview
 		r.mu.Unlock()
 		return nil, nil, false
 	}
-	g := &Snapshot{main: tx, ctx: ctx, recent: true, bounds: [2]float64{lo, hi}, count: r.Count()}
+	g := &Snapshot{main: &queryTransaction{Tx: tx}, ctx: ctx, recent: true, bounds: [2]float64{lo, hi}, count: r.Count()}
 	return g, func() { g.Close(); r.mu.Unlock() }, true
 }
 func (r *RecentEvents) insert(ctx context.Context, rows []Object, evict bool) error {

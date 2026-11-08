@@ -67,7 +67,7 @@ def validate_native_release(release, *, execute=True):
     return validate_go_manifest(release,'backend-build.json',NATIVE_PROGRAMS,execute=execute)
 
 
-def apply(release,wait_ready,overrides,snapshot=None):
+def apply(release,wait_ready,overrides,snapshot=None,reset_event_data=False,console_only=False):
     release=Path(release)
     native=validate_native_release(release)
     maintenance=validate_go_manifest(release,'maintenance-build.json',MAINTENANCE_PROGRAMS)
@@ -110,7 +110,7 @@ def apply(release,wait_ready,overrides,snapshot=None):
         observer_active=subprocess.run(['systemctl','is-active','--quiet','ips-quic-observer'],capture_output=True).returncode==0
     resource_before={path:path.read_bytes() if path.exists() else None for path in resources}
     resources_changed=any(resource_before[path]!=data for path,data in resources.items())
-    if not changed and not retired and updated==config and not resources_changed:
+    if not changed and not retired and updated==config and not resources_changed and not reset_event_data:
         print(json.dumps({'backend_unchanged':True}));return
     changed_set = set(changed)
     if changed_set <= WEB_PROGRAMS | MANAGER_PROGRAMS | TOOL_PROGRAMS and not resources_changed:
@@ -121,9 +121,14 @@ def apply(release,wait_ready,overrides,snapshot=None):
         services = SERVICES
     if observer_active and (resources.get(observer_unit)!=resource_before.get(observer_unit) or 'ips-quic-observer' in changed_set):
         services=(*services,'ips-quic-observer')
+    if reset_event_data or console_only:
+        # This storage switch changes the console's persistence only. The
+        # detector, bridge and manager keep their current processes alive.
+        services=('ips-web',)
     start_services=[name for name in reversed(SERVICES) if name in services]+(['ips-quic-observer'] if 'ips-quic-observer' in services else [])
     engine_pid=PIDFILE.read_text() if PIDFILE.exists() else None
     client=Client()
+    database_archive=None
     paused=client.request('maintenance',enabled=True)
     if not paused.get('ok'):
         raise RuntimeError(paused.get('error','Cannot pause rule jobs'))
@@ -153,6 +158,14 @@ def apply(release,wait_ready,overrides,snapshot=None):
             if services:subprocess.run(['systemctl','stop',*services],check=True)
             if CONFIG.read_bytes()!=original:
                 raise RuntimeError('Configuration changed during update')
+            if reset_event_data:
+                if not updated.get('database_url'):raise ValueError('PostgreSQL reset requires a configured database')
+                # Detection and its logs continue. Start at the retained stream's
+                # current boundary instead of replaying retired SQLite history.
+                stream='/var/lib/ips-snort-logs/events/events.json' if Path('/etc/ips-log-storage.json').exists() else updated.get('eve','/var/log/ips/events.json')
+                output=subprocess.check_output([str(release/'ips-maintenance'),'postgresql-reset',
+                    '--database-url',updated['database_url'],'--stream',stream],text=True)
+                database_archive=json.loads(output)['archive']
             for name in changed:
                 install(release/name,BIN/name,0o644 if name.endswith(('.py','.zip','.so','.json')) else 0o755)
             if resources_changed:
@@ -173,6 +186,8 @@ def apply(release,wait_ready,overrides,snapshot=None):
                 raise RuntimeError('The restarted console did not select the installed SQLite runtime')
             if native and (health.get('backend')!='go' or health.get('go_version')!='go'+native['go_version']):
                 raise RuntimeError('The restarted console did not select the native Go backend')
+            if updated.get('database_url') and (health.get('event_database')!='postgresql' or health.get('event_db_ready') is not True or health.get('wal_compression')!='zstd' or not health.get('timescaledb_version')):
+                raise RuntimeError('The PostgreSQL event store, WAL compression or TimescaleDB is not ready')
             wait_manager()
             if services:subprocess.run(['systemctl','is-active','--quiet',*services],check=True)
             if (PIDFILE.read_text() if PIDFILE.exists() else None)!=engine_pid:
@@ -191,9 +206,18 @@ def apply(release,wait_ready,overrides,snapshot=None):
                 for key in ('db_inode','engine_pid','supervisor_pid','crontab'):
                     if before[key]!=after[key]:
                         raise RuntimeError('Protected runtime state changed: '+key)
+                if config.get('database_url') and not reset_event_data and before.get('postgres_identity')!=after.get('postgres_identity'):
+                    raise RuntimeError('PostgreSQL database identity changed during console update')
             for name in retired:(BIN/name).unlink()
         except BaseException:
             if services:subprocess.run(['systemctl','stop',*services],check=False)
+            database_recovery_error=None
+            if database_archive:
+                try:
+                    subprocess.run([str(release/'ips-maintenance'),'postgresql-reset','--database-url',updated['database_url'],
+                        '--restore',database_archive],check=True)
+                except BaseException as recovery_error:
+                    database_recovery_error=recovery_error
             for name in retired:install(backup/name,BIN/name,0o644)
             for name in changed:
                 if (backup/name).exists(): install(backup/name,BIN/name,0o644 if name.endswith(('.py','.zip','.so','.json')) else 0o755)
@@ -204,11 +228,13 @@ def apply(release,wait_ready,overrides,snapshot=None):
                     if data is None:path.unlink(missing_ok=True)
                     else:install(backup/('resource-before-'+str(index)),path,0o644)
             if resources_changed:subprocess.run(['systemctl','daemon-reload'],check=False)
+            if database_recovery_error and config.get('database_url'):
+                raise RuntimeError('Previous PostgreSQL schema remains sealed; automatic schema recovery failed, so the console stays stopped') from database_recovery_error
             if start_services:subprocess.run(['systemctl','start',*start_services],check=False)
             wait_ready(config)
             wait_manager()
             raise
-        print(json.dumps({'backend_updated':True,'backup':str(backup),'engine_preserved':True,'services_restarted':services,'retired_components':len(retired)}))
+        print(json.dumps({'backend_updated':True,'backup':str(backup),'engine_preserved':True,'services_restarted':services,'retired_components':len(retired),'event_database':'postgresql' if updated.get('database_url') else 'sqlite','database_archive':database_archive}))
 
     finally:
         client.request('maintenance',enabled=False)

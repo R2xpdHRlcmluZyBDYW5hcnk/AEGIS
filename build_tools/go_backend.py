@@ -81,11 +81,20 @@ def run(arguments, output=None, target='linux-arm64', workspace=None):
                 spec=json.loads(SOURCES.read_text())
                 go_license=(Path(go).resolve().parent.parent/'LICENSE').read_text()
                 driver_license=(Path(env['GOMODCACHE'])/'github.com/mattn'/('go-sqlite3@'+spec['sqliteDriver']['version'])/'LICENSE').read_text()
+                dependencies=[]
+                modules=subprocess.check_output([go,'list','-m','-f','{{if .Dir}}{{.Path}}|{{.Version}}|{{.Dir}}{{end}}','all'],cwd=ROOT/'backend',env=env,text=True)
+                for row in modules.splitlines():
+                    if not row:continue
+                    name,version,directory=row.split('|',2)
+                    if not version or name=='github.com/mattn/go-sqlite3':continue
+                    license_file=next((Path(directory)/name for name in ('LICENSE','LICENSE.txt','LICENSE.md','COPYING') if (Path(directory)/name).is_file()),None)
+                    if license_file is None:raise ValueError('Missing module license: '+name)
+                    dependencies.append(name+' '+version+'\n\n'+license_file.read_text()+'\n\n')
                 output.with_name(output.name+'.licenses.txt').write_text(
                     'Go '+spec['version']+' https://go.dev/LICENSE\n\n'+go_license+'\n\n'
                     'go-sqlite3 '+spec['sqliteDriver']['version']+' https://github.com/mattn/go-sqlite3\n\n'+driver_license+'\n\n'
                     'SQLite '+spec['sqliteDriver']['sqliteVersion']+' https://sqlite.org/copyright.html\n'
-                    'SQLite deliverable code is in the public domain.\n',encoding='utf-8')
+                    'SQLite deliverable code is in the public domain.\n\n'+''.join(dependencies),encoding='utf-8')
             except BaseException:
                 output.unlink(missing_ok=True)
                 output.with_name(output.name+'.licenses.txt').unlink(missing_ok=True)

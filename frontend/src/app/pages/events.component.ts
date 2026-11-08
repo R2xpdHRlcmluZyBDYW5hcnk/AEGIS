@@ -1,7 +1,7 @@
 import { Component, effect, Input, OnDestroy, OnInit, ChangeDetectionStrategy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
-import { Api, ConsoleState, LiveQuery, bytes, date, localDate, timeRange } from '../core';
+import { Api, ConsoleState, LiveQuery, date, localDate, timeRange } from '../core';
 import { TableComponent, Column, lastPageOffset } from '../table.component';
 import { RangeComponent } from '../range.component';
 import { Details } from '../details.component';
@@ -14,7 +14,6 @@ import { completeHuntFields } from '../hunt-fields';
  <div class="filter-line"><ndr-range [sessionScope]="mode==='hunt'&&query.includes('session_id:')" [(choice)]="initialChoice" [(from)]="customFrom" [(to)]="customTo" (resetRequested)="resetFilters()" (changed)="setRange($event)"/><label class="checkbox-label"><input type="checkbox" [ngModel]="realtime" (ngModelChange)="setRealtime($event)">实时订阅</label><label class="checkbox-label" *ngIf="mode==='hunt'"><input type="checkbox" [(ngModel)]="caseSensitive" (ngModelChange)="search()">区分大小写</label></div>
  <details *ngIf="mode==='hunt'" class="syntax-help"><summary>查询语法与字段</summary><p>使用 Lucene 查询语法，逻辑连接词 AND / OR / NOT 必须大写。支持字段分组、通配符和数值范围，例如 status:[400 TO 599]。IPv6 和含空格的值使用双引号。点击字段示例加入查询。</p><div class="chips"><button class="quiet" *ngFor="let f of fields" (click)="query=(query?query+' AND ':'')+f.example" [title]="f.desc">{{f.example}}</button></div></details></section>
  <p class="error" role="alert" *ngIf="error">{{error}}</p><p class="warning" *ngIf="truncated">扫描达到上限，结果可能不完整，请缩小时间范围。</p>
- <p class="warning" role="status" *ngIf="ingestLagBytes!==null&&ingestLagBytes>8388608">事件正在补录，还有 {{formatBytes(ingestLagBytes)}} 待入库。最近时段的查询结果可能不完整，空结果不代表没有流量或检测事件。</p>
  <div class="three-grid" *ngIf="mode==='drops' && aggregate"><section class="card" *ngFor="let top of dropTops"><header><h2>{{top.title}}</h2></header><ndr-table [id]="'drop-'+top.key" [columns]="top.columns" [rows]="aggregate[top.key] || []" [pagination]="false" [interactive]="true" [showDetails]="false" (rowOpen)="investigateDrop(top,$event)"/></section></div>
  <section class="card"><header><h2>{{mode==='alerts'?'事件调查队列':mode==='drops'?'阻断记录':'查询结果'}}</h2><span class="muted">{{total | number}} {{mode==='alerts'?'个事件':'条记录'}} {{refreshLabel}}<span *ngIf="asOf"> 更新于 {{formatDate(asOf)}}</span></span></header><ndr-table [id]="mode" [columns]="columns" [rows]="rows" [total]="total" [offset]="offset" [busy]="busy" [interactive]="true" (pageChange)="loadPage($event)" (rowOpen)="open($event)"/></section>
  <ndr-rule-editor *ngIf="editor" (closed)="editor=false"/>
@@ -25,7 +24,7 @@ export class EventsComponent implements OnInit,OnDestroy {
  get refreshLabel():string{return !this.realtime?'手动查询':this.requestedOffset?'实时刷新已暂停':'实时订阅';}
  dropTops=[{key:'reasons',title:'阻断处置信息',columns:[{key:'reason',label:'处置动作或原因',kind:'engineAction',width:230},{key:'count',label:'次数',width:90}]},{key:'sources',title:'源地址',columns:[{key:'ip',label:'地址',width:200},{key:'count',label:'次数',width:90}]},{key:'destinations',title:'目的地址',columns:[{key:'ip',label:'地址',width:200},{key:'count',label:'次数',width:90}]}];
  private resolvingRange=false;private rangeRevision=0;
- asOf=0;formatDate=date;ingestLagBytes:number|null=null;formatBytes=bytes;
+ asOf=0;formatDate=date;
  get columns():Column[]{return [{key:'ts',label:'时间',kind:'time',width:180},...(this.mode==='hunt'?[{key:'type',label:'类型',kind:'eventType',width:110}]:[{key:'sev',label:'级别',kind:'severity',width:90}]),{key:'summary',label:this.mode==='hunt'?'网络事件摘要':'检测签名',kind:'eventSummary',width:340},{key:'src',label:'源地址',kind:'mono',width:160},{key:'sport',label:'源端口',width:90},{key:'dst',label:'目的地址',kind:'mono',width:160},{key:'dport',label:'目的端口',width:100},{key:'proto',label:'协议',width:90},...(this.mode==='alerts'?[{key:'alert_count',label:'告警数',width:90},{key:'signature_count',label:'签名数',width:90}]:[]),{key:'action',label:'动作',kind:'action',width:100}];}
  constructor(private api:Api,public state:ConsoleState,private details:Details){
   effect(()=>{const revision=this.state.investigation();if(this.initialized&&this.mode==='hunt'&&revision!==this.seenInvestigation){this.applyInvestigation();this.search();}});
@@ -38,7 +37,6 @@ export class EventsComponent implements OnInit,OnDestroy {
   this.offset=this.requestedOffset;
   this.rows=(data.incidents||data.events||[]).map((r:any)=>({...r,summary:r.sig||r.sni||r.dns||r.host||r.reason||r.type}));
   this.total=total;this.asOf=data.as_of||data.ts||0;this.truncated=!!data.truncated;this.error='';this.busy=false;
-  this.ingestLagBytes=typeof data.ingest_lag_bytes==='number'&&Number.isFinite(data.ingest_lag_bytes)?Math.max(0,data.ingest_lag_bytes):null;
   if(this.mode==='drops'&&data.aggregate){
    this.aggregateRequest?.abort();this.aggregate=data.aggregate;this.state.viewReady(this.mode);
   }else if(this.mode==='drops'&&(!this.offset||!this.aggregate))void this.loadAggregate(data.range);

@@ -40,19 +40,20 @@ def serve():
                     process.wait()
 
 
-def native_fixture_command(static,stop,port=19096):
+def native_fixture_command(static,stop,port=19096,postgresql=False):
     """Use real Go request paths with an opt-in, local-only synthetic fixture."""
     arguments=['test','-count=1','-v','-timeout=24h','-run=^TestBrowserFixture$','./internal/console']
     env=dict(os.environ)
+    runner=ROOT/'build_tools'/('test_postgresql.py' if postgresql else 'go_backend.py')
     if platform.system()=='Windows':
         def linux(path):
             return subprocess.check_output(['wsl','-d','Debian','--','wslpath','-a',str(path).replace('\\','/')],text=True).strip()
         command=['wsl','-d','Debian','--','env','AEGIS_GO_FIXTURE_STATIC='+linux(static),
                  'AEGIS_GO_FIXTURE_STOP='+linux(stop),'AEGIS_GO_FIXTURE_PORT='+str(port),
-                 'python3','-B',linux(ROOT/'build_tools/go_backend.py'),'--',*arguments]
+                 'python3','-B',linux(runner),'--',*arguments]
     else:
         env.update(AEGIS_GO_FIXTURE_STATIC=str(static),AEGIS_GO_FIXTURE_STOP=str(stop),AEGIS_GO_FIXTURE_PORT=str(port))
-        command=[sys.executable,'-B',str(ROOT/'build_tools/go_backend.py'),'--',*arguments]
+        command=[sys.executable,'-B',str(runner),'--',*arguments]
     return command,env
 
 

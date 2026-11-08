@@ -14,6 +14,7 @@ import sqlite3
 import subprocess
 import tarfile
 import urllib.request
+import urllib.parse
 from deployment_layout import layout
 
 
@@ -25,6 +26,27 @@ def digest(path):
     return h.hexdigest()
 
 
+def database_snapshot(cfg):
+    db=Path(cfg.get('event_db') or '/var/lib/ips-web/snort-ndr.db')
+    address=cfg.get('database_url')
+    if not address:
+        return {'db_inode':db.stat().st_ino,'postgres_identity':None}
+    parsed=urllib.parse.urlparse(address)
+    params=urllib.parse.parse_qs(parsed.query)
+    host=params.get('host',[''])[0]
+    port=params.get('port',[''])[0]
+    if (parsed.scheme not in ('postgres','postgresql') or parsed.hostname or parsed.password
+            or parsed.path!='/aegis' or host not in ('/run/postgresql','/var/run/postgresql') or port!='55432'):
+        raise ValueError('Unexpected PostgreSQL deployment endpoint')
+    major=str(json.loads((Path(__file__).resolve().parent/'build_tools/postgresql-sources.json').read_text())['postgresqlMajor'])
+    query="SELECT system_identifier::text||':'||(SELECT oid::text FROM pg_database WHERE datname=current_database())||':'||COALESCE((SELECT oid::text FROM pg_namespace WHERE nspname='aegis'),'0') FROM pg_control_system()"
+    identity=subprocess.check_output(['runuser','-u','postgres','--',f'/usr/lib/postgresql/{major}/bin/psql',
+        '-X','-At','-v','ON_ERROR_STOP=1','-h',host,'-p',port,'-d','aegis','-c',query],text=True,timeout=15).strip()
+    if not re.fullmatch(r'[0-9]+:[0-9]+:[0-9]+',identity):
+        raise ValueError('PostgreSQL database identity is unavailable')
+    return {'db_inode':db.stat().st_ino if db.exists() else None,'postgres_identity':identity}
+
+
 def snapshot(cfg):
     paths = [p for p in Path('/etc/snort').rglob('*') if p.is_file()]
     current=layout()
@@ -33,11 +55,10 @@ def snapshot(cfg):
     schedule = Path('/var/lib/snort/ips-rule-schedule.json')
     if schedule.exists():
         paths.append(schedule)
-    db = Path(cfg.get('event_db') or '/var/lib/ips-web/snort-ndr.db')
     cron = subprocess.run(['crontab', '-l'], capture_output=True) if shutil.which('crontab') else None
     supervisor = subprocess.run(['systemctl', 'show', 'ips', '-p', 'MainPID', '--value'], capture_output=True)
     return {'files': {str(p): digest(p) for p in paths if p.exists()},
-            'db_inode': db.stat().st_ino,
+            **database_snapshot(cfg),
             'engine_pid': Path('/run/snort/snort.pid').read_text().strip() if Path('/run/snort/snort.pid').exists() else None,
             'supervisor_pid': supervisor.stdout.decode().strip() if supervisor.returncode == 0 else None,
             'console_pids': subprocess.run(['pgrep', '-f', '^'+re.escape(str(Path(current['program_dir'])/'ips-web'))+r'( |$)'],capture_output=True).stdout.decode().split(),
@@ -116,7 +137,7 @@ def main():
         for name, expected in preserved_static.items():
             assert digest(static / name) == expected, 'Existing asset changed: ' + name
         after = snapshot(cfg)
-        for key in ('files', 'db_inode', 'engine_pid', 'supervisor_pid', 'console_pids', 'crontab'):
+        for key in ('files', 'db_inode', 'postgres_identity', 'engine_pid', 'supervisor_pid', 'console_pids', 'crontab'):
             assert before[key] == after[key], 'Protected state changed: ' + key
     except BaseException:
         if switched:

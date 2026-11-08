@@ -32,6 +32,7 @@ deploy-angular.py
 deploy-backend.py
 deploy-log-storage.py
 deploy-native-backend.py
+deploy-postgresql.py
 deploy-native-response.py
 deploy-nft.py
 deploy-quic-observer.py
@@ -147,6 +148,7 @@ tests/test_deploy_backend.py
 tests/test_deploy_nft.py
 tests/test_go_backend.py
 tests/test_go_runtime.py
+tests/test_postgresql_deploy.py
 tests/test_legacy_cleanup.py
 tests/test_log_storage.py
 tests/test_native_deploy.py

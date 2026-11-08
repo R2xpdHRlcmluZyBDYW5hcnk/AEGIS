@@ -856,6 +856,7 @@ func (c *RuleCatalog) Search(ctx context.Context, params Object, selector string
 		}
 	}
 	out := []Object{}
+	total := 0
 	for i := len(rows) - 1; i >= 0; i-- {
 		r := rows[i]
 		if !r.SourceEnabled {
@@ -898,14 +899,12 @@ func (c *RuleCatalog) Search(ctx context.Context, params Object, selector string
 		if hidden {
 			continue
 		}
-		out = append(out, r.JSON())
+		if total >= offset && len(out) < limit {
+			out = append(out, r.JSON())
+		}
+		total++
 	}
-	total := len(out)
-	page := []Object{}
-	if offset < total {
-		page = out[offset:min(total, offset+limit)]
-	}
-	result := Object{"total": total, "rules": page, "offset": offset, "limit": limit}
+	result := Object{"total": total, "rules": out, "offset": offset, "limit": limit}
 	if selector != "" {
 		result["selector"] = selector
 	}

@@ -23,6 +23,7 @@ type Config struct {
 	User, PasswordSHA, PasswordPBKDF          string
 	SecureCookie                              bool
 	StaticDir, EventDB, Stream, ManagerSocket string
+	DatabaseURL                               string
 	ReadWorkers                               int
 	PreloadBytes                              int64
 	SessionTTL                                time.Duration
@@ -50,6 +51,7 @@ func LoadConfig(path string) (Config, error) {
 			return Config{}, errors.New("概览内存快照目录不可用")
 		}
 	}
+	c.DatabaseURL = strings.TrimSpace(text(raw["database_url"]))
 	if root := os.Getenv("IPS_LOG_STORAGE_ROOT"); root != "" {
 		if root != "/var/lib/ips-snort-logs" {
 			return Config{}, errors.New("服务日志目录与安装布局不一致")

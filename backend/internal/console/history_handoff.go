@@ -1,6 +1,7 @@
 package console
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -141,6 +142,16 @@ func (h *historyHandoff) remove() error {
 }
 
 func removeHistoryDatabaseBackup(backup, webState string) error {
+	if webState == resetWebState && strings.HasPrefix(backup, "postgresql:") {
+		address, err := configuredPostgresMaintenance()
+		if err != nil {
+			return err
+		}
+		if address == "" {
+			return errors.New("PostgreSQL 维护配置不可用")
+		}
+		return removePostgresHistory(context.Background(), address, strings.TrimPrefix(backup, "postgresql:"))
+	}
 	if filepath.Dir(backup) != webState || !strings.HasPrefix(filepath.Base(backup), "history-backup-") {
 		return errors.New("事件库备份清理路径无效")
 	}

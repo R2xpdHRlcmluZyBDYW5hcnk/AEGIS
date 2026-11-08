@@ -101,6 +101,16 @@ func resetHistoryDatabase(database, stream string) (string, error) {
 	return resetHistoryDatabaseAt(database, stream, resetWebState)
 }
 func resetHistoryDatabaseAt(database, stream, webState string) (string, error) {
+	if webState == resetWebState {
+		address, err := configuredPostgresMaintenance()
+		if err != nil {
+			return "", err
+		}
+		if address != "" {
+			archive, err := resetPostgresHistory(context.Background(), address, stream)
+			return "postgresql:" + archive, err
+		}
+	}
 	return switchHistoryDatabase(database, stream, webState, os.Rename)
 }
 func switchHistoryDatabase(database, stream, webState string, move func(string, string) error) (string, error) {

@@ -49,7 +49,7 @@ def wait_ready(cfg):
         try:
             with opener.open(url, timeout=2) as response:
                 health = json.load(response)
-                if health.get('ok'):
+                if health.get('ok') and health.get('event_db_ready',True):
                     return health
         except (OSError, ValueError):
             pass
@@ -60,6 +60,9 @@ def wait_ready(cfg):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--release', type=Path, required=True)
+    parser.add_argument('--postgresql',action='store_true')
+    parser.add_argument('--reset-event-data',action='store_true')
+    parser.add_argument('--console-only',action='store_true')
     for name in RESOURCE_LIMITS:
         parser.add_argument('--'+name.replace('_','-'),type=float if name in ('cache_memory_percent','stats_duty_percent') else int)
     args = parser.parse_args()
@@ -77,15 +80,26 @@ def main():
     spec = importlib.util.spec_from_file_location('static_deployer', release / 'deploy-angular.py')
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
-    return upgrade(release,helper,overrides)
+    return upgrade(release,helper,overrides,postgresql=args.postgresql,reset_event_data=args.reset_event_data,console_only=args.console_only)
 
 
-def upgrade(release,helper,overrides):
+def upgrade(release,helper,overrides,postgresql=False,reset_event_data=False,console_only=False):
     if Path('/etc/systemd/system/ips-web.service.d/50-isolation.conf').is_file():
         spec = importlib.util.spec_from_file_location('web_isolation', release / 'deploy-native-backend.py')
         isolation = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(isolation)
-        return isolation.apply(release, wait_ready, overrides, helper.snapshot)
+        config=json.loads(CONFIG.read_bytes())
+        if reset_event_data and not postgresql:raise ValueError('--reset-event-data requires --postgresql')
+        if postgresql and not config.get('database_url') and not reset_event_data:
+            raise ValueError('Switching SQLite to PostgreSQL requires explicit --reset-event-data')
+        if postgresql or config.get('database_url'):
+            # Validate the complete release before installing runtime dependencies.
+            isolation.validate_native_release(release)
+            database_spec=importlib.util.spec_from_file_location('postgresql_dependency',release/'deploy-postgresql.py')
+            dependency=importlib.util.module_from_spec(database_spec);database_spec.loader.exec_module(dependency)
+            installed=dependency.install()
+            overrides=dict(overrides,database_url=installed['database_url'])
+        return isolation.apply(release, wait_ready, overrides, helper.snapshot,reset_event_data=reset_event_data,console_only=console_only)
     raise RuntimeError('Native Go backend requires the independent isolated service layout')
 
 

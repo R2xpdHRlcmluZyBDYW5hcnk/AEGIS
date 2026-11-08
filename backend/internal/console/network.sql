@@ -16,8 +16,8 @@ WITH selected AS MATERIALIZED (SELECT id,ts,type,COALESCE(src,'') src,COALESCE(d
           MAX(resp_pkts) received,MAX(ts) latest FROM candidates GROUP BY session_id
         UNION ALL SELECT src,dst,proto,app,volume,orig_pkts,resp_pkts,ts
         FROM selected WHERE session_id='' AND type='flow')
-      SELECT 'metrics' kind,'' name,COUNT(*) n,COALESCE(SUM(payload),0) volume,COALESCE(SUM(sent>0 AND received>0),0) bidirectional,
-        COALESCE(SUM((sent>0)!=(received>0)),0) one_way,MAX(latest) latest,
+      SELECT 'metrics' kind,'' name,COUNT(*) n,COALESCE(SUM(payload),0) volume,COALESCE(SUM(CASE WHEN sent>0 AND received>0 THEN 1 ELSE 0 END),0) bidirectional,
+        COALESCE(SUM(CASE WHEN (sent>0)!=(received>0) THEN 1 ELSE 0 END),0) one_way,MAX(latest) latest,
         (SELECT COUNT(*) FROM (SELECT src ip FROM connections WHERE src!=''
                               UNION SELECT dst ip FROM connections WHERE dst!='')) addresses
       FROM connections

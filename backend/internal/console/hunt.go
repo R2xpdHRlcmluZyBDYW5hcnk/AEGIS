@@ -360,7 +360,7 @@ func glob(pattern, value string) bool {
 
 func compileHunt(node *HuntNode, icase bool) (string, []any, error) {
 	if node == nil {
-		return "1", nil, nil
+		return "TRUE", nil, nil
 	}
 	switch node.Op {
 	case "and", "or":
@@ -377,7 +377,7 @@ func compileHunt(node *HuntNode, icase bool) (string, []any, error) {
 		return strings.Join(parts, " "+strings.ToUpper(node.Op)+" "), args, nil
 	case "not":
 		part, args, err := compileHunt(node.Children[0], icase)
-		return "NOT COALESCE((" + part + "),0)", args, err
+		return "NOT COALESCE((" + part + "),FALSE)", args, err
 	case "bare":
 		column := "COALESCE(CASE WHEN type='flow' THEN flow_summary(app,proto,state,reason,sig) ELSE sig END,'')||' '||COALESCE(src,'')||' '||COALESCE(dst,'')||' '||COALESCE(app,'')||' '||COALESCE(reason,'')||' '||COALESCE(cat,'')||' '||COALESCE(proto,'')||' '||COALESCE(type,'')"
 		value := node.Value

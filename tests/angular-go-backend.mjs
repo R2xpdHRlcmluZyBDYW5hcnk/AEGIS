@@ -123,8 +123,8 @@ try {
   await holdOverviewRequests();await nav('overview');
   await until(`document.querySelector('[data-testid="alerts-total"]')?.textContent.trim()==='3'`);
   assert.equal(await evaluate(`!!document.querySelector('[data-testid="overview-loading"]')`),false,'returning overview retains its snapshot while requests are held');
-  await until(`document.querySelector('[data-testid="overview-filter-status"]')?.textContent.includes('正在更新概览')`);
-  await releaseOverviewRequests();await until(`!document.querySelector('[data-testid="overview-filter-status"]')`);
+  assert.equal(await evaluate(`!!document.querySelector('ndr-overview>[role="status"]:not(.overview-loading)')`),false,'refreshing a retained snapshot adds no status text');
+  await releaseOverviewRequests();
   await nav('alerts');await until(`document.querySelector('ndr-events ndr-table tbody tr')?.textContent.includes('Fixture')`);
   await evaluate(`document.querySelector('ndr-events ndr-table tbody tr').click()`);
   await until(`!!document.querySelector('.incident-heading')`);

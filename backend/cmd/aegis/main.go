@@ -21,7 +21,7 @@ func run(ctx context.Context, args []string) error {
 	}
 	name := filepath.Base(os.Args[0])
 	mode := map[string]string{"ips-web": "web", "ips-rule-manager": "manager", "ips-event-bridge": "bridge", "ips-snort-rules": "rules", "ips-supervisor": "supervisor", "snort-home-net": "home-net", "ips-quic-observer": "quic-observer", "recover-event-db": "recover-event-db"}[name]
-	if len(args) > 0 && strings.Contains("|web|manager|bridge|rules|history-reset|supervisor|home-net|quic-observer|recover-event-db|resources|", "|"+args[0]+"|") {
+	if len(args) > 0 && strings.Contains("|web|manager|bridge|rules|history-reset|postgresql-reset|supervisor|home-net|quic-observer|recover-event-db|resources|", "|"+args[0]+"|") {
 		mode, args = args[0], args[1:]
 	}
 	if mode == "" {
@@ -32,6 +32,8 @@ func run(ctx context.Context, args []string) error {
 	}
 	flags := flag.NewFlagSet(mode, flag.ContinueOnError)
 	switch mode {
+	case "postgresql-reset":
+		return console.RunPostgresMaintenance(ctx, args)
 	case "resources":
 		return console.RunResourceBudget(ctx, args)
 	case "recover-event-db":

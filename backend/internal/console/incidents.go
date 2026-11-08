@@ -71,29 +71,62 @@ func incidents(ctx context.Context, g *Snapshot, params url.Values, low, high fl
 		offset = 0
 	}
 	source := "WITH incident_events AS MATERIALIZED (SELECT id,type,session_id,community,flow_id,event_key,ts,sev,sid,sig,src,dst,sport,dport,proto,app,action,cat,gid," + incidentKeySQL + " incident_id" + securitySource(where, true) + ") "
-	grouped := `,grouped AS (SELECT incident_id,MAX(session_id) session_id,MIN(ts) first_ts,MAX(ts) last_ts,COALESCE(MIN(NULLIF(sev,0)),0) sev,COUNT(*) alert_count,COUNT(DISTINCT COALESCE(gid,1)||':'||COALESCE(sid,'')||':'||sig) signature_count,MAX(action IN ('blocked','drop','reject')) blocked FROM incident_events GROUP BY incident_id),ranked AS (SELECT *,ROW_NUMBER() OVER(PARTITION BY incident_id ORDER BY ts DESC,id DESC) rn FROM incident_events) SELECT g.*,r.src,r.dst,r.sport,r.dport,r.proto,r.sig,r.sid,r.cat FROM grouped g JOIN ranked r ON r.incident_id=g.incident_id AND r.rn=1 ORDER BY g.last_ts DESC,g.incident_id LIMIT ? OFFSET ?`
-	results, err := g.Many([]statement{{source + "SELECT COUNT(DISTINCT incident_id) n FROM incident_events", bound}, {strings.TrimSpace(source) + grouped, append(append([]any{}, bound...), limit, offset)}})
+	grouped := `,grouped AS (SELECT incident_id,MAX(session_id) session_id,MIN(ts) first_ts,MAX(ts) last_ts,COALESCE(MIN(NULLIF(sev,0)),0) sev,COUNT(*) alert_count,COUNT(DISTINCT COALESCE(gid,1)||':'||COALESCE(CAST(sid AS TEXT),'')||':'||sig) signature_count,MAX(CASE WHEN action IN ('blocked','drop','reject') THEN 1 ELSE 0 END) blocked FROM incident_events GROUP BY incident_id),ranked AS (SELECT *,ROW_NUMBER() OVER(PARTITION BY incident_id ORDER BY ts DESC,id DESC) rn FROM incident_events) SELECT g.*,r.src,r.dst,r.sport,r.dport,r.proto,r.sig,r.sid,r.cat FROM grouped g JOIN ranked r ON r.incident_id=g.incident_id AND r.rn=1 ORDER BY g.last_ts DESC,g.incident_id LIMIT ? OFFSET ?`
+	results, err := g.Many([]statement{{"SELECT COUNT(DISTINCT " + incidentKeySQL + ") n" + securitySource(where, true), bound}, {strings.TrimSpace(source) + grouped, append(append([]any{}, bound...), limit, offset)}})
 	if err != nil {
 		return nil, err
 	}
 	out := []Object{}
+	signatures := map[string][]Object{}
+	blockedIDs := map[string]bool{}
+	if len(results[1]) > 0 {
+		// Enrich the entire page in two queries, rather than querying every
+		// incident again. Keep signature limits per incident, including details.
+		clauses, values, sessions := []string{}, []any{}, []any{}
+		for _, row := range results[1] {
+			id := text(row["incident_id"])
+			if strings.HasPrefix(id, "session:") {
+				sessions = append(sessions, strings.TrimPrefix(id, "session:"))
+				continue
+			}
+			filter, args, err := incidentFilter(id)
+			if err != nil {
+				return nil, err
+			}
+			clauses = append(clauses, "("+strings.Join(filter, " AND ")+")")
+			values = append(values, args...)
+		}
+		if len(sessions) > 0 {
+			clauses = append(clauses, "(session_id<>'' AND session_id IN ("+strings.TrimSuffix(strings.Repeat("?,", len(sessions)), ",")+"))")
+			values = append(values, sessions...)
+		}
+		pageFilter := "(" + strings.Join(clauses, " OR ") + ")"
+		pageArgs := append([]any{low * 1000, high * 1000}, values...)
+		hits := "WITH signature_counts AS (SELECT " + incidentKeySQL + " incident_id,sig,sid,COALESCE(gid,1) gid,sev,cat,COUNT(*) count,MIN(ts)/1000.0 first_ts,MAX(ts)/1000.0 last_ts" + securitySource(" WHERE ts>=? AND ts<=? AND type IN ('alert','drop') AND "+detectionSQL+" AND "+pageFilter, true) + " GROUP BY incident_id,sig,sid,sev,cat,gid) SELECT * FROM (SELECT *,ROW_NUMBER() OVER(PARTITION BY incident_id ORDER BY count DESC,CASE WHEN sev>0 THEN sev ELSE 99 END,sig,sid) signature_rank FROM signature_counts) ranked_signatures WHERE signature_rank<=? ORDER BY incident_id,signature_rank"
+		enriched, err := g.Many([]statement{
+			{hits, append(append([]any{}, pageArgs...), signatureLimit)},
+			{"SELECT DISTINCT " + incidentKeySQL + " incident_id FROM events WHERE ts>=? AND ts<=? AND type='drop' AND action IN ('blocked','drop','reject') AND " + pageFilter, pageArgs},
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, hit := range enriched[0] {
+			id := text(hit["incident_id"])
+			delete(hit, "incident_id")
+			delete(hit, "signature_rank")
+			signatures[id] = append(signatures[id], hit)
+		}
+		for _, row := range enriched[1] {
+			blockedIDs[text(row["incident_id"])] = true
+		}
+	}
 	for _, row := range results[1] {
 		id := text(row["incident_id"])
-		filter, values, err := incidentFilter(id)
-		if err != nil {
-			return nil, err
+		hits := signatures[id]
+		if hits == nil {
+			hits = []Object{}
 		}
-		sigArgs := append([]any{low * 1000, high * 1000}, values...)
-		hits, err := queryRows(ctx, g.main, "SELECT sig,sid,COALESCE(gid,1) gid,sev,cat,COUNT(*) count,MIN(ts)/1000.0 first_ts,MAX(ts)/1000.0 last_ts"+securitySource(" WHERE ts>=? AND ts<=? AND type IN ('alert','drop') AND "+detectionSQL+" AND "+strings.Join(filter, " AND "), true)+" GROUP BY sig,sid,sev,cat,gid ORDER BY count DESC,CASE WHEN sev>0 THEN sev ELSE 99 END,sig,sid LIMIT ?", append(sigArgs, signatureLimit)...)
-		if err != nil {
-			return nil, err
-		}
-		blocked := integer(row["blocked"]) > 0
-		var drops int64
-		if err = g.main.QueryRowContext(ctx, "SELECT COUNT(*) FROM events WHERE ts>=? AND ts<=? AND type='drop' AND action IN ('blocked','drop','reject') AND "+strings.Join(filter, " AND "), sigArgs...).Scan(&drops); err != nil {
-			return nil, err
-		}
-		blocked = blocked || drops > 0
+		blocked := integer(row["blocked"]) > 0 || blockedIDs[id]
 		action := "allowed"
 		if blocked {
 			action = "blocked"

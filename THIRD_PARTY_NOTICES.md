@@ -31,3 +31,8 @@ Go 1.27.3 工具链与标准库使用 BSD-3-Clause；`github.com/mattn/go-sqlite
 ## 外部更新器与规则
 
 PulledPork3 的外部安装与仓库保持独立。本仓库的 Go 规则更新器依据 Snort 归档、策略和下载接口独立实现兼容功能，不包含或执行 PulledPork3 源码、补丁或二进制。第三方规则按来源许可及账户权限获取，不随仓库分发。Snort、Cisco、Talos、MITRE 等名称仅用于说明来源和兼容性，不表示官方关联或认可。
+
+
+## PostgreSQL 事件存储
+
+PostgreSQL 由官方 PGDG APT 仓库安装，使用 PostgreSQL License；TimescaleDB Community 由 Timescale 官方仓库安装，列存功能按 [Timescale License](https://www.tigerdata.com/legal/licenses) 提供。两者软件包、源码和仓库公钥不包含在本项目发布包中。Go PostgreSQL 驱动 pgx 及其依赖版本见 backend/go.mod、backend/go.sum，运行代码的相应许可随 backend-licenses.txt 交付。

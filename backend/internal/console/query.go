@@ -24,8 +24,8 @@ type statement struct {
 }
 type Snapshot struct {
 	recent      bool
-	main        *sql.Tx
-	helpers     []*sql.Tx
+	main        *queryTransaction
+	helpers     []*queryTransaction
 	connections []*sql.Conn
 	release     func()
 	ctx         context.Context
@@ -62,12 +62,15 @@ func (s *Store) Snapshot(ctx context.Context, parallel bool) (*Snapshot, error) 
 			group.Close()
 		}
 	}()
-	if parallel && s.Gate.TryLock() {
-		defer s.Gate.Unlock()
+	if parallel && (s.Postgres || s.Gate.TryLock()) {
+		if !s.Postgres {
+			defer s.Gate.Unlock()
+		}
 		n, release := reserveSQLHelpers()
-		group.helpers = make([]*sql.Tx, n)
+		group.helpers = make([]*queryTransaction, n)
 		group.release = release
 	}
+	groupSnapshot := ""
 	reserved := len(group.helpers)
 	group.helpers = nil
 	for i := 0; i <= reserved; i++ {
@@ -76,17 +79,31 @@ func (s *Store) Snapshot(ctx context.Context, parallel bool) (*Snapshot, error) 
 			return nil, err
 		}
 		group.connections = append(group.connections, conn)
-		tx, err := conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+		options := &sql.TxOptions{ReadOnly: true}
+		if s.Postgres {
+			options.Isolation = sql.LevelRepeatableRead
+		}
+		tx, err := conn.BeginTx(ctx, options)
 		if err != nil {
 			return nil, err
 		}
+		wrapped := &queryTransaction{Tx: tx, postgres: s.Postgres}
 		if i == 0 {
-			group.main = tx
+			group.main = wrapped
 		} else {
-			group.helpers = append(group.helpers, tx)
+			group.helpers = append(group.helpers, wrapped)
 		}
 		var name string
-		err = tx.QueryRowContext(ctx, "SELECT name FROM sqlite_master LIMIT 1").Scan(&name)
+		if s.Postgres {
+			if i == 0 {
+				err = tx.QueryRowContext(ctx, "SELECT pg_export_snapshot()").Scan(&name)
+				groupSnapshot = name
+			} else {
+				_, err = tx.ExecContext(ctx, "SET TRANSACTION SNAPSHOT '"+groupSnapshot+"'")
+			}
+		} else {
+			err = tx.QueryRowContext(ctx, "SELECT name FROM sqlite_master LIMIT 1").Scan(&name)
+		}
 		if err != nil && err != sql.ErrNoRows {
 			return nil, err
 		}
@@ -120,7 +137,7 @@ func (g *Snapshot) Many(statements []statement) ([][]Object, error) {
 	var wg sync.WaitGroup
 	var once sync.Once
 	var failure error
-	worker := func(tx *sql.Tx) {
+	worker := func(tx *queryTransaction) {
 		for ctx.Err() == nil {
 			index := int(next.Add(1) - 1)
 			if index >= len(statements) {
@@ -137,7 +154,7 @@ func (g *Snapshot) Many(statements []statement) ([][]Object, error) {
 	}
 	for _, helper := range g.helpers[:min(len(g.helpers), len(statements)-1)] {
 		wg.Add(1)
-		go func(tx *sql.Tx) { defer wg.Done(); worker(tx) }(helper)
+		go func(tx *queryTransaction) { defer wg.Done(); worker(tx) }(helper)
 	}
 	worker(g.main)
 	wg.Wait()
@@ -236,7 +253,7 @@ func eventFilter(params url.Values, hunt bool) ([]string, []any, error) {
 				if column == "sig" {
 					column = "CASE WHEN type='flow' THEN flow_summary(app,proto,state,reason,sig) ELSE sig END"
 				}
-				checks = append(checks, "INSTR(LOWER(COALESCE("+column+",'')),?)>0")
+				checks = append(checks, "INSTR(LOWER(COALESCE(CAST("+column+" AS TEXT),'')),?)>0")
 				args = append(args, strings.ToLower(q))
 			}
 			parts = append(parts, "("+strings.Join(checks, " OR ")+")")
@@ -249,10 +266,10 @@ func securitySource(where string, dedup bool) string {
 		return " FROM events" + where
 	}
 	same := []string{}
-	for _, key := range strings.Fields("ts gid sid rev sig src sport dst dport proto tx") {
-		same = append(same, "a."+key+" IS e."+key)
+	for _, key := range strings.Fields("gid sid rev sig src sport dst dport proto tx") {
+		same = append(same, "a."+key+" IS NOT DISTINCT FROM e."+key)
 	}
-	return " FROM (SELECT e.* FROM events e" + where + " AND (e.type='alert' OR COALESCE(e.session_id,'')='' OR NOT EXISTS (SELECT 1 FROM events a WHERE a.type='alert' AND " + strings.Join(same, " AND ") + " AND a.session_id=e.session_id)))"
+	return " FROM (SELECT e.* FROM events e" + where + " AND (e.type='alert' OR COALESCE(e.session_id,'')='' OR NOT EXISTS (SELECT 1 FROM events a WHERE a.type='alert' AND a.session_id<>'' AND a.ts=e.ts AND " + strings.Join(same, " AND ") + " AND a.session_id=e.session_id)))"
 }
 func search(ctx context.Context, g *Snapshot, low, high float64, parts []string, args []any, limit, offset int, list, network, dedup bool) (int64, []Object, error) {
 	results, err := g.Many(searchStatements(low, high, parts, args, limit, offset, list, dedup))
@@ -409,7 +426,7 @@ func securityStatements(low, high float64, parts []string, args []any, dedup boo
 		extra = " WHERE "
 	}
 	detections := securitySource(where+" AND "+detectionSQL, dedup)
-	queries := []statement{{"SELECT COUNT(*) total,SUM(" + detectionSQL + ") alerts,SUM(" + blockedSQL + ") drops,SUM(" + detectionSQL + " AND sev=1) high,COUNT(DISTINCT NULLIF(src,'')) sources_count,COUNT(DISTINCT NULLIF(dst,'')) destinations_count,MAX(ts) newest" + source, bound}, {"SELECT sig,sev,sid,COUNT(*) count" + detections + " GROUP BY sig,sev,sid ORDER BY count DESC,sig LIMIT ?", append(append([]any{}, bound...), top)}}
+	queries := []statement{{"SELECT COUNT(*) total,SUM(CASE WHEN " + detectionSQL + " THEN 1 ELSE 0 END) alerts,SUM(CASE WHEN " + blockedSQL + " THEN 1 ELSE 0 END) drops,SUM(CASE WHEN " + detectionSQL + " AND sev=1 THEN 1 ELSE 0 END) high,COUNT(DISTINCT NULLIF(src,'')) sources_count,COUNT(DISTINCT NULLIF(dst,'')) destinations_count,MAX(ts) newest" + source, bound}, {"SELECT sig,sev,sid,COUNT(*) count" + detections + " GROUP BY sig,sev,sid ORDER BY count DESC,sig LIMIT ?", append(append([]any{}, bound...), top)}}
 	for _, column := range []string{"src", "dst", "reason", "proto"} {
 		queries = append(queries, statement{"SELECT " + column + " value,COUNT(*) count" + source + extra + column + "!='' GROUP BY " + column + " ORDER BY count DESC," + column + " LIMIT ?", append(append([]any{}, bound...), top)})
 	}
@@ -455,7 +472,7 @@ func seriesStatement(low, high float64, bucket int, parts []string, args []any) 
 		where += " AND " + strings.Join(parts, " AND ")
 	}
 	bound := append([]any{span * 1000, low * 1000, high * 1000}, args...)
-	return statement{"SELECT CAST(ts/? AS INTEGER) slot,SUM(" + detectionSQL + ") alerts,SUM(" + blockedSQL + ") drops" + securitySource(where, true) + " GROUP BY slot", bound}
+	return statement{"SELECT CAST(ts/? AS INTEGER) slot,SUM(CASE WHEN " + detectionSQL + " THEN 1 ELSE 0 END) alerts,SUM(CASE WHEN " + blockedSQL + " THEN 1 ELSE 0 END) drops" + securitySource(where, true) + " GROUP BY slot", bound}
 }
 func seriesResult(rows []Object, low, high float64, bucket int) []Object {
 	span := float64(bucket * 60)

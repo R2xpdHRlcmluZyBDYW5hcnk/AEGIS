@@ -106,7 +106,7 @@ export class LiveQuery {
     if(topic){
       const query=new URLSearchParams({...params,topic} as Record<string,string>);
       this.source=new EventSource('/api/stream?'+query);
-      this.initial=setTimeout(()=>{if(revision===this.revision)void fetch();},2000);
+      this.initial=setTimeout(()=>{if(revision===this.revision&&this.source?.readyState!==EventSource.OPEN)void fetch();},2000);
       this.source.onmessage=e=>{if(revision!==this.revision)return;clearTimeout(this.initial);clearTimeout(this.interruption);this.interruption=undefined;try{const data=JSON.parse(e.data);if(data.status===401){location.assign('/login');return;}if(data.error){this.api.zone.run(()=>this.error(data.error));return;}this.request?.abort();this.request=undefined;accept(data);}catch{this.api.zone.run(()=>this.error('实时数据格式错误'));}};
       this.source.onerror=()=>{if(revision===this.revision){interrupted('实时连接中断，正在重连；保留最近数据');void fetch();}};
       this.fallback=setInterval(()=>{if(!document.hidden && this.source?.readyState!==EventSource.OPEN)void fetch();},5000);

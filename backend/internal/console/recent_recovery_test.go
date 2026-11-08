@@ -126,7 +126,7 @@ func TestRecentRetainsSnapshotOnSourceFailureAndClearsWarning(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer broken.Close()
-	store.Readers = broken
+	store.Readers = &eventDatabase{DB: broken}
 	defer func() { store.Readers = original }()
 	if err = recent.refreshOnce(ctx); err == nil {
 		t.Fatal("source failure not detected")

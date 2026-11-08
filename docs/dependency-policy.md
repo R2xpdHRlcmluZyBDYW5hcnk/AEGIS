@@ -84,3 +84,14 @@ Go 控制台不加载 Luqum/PLY 或旧 Python Web 模块。发布包仍包含维
 ## 研判 Markdown 依赖（2026-11-05）
 
 Australia/Perth，MCP Search Service 查询 [Marked 的 npm 发布信息](https://www.npmjs.com/package/marked)、[渲染器扩展接口](https://marked.js.org/using_pro#renderer)及 [Angular HTML 安全绑定](https://angular.dev/best-practices/security)。核定 Marked 18.1.3 为稳定发行版，MIT，锁文件确认 Node.js >= 20，兼容项目工具链。解析器只在浏览器处理研判文本。原始 HTML 转义为文本，图片与链接渲染标签，HTML 输出通过 Angular 常规绑定净化。
+
+
+## PostgreSQL 与 TimescaleDB（2026-11-08）
+
+查询时间：2026-11-08 23:00 Australia/Perth（UTC+08:00）。查询前检查现有依赖记录，随后通过 MCP Search Service 核对 [PostgreSQL 版本政策](https://www.postgresql.org/support/versioning/)、[PGDG Debian 安装说明](https://www.postgresql.org/download/linux/debian/)、[TimescaleDB 平台支持](https://www.tigerdata.com/docs/get-started/timescaledb-supported-platforms)及 [列存策略](https://www.tigerdata.com/docs/reference/timescaledb/hypercore/add_columnstore_policy)。通过 GitHub CLI 读取上游 release API，排除预发布；再核对 Timescale 官方 APT 的 trixie AMD64、ARM64 Packages 索引。
+
+核定 PostgreSQL 18 当前稳定修订 18.6，TimescaleDB 2.31.0 和 pgx v5.11.0。PostgreSQL 没有独立 LTS 发行线，各大版本有五年支持期。部署安装 PostgreSQL 18 分支的最新稳定修订，不安装 beta、RC 或 devel；升级到下一大版本前更新核定记录并重新验证扩展兼容性。TimescaleDB 包固定为核查通过的 2.31.0，Go 模块精确版本和校验值固定在 go.mod、go.sum，传递依赖采用驱动声明的兼容范围。
+
+仓库主签名密钥指纹、官方获取地址及包选型保存在 `build_tools/postgresql-sources.json`。公钥只下载到部署系统的独立 keyring 或本地测试临时目录，不进入源码或发布包。指纹是仓库信任信息，不绑定 PostgreSQL 包修订号；密钥轮换采用经核实的允许指纹列表，不接受未知签名。
+
+PostgreSQL 使用 PostgreSQL License，pgx 使用 MIT；TimescaleDB Community 的列存和保留策略使用 TSL，可按该许可免费自建，不能视作纯 Apache 2.0 组件。数据库和扩展由 APT 独立安装，不作为控制台源码或二进制包分发。构建器为 Go 新增模块提取相应许可并写入 backend-licenses.txt。

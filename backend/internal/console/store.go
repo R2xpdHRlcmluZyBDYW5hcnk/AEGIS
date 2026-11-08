@@ -37,21 +37,25 @@ type Querier interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 }
 type Store struct {
-	Path, Stream    string
-	Writer, Readers *sql.DB
-	Gate            sync.Mutex
-	stateMu         sync.RWMutex
-	writeError      string
-	blocked         bool
-	cursor          Cursor
-	recentCursor    Cursor
-	cutoff          Cursor
-	started         bool
-	Pool            *Pool
-	Revision        atomic.Uint64
-	Generation      atomic.Uint64
-	Cap             int64
-	changed         chan struct{}
+	Path, Stream string
+	Writer       *sql.DB
+	Readers      *eventDatabase
+	Postgres     bool
+	DatabaseURL  string
+	StorageInfo  Object
+	Gate         sync.Mutex
+	stateMu      sync.RWMutex
+	writeError   string
+	blocked      bool
+	cursor       Cursor
+	recentCursor Cursor
+	cutoff       Cursor
+	started      bool
+	Pool         *Pool
+	Revision     atomic.Uint64
+	Generation   atomic.Uint64
+	Cap          int64
+	changed      chan struct{}
 }
 type Cursor struct {
 	Device uint64 `json:"device"`
@@ -219,7 +223,7 @@ func NewStore(path, stream string, pool *Pool) (*Store, error) {
 	}
 	r.SetMaxOpenConns(2*WorkerCount() + 1)
 	r.SetMaxIdleConns(9)
-	s.Readers = r
+	s.Readers = &eventDatabase{DB: r}
 	if err = r.Ping(); err != nil {
 		r.Close()
 		return nil, err
@@ -235,6 +239,11 @@ func (s *Store) Close() error {
 	return r
 }
 func (s *Store) Error() string { s.stateMu.RLock(); defer s.stateMu.RUnlock(); return s.writeError }
+func (s *Store) Ready() bool {
+	s.stateMu.RLock()
+	defer s.stateMu.RUnlock()
+	return s.writeError == "" && (!s.Postgres || s.started)
+}
 func (s *Store) fail(err error) {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
@@ -517,6 +526,9 @@ func (s *Store) insert(ctx context.Context, records []*Prepared, cursor Cursor) 
 	return s.insertBatch(ctx, records, &cursor)
 }
 func (s *Store) insertBatch(ctx context.Context, records []*Prepared, cursor *Cursor) error {
+	if s.Postgres {
+		return s.insertPostgres(ctx, records, cursor)
+	}
 	tx, err := s.Writer.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -579,6 +591,10 @@ func (s *Store) maintain(ctx context.Context) {
 	if s.Error() != "" {
 		return
 	}
+	if s.Postgres {
+		s.maintainPostgres(ctx)
+		return
+	}
 	low := now() - 30*24*3600
 	_, err := s.Writer.ExecContext(ctx, "DELETE FROM events WHERE id IN (SELECT id FROM events WHERE ts<? ORDER BY ts LIMIT 5000)", low*1000)
 	if err != nil {
@@ -599,6 +615,9 @@ func (s *Store) maintain(ctx context.Context) {
 	}
 }
 func (s *Store) Stats(ctx context.Context) (Object, error) {
+	if s.Postgres {
+		return s.postgresStats(ctx)
+	}
 	var count int64
 	var low, high sql.NullFloat64
 	err := s.Readers.QueryRowContext(ctx, "SELECT COUNT(*),MIN(ts),MAX(ts) FROM events").Scan(&count, &low, &high)
@@ -746,7 +765,7 @@ func (s *Store) SetCapacity(ctx context.Context, mib int64) (Object, error) {
 	s.stateMu.Unlock()
 	return s.Stats(ctx)
 }
-func sqliteVersion(ctx context.Context, db *sql.DB) string {
+func sqliteVersion(ctx context.Context, db Querier) string {
 	var version string
 	db.QueryRowContext(ctx, "SELECT sqlite_version()").Scan(&version)
 	return version

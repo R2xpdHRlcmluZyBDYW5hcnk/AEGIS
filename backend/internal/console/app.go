@@ -47,7 +47,13 @@ type App struct {
 func NewApp(parent context.Context, cfg Config) (*App, error) {
 	ctx, cancel := context.WithCancel(parent)
 	pool := NewPool(WorkerCount())
-	store, err := NewStore(cfg.EventDB, cfg.Stream, pool)
+	var store *Store
+	var err error
+	if cfg.DatabaseURL != "" {
+		store, err = NewPostgresStore(cfg.EventDB, cfg.Stream, cfg.DatabaseURL, pool)
+	} else {
+		store, err = NewStore(cfg.EventDB, cfg.Stream, pool)
+	}
 	if err != nil {
 		pool.Close()
 		cancel()
@@ -73,7 +79,10 @@ func NewApp(parent context.Context, cfg Config) (*App, error) {
 }
 func (a *App) Close() { a.cancel(); a.wg.Wait(); a.Recent.Close(); a.Store.Close(); a.Pool.Close() }
 func (a *App) Health() Object {
-	result := Object{"ok": true, "uptime": int64(time.Since(a.Started).Seconds()), "ingest_lag_bytes": a.Store.Lag(), "recent_ingest_lag_bytes": a.Store.RecentLag(), "recent_events_range": a.Recent.Range(), "event_db_ready": a.Store.Error() == "", "overview_ready": a.Recent.Ready(), "sqlite_version": sqliteVersion(a.ctx, a.Store.Readers), "backend": "go", "go_version": runtime.Version(), "cpu_workers": a.Pool.Workers}
+	result := Object{"ok": true, "uptime": int64(time.Since(a.Started).Seconds()), "ingest_lag_bytes": a.Store.Lag(), "recent_ingest_lag_bytes": a.Store.RecentLag(), "recent_events_range": a.Recent.Range(), "event_db_ready": a.Store.Ready(), "overview_ready": a.Recent.Ready(), "sqlite_version": sqliteVersion(a.ctx, a.Recent.db), "backend": "go", "go_version": runtime.Version(), "cpu_workers": a.Pool.Workers}
+	for key, value := range a.Store.StorageInfo {
+		result[key] = value
+	}
 	result["recent_events_error"] = a.Recent.Error()
 	result["recent_events_diagnostics"] = a.Recent.Diagnostics()
 	if a.Overview != nil {

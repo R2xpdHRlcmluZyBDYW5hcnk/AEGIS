@@ -187,9 +187,9 @@ func (r *RecentEvents) frozenSnapshot(ctx context.Context, low, high float64, ov
 				break
 			}
 			if i == 0 {
-				g.main = tx
+				g.main = &queryTransaction{Tx: tx}
 			} else {
-				g.helpers = append(g.helpers, tx)
+				g.helpers = append(g.helpers, &queryTransaction{Tx: tx})
 			}
 		}
 	}

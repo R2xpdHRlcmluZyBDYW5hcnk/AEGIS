@@ -61,12 +61,12 @@ try {
  await nav('rules');await click('应用更改 →');
  await until(`document.querySelector('.rule-summary')?.textContent.includes('规则校验与应用中')`);
  await until(`fetch('/api/actions/status').then(r=>r.json()).then(d=>d.state==='running')`);
- await nav('system');await until(`!!document.querySelector('ndr-system .system-grid')&&document.querySelector('ndr-system .telemetry-status')?.textContent.includes('规则任务进行中')`);
+ await nav('system');await until(`!!document.querySelector('ndr-system .system-grid')`);
  assert.equal(await evaluate(`document.querySelector('ndr-system>.error')?.textContent||''`),'');
- assert.equal(await evaluate(`document.querySelector('.telemetry-status').textContent.includes(String.fromCharCode(183))`),false);
- await nav('overview');await until(`!!document.querySelector('[data-testid="alerts-total"]')&&document.querySelector('ndr-overview .telemetry-status')?.textContent.includes('规则任务进行中')`);
+ assert.equal(await evaluate(`!!document.querySelector('ndr-system .telemetry-status')`),false,'system reload adds no sampling notice');
+ await nav('overview');await until(`!!document.querySelector('[data-testid="alerts-total"]')`);
  assert.ok((await api('/api/overview')).security.total>0);
- assert.equal(await evaluate(`document.querySelector('.telemetry-status').textContent.includes(String.fromCharCode(183))`),false);
+ assert.equal(await evaluate(`!!document.querySelector('ndr-overview .telemetry-status')`),false,'overview reload adds no sampling notice');
  await nav('hunt');await until(`!!document.querySelector('ndr-events tbody tr')`);
  assert.equal((await api('/api/actions/status')).state,'running','navigation must finish before releasing reload');
  await nav('rules');await until(`document.querySelector('.rule-summary')?.textContent.includes('规则校验与应用中')`);

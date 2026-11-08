@@ -2,6 +2,9 @@ param(
     [string]$Target = '',
     [string]$IdentityFile = '',
     [switch]$UpdateBackend,
+    [switch]$PostgreSQL,
+    [switch]$ResetEventData,
+    [switch]$ConsoleOnly,
     [switch]$UpdateSnortConfig,
     [switch]$UpdateNftRules,
     [switch]$UpdateSupervisor,
@@ -36,6 +39,9 @@ if ($NativeResponse -and ($UpdateBackend -or $UpdateNftRules -or $UpdateSupervis
 if ($NativeResponsePackage -and -not $NativeResponse) { throw '-NativeResponsePackage requires -NativeResponse' }
 if ($NativeResponse -and -not $BuildOnly -and -not (Test-Path -LiteralPath $NativeResponsePackage)) { throw '-NativeResponse activation requires an existing -NativeResponsePackage' }
 if ($BuildOnly -and -not $OutputDirectory) { throw '-BuildOnly requires -OutputDirectory outside the source directory' }
+if (($PostgreSQL -or $ResetEventData) -and (-not $UpdateBackend -or $BuildOnly -or $InstallSnort3 -or $UpdateEngine)) { throw '-PostgreSQL and -ResetEventData require a separate -UpdateBackend deployment' }
+if ($ResetEventData -and -not $PostgreSQL) { throw '-ResetEventData requires -PostgreSQL' }
+if ($ConsoleOnly -and (-not $UpdateBackend -or $BuildOnly -or $InstallSnort3 -or $UpdateEngine)) { throw '-ConsoleOnly requires a separate -UpdateBackend deployment' }
 if ($WithSqliteRuntime -and (-not $WslBuild -or -not $BuildOnly -or $NativeResponse)) { throw '-WithSqliteRuntime requires -WslBuild -BuildOnly for a console release' }
 if ($InstallSnort3 -and (-not $UpdateBackend -or $BuildOnly -or -not $EnginePackage)) { throw '-InstallSnort3 requires -UpdateBackend and -EnginePackage and cannot be used with -BuildOnly' }
 if ($InstallSnort3 -and -not (Test-Path -LiteralPath $EnginePackage)) { throw 'Engine package is missing' }
@@ -199,7 +205,11 @@ try {
         & scp @options $sessionLibrary (Join-Path $sessionDirectory 'session-logger.json') "${Target}:$stage/session-logger/"
         if ($LASTEXITCODE -ne 0) { throw 'Session extension upload failed' }
     }
-    $backendStep = if ($UpdateBackend) { 'python3 snort-ndr/deploy-backend.py --release snort-ndr ' + ($resourceArguments -join ' ') + ' && ' } else { '' }
+    $databaseArguments = @()
+    if ($PostgreSQL) { $databaseArguments += '--postgresql' }
+    if ($ResetEventData) { $databaseArguments += '--reset-event-data' }
+    if ($ConsoleOnly) { $databaseArguments += '--console-only' }
+    $backendStep = if ($UpdateBackend) { 'python3 snort-ndr/deploy-backend.py --release snort-ndr ' + (($resourceArguments + $databaseArguments) -join ' ') + ' && ' } else { '' }
     if ($InstallSnort3 -or $UpdateEngine) {
         $engineFileName = Split-Path -Leaf $EnginePackage
         if ($engineFileName -notmatch '^ips-snort3-arm64-[0-9.]+(?:-session[0-9]+)?\.tar\.gz$') { throw 'Unexpected engine package name' }

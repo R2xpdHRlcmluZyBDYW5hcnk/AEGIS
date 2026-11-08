@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 FORBIDDEN_SUFFIXES = {
     '.db', '.sqlite', '.sqlite3', '.log', '.pcap', '.pcapng', '.exe', '.dll',
     '.so', '.a', '.o', '.zip', '.tgz', '.gz', '.pem', '.key', '.p12', '.pfx',
-    '.woff', '.woff2', '.pyc',
+    '.woff', '.woff2', '.pyc', '.gpg', '.asc', '.keyring',
 }
 FORBIDDEN_PARTS = {'node_modules', '__pycache__', '.angular', 'dist', 'backup', 'artifacts'}
 PATTERNS = {
