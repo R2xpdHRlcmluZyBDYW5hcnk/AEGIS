@@ -125,7 +125,8 @@ def main():
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     subprocess.run(['sha256sum', '--strict', '-c', 'SHA256SUMS'], cwd=release,
                    stdout=subprocess.DEVNULL, check=True)
-    compile((release / 'ips-web').read_bytes(), 'ips-web', 'exec')
+    if not (release/'backend-build.json').is_file():
+        compile((release / 'ips-web').read_bytes(), 'ips-web', 'exec')
     spec = importlib.util.spec_from_file_location('static_deployer', release / 'deploy-angular.py')
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
@@ -138,6 +139,8 @@ def upgrade(release,helper,overrides):
         isolation = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(isolation)
         return isolation.apply(release, wait_ready, overrides, helper.snapshot)
+    if (release/'backend-build.json').is_file():
+        raise RuntimeError('Native Go backend requires the independent isolated service layout')
     if (release/'libsqlite3-ndr.so').is_file():
         raise RuntimeError('The private SQLite runtime requires the isolated Web service layout')
     original_config = CONFIG.read_bytes()

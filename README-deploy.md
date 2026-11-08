@@ -2,7 +2,7 @@
 
 ## 运行前提
 
-控制台面向 Linux 与 systemd，需要 Python 3.13 或更新版本。Snort 3、LibDAQ、规则与 PulledPork3 需单独安装。规则更新器的 Python 依赖按其自身说明安装，运行机不需要 Node.js。
+控制台面向 ARM64 Linux 与 systemd。HTTP、事件入库、规则管理、事件桥接与本地模型接口由 Go 1.27.3 可执行文件提供，目标机不需要 Go 工具链或 Node.js。维护脚本、检测守护与独立安装的 PulledPork3 仍需要 Python 3.13 或更新版本；Snort 3、LibDAQ、规则与 PulledPork3 单独安装。
 
 部署者需确定采集位置、检测模式、HOME_NET、日志存储和访问方式。服务模板不固定 CPU 编号，也不预设具体网卡。先完成 Snort 自身配置校验，再接入面板。
 
@@ -14,7 +14,11 @@
 .\deploy.ps1 -BuildOnly -OutputDirectory "$env:TEMP\ndr-console-release"
 ```
 
-输出为 `snort-ndr-<release>.tar.gz` 与 SHA-256 文件。依赖和缓存使用系统临时目录，构建完成后清理。发布包不包含外部引擎、更新器或第三方二进制。
+输出为 `snort-ndr-<release>.tar.gz` 与 SHA-256 文件。依赖和缓存使用系统临时目录，构建完成后清理。发布包包含 Go 控制台、静态资源及 `backend-licenses.txt`，不附带外部 Snort 引擎或 PulledPork3。
+
+Windows 构建的 Go 部分自动进入 WSL Debian；Linux 构建可直接运行。复用本文引擎构建环境中的 GCC 与 `aarch64-linux-gnu-gcc`，缺失的核定 Go 工具链由构建器自动下载并校验。`backend-build.json` 记录架构、Go / SQLite 版本与四个服务入口的摘要；四个入口使用同一个程序，按服务名选择职责。构建器先运行本机 Go 回归，再生成 ARM64 CGO 产物。SQLite 编译进 Go 程序，不需要额外替换目标机的系统 SQLite。
+
+已有独立布局使用 `deploy.ps1 -UpdateBackend` 切换。部署器核对 ELF 架构、摘要与运行版本，暂停规则任务，备份程序和配置，只停止并重启控制台相关服务，检查 HTTP、管理器和检测进程标识；失败恢复旧程序。既有数据库、认证、规则、设备配置与回滚备份保留。旧 Python Web 代码仅作为兼容性对照，Go 服务不导入或执行这些模块；本地合成对照位于 `backend/internal/console/testdata`。
 
 传输后核对归档 SHA-256；解包后在包目录执行 `sha256sum --strict -c SHA256SUMS`。仅需要静态资源时可运行 `python3 -B build_frontend.py --output /var/tmp/ndr-console-static`。
 

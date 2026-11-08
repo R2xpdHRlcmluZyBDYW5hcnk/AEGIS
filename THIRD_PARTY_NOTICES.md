@@ -20,6 +20,10 @@ Angular、RxJS、Zone.js、tslib、Apache ECharts、ZRender、Marked 与构建�
 
 Luqum 1.0.0 提供 Apache-2.0 / LGPL 双许可，本项目选择 Apache-2.0；PLY 3.11 使用 BSD-3-Clause。来源与 wheel SHA-256 固定在 `build_tools/python-sources.json`；构建时在临时目录下载、校验并生成 `python-dependencies.zip`，包含各发行包的许可及元数据。第三方代码和生成包不提交源码仓库，部署时随程序分发，运行时不下载或安装包。
 
+## Go 后端
+
+Go 1.27.3 工具链与标准库使用 BSD-3-Clause；`github.com/mattn/go-sqlite3` v1.14.53 使用 MIT，内置 SQLite 3.54.1 交付代码属于公共领域。固定来源见 `build_tools/go-sources.json`、`backend/go.mod` 与 `backend/go.sum`。发布包附带从核定工具链和模块提取的完整 `backend-licenses.txt`；分发 Go 可执行文件时一并保留。数据库驱动通过 CGO 编译 SQLite，目标主机的 glibc 动态库由操作系统提供，不在控制台包内另行复制。
+
 ## MITRE ATT&CK
 
 构建器从 `build_tools/attack-sources.json` 固定提交获取并验证数据。完整数据集和生成目录不提交；对应版权与许可原文附入 `frontend-licenses.txt`。数据许可独立于面板 MIT，见 [固定提交 LICENSE](https://github.com/mitre-attack/attack-stix-data/blob/c2494b29dd268c46a5d0ea0990553e4327cd2253/LICENSE.txt)。

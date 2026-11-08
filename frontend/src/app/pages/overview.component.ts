@@ -9,8 +9,9 @@ import { Details } from '../details.component';
 import { eventType } from '../event-fields';
 @Component({changeDetection:ChangeDetectionStrategy.Eager,selector:'ndr-overview',standalone:true,imports:[ModalComponent,CommonModule,ChartComponent,TableComponent],template:`
  <div class="overview-filters" *ngIf="filters.length" aria-label="概览筛选"><span>当前筛选</span><button class="quiet" *ngFor="let filter of filters" (click)="removeFilter(filter.key)" [attr.aria-label]="'移除筛选 '+filter.label">{{filter.label}} ×</button><button class="quiet" (click)="clearFilters()">清除筛选</button></div>
- <p *ngIf="filterPending || showingPrevious" class="muted" data-testid="overview-filter-status" role="status">{{filterPending ? '正在应用筛选' : '当前筛选尚无结果'}}{{showingPrevious ? '，暂显示上一次结果' : ''}}</p>
+ <p *ngIf="filterPending || showingPrevious" class="muted" data-testid="overview-filter-status" role="status">{{filterPending ? '正在应用筛选' : refreshing ? '正在更新概览' : '更新尚未完成'}}{{showingPrevious ? '，暂显示上一次结果' : ''}}</p>
  <p *ngIf="error" class="error" role="alert">{{error}}</p>
+ <div *ngIf="!data && !error" class="overview-loading" role="status" aria-label="正在加载概览" aria-busy="true" data-testid="overview-loading"><svg class="overview-spinner" viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="13"/></svg></div>
   <p class="muted telemetry-status" role="status" *ngIf="data?.telemetry?.stale || data?.telemetry?.updating">{{data.telemetry.as_of?'引擎指标采样于 '+time(data.telemetry.as_of):'尚未取得引擎指标样本'}} <span class="badge">{{data.telemetry.updating?'规则任务进行中':'等待新样本'}}</span></p>
  <ng-container *ngIf="data as d"><div class="stats-grid resource-summary"><h2>检测概况</h2>
   <button class="stat-card alert" (click)="filterKind('alerts','检测告警')" [attr.aria-pressed]="hasKind('alerts')"><span>检测告警</span><strong data-testid="alerts-total">{{d.security?.alerts | number}}</strong></button>
@@ -40,17 +41,24 @@ import { eventType } from '../event-fields';
   <details class="card telemetry engine-counters"><summary>累计引擎计数</summary><dl class="counter-grid"><div><dt>放行包</dt><dd>{{d.ips?.accepted | number}}</dd></div><div><dt>阻断包</dt><dd>{{d.ips?.blocked | number}}</dd></div><div><dt>规则丢包</dt><dd>{{d.ips?.rule_drops | number}}</dd></div><div><dt>引擎丢包</dt><dd>{{d.ips?.engine_drops | number}}</dd></div></dl></details>
  <ndr-modal *ngIf="expandedChart" title="告警与阻断趋势" [wide]="true" (closed)="expandedChart=false"><div class="chart-expanded"><ndr-chart [points]="d.series || []" [viewport]="chartViewport" (pointOpen)="filterTrend($event)"/></div></ndr-modal>
  </ng-container>
-`})
+`,styles:[`
+ .overview-loading{position:absolute;inset:0;display:grid;place-items:center;pointer-events:none}
+ .overview-spinner{width:32px;height:32px;color:var(--green);animation:overview-spin 1.4s linear infinite}
+ .overview-spinner circle{fill:none;stroke:currentColor;stroke-width:2.5;stroke-linecap:round;stroke-dasharray:1 82;animation:overview-arc 1.4s cubic-bezier(.4,0,.2,1) infinite}
+ @keyframes overview-spin{to{transform:rotate(360deg)}}
+ @keyframes overview-arc{0%{stroke-dasharray:1 82;stroke-dashoffset:0}50%{stroke-dasharray:60 82;stroke-dashoffset:-12}100%{stroke-dasharray:1 82;stroke-dashoffset:-82}}
+ @media(prefers-reduced-motion:reduce){.overview-spinner,.overview-spinner circle{animation:none}.overview-spinner circle{stroke-dasharray:20 82}}
+`]})
 export class OverviewComponent implements OnInit,OnDestroy {
  filters:{key:string;label:string;params:Record<string,string>}[]=[];private period?:{from:number;to:number};
- data:any;expandedChart=false;showTrendTable=false;error='';filterPending=false;showingPrevious=false;private live:LiveQuery;memory=bytes;time=date;chartViewport=new ChartViewport();
+ data:any;expandedChart=false;showTrendTable=false;error='';filterPending=false;showingPrevious=false;refreshing=false;private displayedSelection='';private live:LiveQuery;memory=bytes;time=date;chartViewport=new ChartViewport();
  recentColumns:Column[]=[{key:'ts',label:'时间',kind:'time',width:180},{key:'type',label:'类型',kind:'eventType',width:110},{key:'sig',label:'网络事件摘要',kind:'eventSummary',width:340},{key:'src',label:'源地址',kind:'mono',width:160},{key:'dst',label:'目的地址',kind:'mono',width:160},{key:'proto',label:'协议',width:90},{key:'action',label:'动作',kind:'action',width:100}];
  tops=[{key:'signatures',title:'高频检测签名',field:'sid',table:false,columns:[{key:'sig',label:'签名',width:250},{key:'count',label:'次数',width:80}]},{key:'sources',title:'高频源地址',field:'src',table:false,columns:[{key:'ip',label:'地址',width:190},{key:'count',label:'次数',width:80}]},{key:'destinations',title:'高频目的地址',field:'dst',table:false,columns:[{key:'ip',label:'地址',width:190},{key:'count',label:'次数',width:80}]}];
  constructor(api:Api,public state:ConsoleState,public details:Details){
-  const failed=(error:string)=>{this.error=error;this.filterPending=false;this.state.viewReady('overview');};
+  const failed=(error:string)=>{this.error=error;this.filterPending=false;this.refreshing=false;this.state.viewReady('overview');};
   this.live=new LiveQuery(api,d=>{
    if(d.security?.error){failed('读取概览失败：'+d.security.error);return;}
-   this.data=d;this.error='';this.filterPending=false;this.showingPrevious=false;this.state.viewReady('overview');
+   this.data=d;this.displayedSelection=this.selectionKey();this.error='';this.filterPending=false;this.showingPrevious=false;this.refreshing=false;this.state.viewReady('overview');
   },failed,null);
  }
  networkRetrying(network:any):boolean{
@@ -77,7 +85,13 @@ export class OverviewComponent implements OnInit,OnDestroy {
    if(row.sig)this.investigate((row.sig.startsWith('engine drop')?'type: drop AND ':'')+'sig: '+JSON.stringify(row.sig));
   }else if(row.ip)this.investigate(top.field+': '+JSON.stringify(row.ip));
  }
- ngOnInit():void{this.refresh();}
+ ngOnInit():void{
+  const saved=this.state.views?.get('overview');
+  if(saved){this.data=saved.data;this.filters=saved.filters;this.period=saved.period;this.displayedSelection=saved.displayedSelection;this.showTrendTable=saved.showTrendTable;}
+  if(this.data)this.state.viewReady('overview');
+  this.refresh();
+ }
+ private selectionKey():string{return JSON.stringify({filters:this.filters,period:this.period});}
  filterKind(value:string,label:string):void{
   this.applyFilter('kind',label,['alerts','high','drops'].includes(value)?{detection:value}:value==='connection'?{connection:'1'}:{type:value});
  }
@@ -116,8 +130,11 @@ export class OverviewComponent implements OnInit,OnDestroy {
    selected['to']=String(this.period.to);
   }
   for(const filter of this.filters)Object.assign(selected,filter.params);
-  this.chartViewport.reset();this.showingPrevious=!!this.data;this.filterPending=this.showingPrevious||this.filters.length>0;
+  this.chartViewport.reset();this.showingPrevious=!!this.data;this.filterPending=this.data?this.displayedSelection!==this.selectionKey():this.filters.length>0;this.refreshing=true;
   this.error='';this.live.start('/api/overview',{...selected,view:'panel'},'overview');
  }
- ngOnDestroy():void{this.live.stop();}
+ ngOnDestroy():void{
+  this.state.views?.set('overview',{data:this.data,filters:this.filters.map(f=>({...f,params:{...f.params}})),period:this.period?{...this.period}:undefined,displayedSelection:this.displayedSelection,showTrendTable:this.showTrendTable});
+  this.live.stop();
+ }
 }

@@ -136,7 +136,7 @@ dialog.wide{width:min(1400px,calc(100vw - 64px))}.chart-expanded{padding:4px}.ch
 
 .workspace{height:100dvh;min-height:0;overflow:hidden}.main-area{height:100dvh;min-height:0;display:flex;flex-direction:column}.app-header{flex:0 0 56px}.main-area main{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;border-radius:24px}
 
-.content-viewport{flex:1;min-height:0;min-width:0;margin:8px 12px 12px 0;border-radius:20px;overflow:hidden;background:#121212}.main-area .content-viewport main{display:block;flex:none;width:100%;height:100%;min-height:0;margin:0;border-radius:0;overflow:auto}
+.content-viewport{position:relative;flex:1;min-height:0;min-width:0;margin:8px 12px 12px 0;border-radius:20px;overflow:hidden;background:#121212}.main-area .content-viewport main{display:block;flex:none;width:100%;height:100%;min-height:0;margin:0;border-radius:0;overflow:auto}
 
 .table-data{position:relative}.table-tools{justify-content:flex-start;align-items:center;gap:12px}.table-tools .search{flex:1;max-width:600px}.table-tools>button{flex:0 0 auto}
 .rules-list>header{height:72px;min-height:72px}.rules-list>.table-tools,.rules-list ndr-table>.table-tools{padding:0 20px 16px}.rules-list .table-tools .search{min-height:42px}.rules-list .table-tools>button{min-height:42px}

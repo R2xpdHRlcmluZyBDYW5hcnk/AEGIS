@@ -1,11 +1,14 @@
-"""Update interpreted console modules without replacing or restarting the engine."""
+"""Update the console runtime without replacing or restarting the engine."""
 import datetime
+import hashlib
 import json
 import os
+import platform
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+import struct
 import time
 from ips_control import Client
 from deployment_layout import layout
@@ -20,11 +23,13 @@ SHARED_CONSOLE_PROGRAMS=frozenset(('ips_control.py','runtime_status.py'))
 WEB_PROGRAMS=frozenset(('ips-web','llm_assistant.py','dns_context.py','llm_hunting.py',
                        'overview_metrics.py','hunt_query.py','python_dependencies.py','python-dependencies.zip','libsqlite3-ndr.so')) | SHARED_CONSOLE_PROGRAMS
 MANAGER_PROGRAMS=frozenset(('openappid_update.py','history_reset.py')) | SHARED_CONSOLE_PROGRAMS
+NATIVE_PROGRAMS=frozenset(('ips-web','ips-rule-manager','ips-event-bridge','ips-snort-rules'))
 PIDFILE=Path('/run/snort/snort.pid')
 RESOURCE_ROOT=Path('/etc/systemd/system')
 RESOURCE_OVERRIDES={
+    'ips-web.service':b'[Service]\nCPUQuota=400%\n',
     'ips-event-bridge.service':b'[Service]\nCPUQuota=400%\nMemoryMax=256M\n',
-    'ips-rule-manager.service':b'[Service]\nTasksMax=64\n',
+    'ips-rule-manager.service':b'[Service]\nTasksMax=64\nCPUQuota=400%\n',
 }
 
 
@@ -50,12 +55,34 @@ print(sqlite3.sqlite_version)
     return subprocess.check_output([sys.executable, '-B', '-c', code, str(path.resolve())], text=True).strip()
 
 
+def validate_native_release(release, *, execute=True):
+    release=Path(release)
+    manifest=json.loads((release/'backend-build.json').read_text())
+    if (manifest.get('schema')!=1 or manifest.get('backend')!='go' or manifest.get('target')!='linux-arm64'
+            or set(manifest.get('files',{}))!=NATIVE_PROGRAMS):
+        raise ValueError('Invalid native backend manifest')
+    for name,expected in manifest['files'].items():
+        data=(release/name).read_bytes()
+        if (len(data)<64 or data[:6]!=b'\x7fELF\x02\x01' or struct.unpack_from('<H',data,18)[0]!=183
+                or hashlib.sha256(data).hexdigest()!=expected):
+            raise ValueError('Native backend executable verification failed: '+name)
+    if execute:
+        if platform.machine() not in ('aarch64','arm64'):raise ValueError('Native console deployment requires ARM64')
+        info=json.loads(subprocess.check_output([str((release/'ips-web').resolve()),'--version'],text=True,timeout=10))
+        if (info.get('backend')!='go' or info.get('go_version')!='go'+manifest['go_version']
+                or info.get('sqlite_version')!=manifest['sqlite_version'] or info.get('target')!=manifest['target']):
+            raise ValueError('Native backend runtime differs from manifest')
+    return manifest
+
+
 def apply(release,wait_ready,overrides,snapshot=None):
     release=Path(release)
+    native=validate_native_release(release) if (release/'backend-build.json').is_file() else None
     runtime = release/'libsqlite3-ndr.so'
-    sqlite_version = validate_sqlite_runtime(runtime) if runtime.is_file() else None
-    programs = PROGRAMS + ((runtime.name,) if sqlite_version else ())
+    sqlite_version = native['sqlite_version'] if native else validate_sqlite_runtime(runtime) if runtime.is_file() else None
+    programs = PROGRAMS + (('backend-build.json',) if native else (runtime.name,) if sqlite_version else ())
     for name in PROGRAMS:
+        if native and name in NATIVE_PROGRAMS:continue
         if name.endswith('.zip'):
             import zipfile
             with zipfile.ZipFile(release/name) as bundle:
@@ -105,7 +132,7 @@ def apply(release,wait_ready,overrides,snapshot=None):
             if CONFIG.read_bytes()!=original:
                 raise RuntimeError('Configuration changed during update')
             for name in changed:
-                install(release/name,BIN/name,0o644 if name.endswith(('.py','.zip','.so')) else 0o755)
+                install(release/name,BIN/name,0o644 if name.endswith(('.py','.zip','.so','.json')) else 0o755)
             if resources_changed:
                 for index,(path,data) in enumerate(resources.items()):
                     path.parent.mkdir(parents=True,exist_ok=True)
@@ -121,7 +148,10 @@ def apply(release,wait_ready,overrides,snapshot=None):
             health = wait_ready(updated)
             if sqlite_version and health.get('sqlite_version') != sqlite_version:
                 raise RuntimeError('The restarted console did not select the installed SQLite runtime')
+            if native and (health.get('backend')!='go' or health.get('go_version')!='go'+native['go_version']):
+                raise RuntimeError('The restarted console did not select the native Go backend')
             wait_manager()
+            if native:subprocess.run(['systemctl','is-active','--quiet',*services],check=True)
             if (PIDFILE.read_text() if PIDFILE.exists() else None)!=engine_pid:
                 raise RuntimeError('Detection process changed during console update')
             for name in programs:
@@ -141,7 +171,7 @@ def apply(release,wait_ready,overrides,snapshot=None):
         except BaseException:
             subprocess.run(['systemctl','stop',*services],check=False)
             for name in changed:
-                if (backup/name).exists(): install(backup/name,BIN/name,0o644 if name.endswith(('.py','.zip','.so')) else 0o755)
+                if (backup/name).exists(): install(backup/name,BIN/name,0o644 if name.endswith(('.py','.zip','.so','.json')) else 0o755)
                 elif (BIN/name).exists(): (BIN/name).unlink()
             if updated!=config:install(backup/'ips-web.conf',CONFIG,0o600)
             if resources_changed:

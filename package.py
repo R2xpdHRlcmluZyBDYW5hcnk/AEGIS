@@ -28,7 +28,8 @@ package.py build_frontend.py preview.py recover-event-db.py cleanup-workspace.ps
 docs/snort3-engine.md docs/rule-source-verification.md docs/local-llm.md docs/log-storage.md docs/dependency-policy.md docs/hunt-state-values.md docs/sqlite-recovery.md docs/nfqueue-rules.md docs/history-management.md docs/native-response.md docs/rule-management.md docs/parallel-processing.md
 build_tools/build-snort3-arm64.sh tests/snort_pcap.py tests/test_snort_engine.py tests/test_native_deploy.py tests/check_snort_native.py tests/check_rule_catalog.py tests/check_rule_policy.py tests/test_rule_policy.py tests/check_response_capture.py tests/check_overview_events.py tests/angular-overview-filters.mjs tests/run_chart_regression.py tests/test_parallel_runtime.py tests/check_multicore.py
  test_ips_web.py test_app.js tests/test_llm_assistant.py tests/test_llm_context.py tests/angular-local-llm.mjs tests/test_rule_manager.py tests/test_rule_manager_transport.py tests/test_bridge_recovery.py tests/test_legacy_cleanup.py tests/test_native_log_cleanup.py tests/test_log_storage.py tests/test_log_storage_paths.py tests/check_log_storage.py tests/test_native_rule_management.py tests/test_group_policies.py tests/test_rule_inventory.py tests/test_telemetry.py tests/test_runtime_status.py tests/test_history_reset.py tests/test_session_identity.py tests/check_native_rule_management.py tests/test_rule_selection.py tests/test_nft_rules.py tests/test_deploy_nft.py tests/test_supervisor.py tests/test_event_db_recovery.py
- tests/test-navigation.cjs tests/angular-navigation.mjs tests/angular-suppression-groups.mjs tests/angular-rule-manager.mjs tests/angular-native-rules.mjs tests/angular-group-policy.mjs tests/angular-runtime-status.mjs tests/angular-source-filter.mjs tests/angular-rule-styling.mjs tests/angular-history-reset.mjs tests/angular-pagination.mjs tests/angular-rule-performance.mjs tests/serve_preview.py tests/browser-smoke.mjs tests/test_build_workflow.py tests/check_public_source.py'''.split()
+tests/test-navigation.cjs tests/angular-navigation.mjs tests/angular-suppression-groups.mjs tests/angular-rule-manager.mjs tests/angular-native-rules.mjs tests/angular-group-policy.mjs tests/angular-runtime-status.mjs tests/angular-source-filter.mjs tests/angular-rule-styling.mjs tests/angular-history-reset.mjs tests/angular-pagination.mjs tests/angular-rule-performance.mjs tests/serve_preview.py tests/browser-smoke.mjs tests/test_build_workflow.py tests/check_public_source.py'''.split()
+FILES.append('docs/rule-policy.md')
 EXECUTABLE = {'ips-event-bridge','ips-snort-rules','snort-home-net','ips-web', 'ips-supervisor', 'ips-log-maintenance', 'ips-rule-manager','deploy.sh'}
 FILES.append('tests/test-rule-job-logs.cjs')
 FILES.append('tests/test_ingest_resume.py')
@@ -51,7 +52,7 @@ def _build(output,reuse_ui=None,with_sqlite_runtime=False):
     checks = subprocess.run([sys.executable, '-B', '-m', 'unittest', '-q',
                              'tests.test_snort_engine', 'tests.test_rule_policy', 'tests.test_parallel_runtime', 'tests.test_ingest_resume', 'tests.test_native_deploy', 'tests.test_deploy_backend', 'tests.test_event_db_recovery', 'tests.test_snort_config_deploy',
                              'tests.test_quic_observer', 'tests.test_llm_assistant', 'tests.test_llm_context', 'tests.test_rule_manager', 'tests.test_rule_manager_transport', 'tests.test_bridge_recovery', 'tests.test_legacy_cleanup', 'tests.test_native_log_cleanup', 'tests.test_log_storage', 'tests.test_log_storage_paths', 'tests.test_native_rule_management', 'tests.test_group_policies', 'tests.test_rule_inventory', 'tests.test_telemetry', 'tests.test_runtime_status', 'tests.test_history_reset', 'tests.test_session_identity', 'tests.test_rule_selection',
-                             'tests.test_nft_rules', 'tests.test_deploy_nft', 'tests.test_supervisor', 'tests.test_native_response_deploy', 'tests.test_hunt_language', 'tests.test_openappid_update', 'tests.test_session_logger', 'tests.test_session_logger_deploy','tests.test_overview_cohorts','tests.test_ai_evidence'], cwd=ROOT,
+                             'tests.test_nft_rules', 'tests.test_deploy_nft', 'tests.test_supervisor', 'tests.test_native_response_deploy', 'tests.test_hunt_language', 'tests.test_openappid_update', 'tests.test_session_logger', 'tests.test_session_logger_deploy','tests.test_overview_cohorts','tests.test_ai_evidence','tests.test_go_backend'], cwd=ROOT,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if checks.returncode:
         sys.stderr.buffer.write(checks.stdout)
@@ -73,6 +74,8 @@ def _build(output,reuse_ui=None,with_sqlite_runtime=False):
             from build_tools.build_sqlite_runtime import build as build_sqlite
             build_sqlite(Path(generated))
         shutil.copy2(os.environ['NDR_PYTHON_DEPS'],Path(generated)/'python-dependencies.zip')
+        from build_tools.go_backend import release as build_backend
+        build_backend(Path(generated))
         return archive_release(output, Path(generated), source_files())
 
 
@@ -80,9 +83,18 @@ def archive_release(output, generated, sources):
     frontend = [p.relative_to(ROOT).as_posix() for p in sources]
     chunks = sorted(path.name for path in generated.glob('chunk-*.js'))
     binary_files = ['python-dependencies.zip']
+    native_names=[]
+    if (generated/'backend-build.json').is_file():
+        manifest=json.loads((generated/'backend-build.json').read_text())
+        native_names=[*manifest['files'],'backend-build.json','backend-licenses.txt']
+        binary_files.extend(native_names)
+        for name,digest in manifest['files'].items():
+            if Path(name).name!=name or hashlib.sha256((generated/name).read_bytes()).hexdigest()!=digest:
+                raise ValueError('Native backend manifest differs')
+    backend_sources=[p.relative_to(ROOT).as_posix() for p in (ROOT/'backend').rglob('*') if p.is_file() and p.suffix in ('.go','.json','.sql','.html','.mod','.sum')]
     if (generated/'libsqlite3-ndr.so').is_file():
         binary_files.append('libsqlite3-ndr.so')
-    names = sorted(set(FILES + frontend + chunks + binary_files + ['index.html','app.js','ui.js','app.css','build_frontend.py', 'frontend-build.json', 'tests/test-data-layer.cjs', 'tests/test-connection-summary.cjs', 'tests/check_data_layer.py',
+    names = sorted(set(FILES + backend_sources + ['tests/generate_go_reference.py','tests/test_go_backend.py','tests/angular-go-backend.mjs'] + frontend + chunks + binary_files + ['index.html','app.js','ui.js','app.css','build_frontend.py', 'frontend-build.json', 'tests/test-data-layer.cjs', 'tests/test-connection-summary.cjs', 'tests/check_data_layer.py',
                        'deploy-angular.py', 'deploy-backend.py', 'tests/angular-smoke.mjs', 'tests/angular-pointer.mjs', 'tests/angular-ux.mjs', 'tests/angular-hunt-suggestions.mjs', 'tests/angular-system-capacity.mjs', 'tests/angular-reset.mjs', 'tests/angular-chart-tooltip.mjs', 'tests/test_hunt_suggestions.py', 'tests/test_mitre_attack.py', 'tests/test-attack-mapping.cjs', 'tests/test-console-scroll.cjs', 'frontend-licenses.txt'] +
                        ['tests/test-output.mjs', 'tests/test-overview-range.cjs', 'tests/test-modal-backdrop.cjs', 'tests/test-range-context.cjs', 'tests/test-chart-zoom.cjs', 'tests/test_network_visibility.py', 'tests/test_network_snapshots.py', 'tests/test_static_modules.py', 'tests/test_deploy_backend.py', 'tests/audit_hunt_queries.py', 'tests/test_hunt_query_matrix.py', 'tests/test_data_layer.py']))
     payloads = {}

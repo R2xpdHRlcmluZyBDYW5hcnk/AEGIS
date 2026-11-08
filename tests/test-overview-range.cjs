@@ -7,12 +7,27 @@ const core={};
 vm.runInNewContext(compile('frontend/src/app/core.ts'),{exports:core,require:name=>name==='@angular/core'?angular:{}});
 const viewport={};vm.runInNewContext(compile('frontend/src/app/chart-viewport.ts'),{exports:viewport});
 const key='ndr.angular.overview.range';
-function fixture(storage=new Map()){
+function fixture(storage=new Map(),views=new Map()){
  const requests=[],investigations=[],contexts=[];
- class LiveQuery {start(path,params,topic){requests.push({path,params,topic});}stop(){}}
+ let receive;
+ class LiveQuery {constructor(api,callback){receive=callback;}start(path,params,topic){requests.push({path,params,topic});}stop(){}}
  const exported={};
  vm.runInNewContext(compile('frontend/src/app/pages/overview.component.ts'),{exports:exported,require:name=>name==='@angular/core'?angular:name==='../chart-viewport'?viewport:name==='../core'?{...core,LiveQuery}:{},localStorage:{getItem:name=>storage.get(name)??null,setItem:(name,value)=>storage.set(name,value)}});
- return {page:new exported.OverviewComponent({}, {investigate:(query,ts,range)=>{investigations.push(query);contexts.push(range&&JSON.parse(JSON.stringify(range)));}}, {}),requests,storage,investigations,contexts};
+ return {page:new exported.OverviewComponent({}, {views,viewReady(){},investigate:(query,ts,range)=>{investigations.push(query);contexts.push(range&&JSON.parse(JSON.stringify(range)));}}, {}),requests,storage,investigations,contexts,deliver:data=>receive(data),views};
+}
+{
+ const views=new Map(),first=fixture(new Map(),views);first.page.ngOnInit();
+ assert.equal(first.page.data,undefined);assert.equal(first.page.refreshing,true);
+ first.deliver({security:{alerts:7},range:[100,200]});first.page.filterKind('alerts','检测告警');
+ first.deliver({security:{alerts:5},range:[100,200]});first.page.ngOnDestroy();
+ const next=fixture(new Map(),views);next.page.ngOnInit();
+ assert.equal(next.page.data.security.alerts,5,'returning overview immediately retains the previous snapshot');
+ assert.equal(next.requests[0].params.detection,'alerts','returning overview keeps matching filter context');
+ assert.equal(next.page.filterPending,false);assert.equal(next.page.showingPrevious,true);
+ next.page.filterKind('high','高危告警');next.page.ngOnDestroy();
+ const pending=fixture(new Map(),views);pending.page.ngOnInit();
+ assert.equal(pending.page.data.security.alerts,5);assert.equal(pending.page.filterPending,true,'old values stay marked when the selected filter has not returned yet');
+ pending.deliver({security:{alerts:1},range:[100,200]});assert.equal(pending.page.showingPrevious,false);assert.equal(pending.page.refreshing,false);
 }
 {
  const {page}=fixture();

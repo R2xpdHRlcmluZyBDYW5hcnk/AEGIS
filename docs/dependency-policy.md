@@ -51,6 +51,16 @@ parse5 升级后引入其所需的 entities 9.0.0。锁文件通过核定工具�
 
 根据 [Luqum 官方发行信息](https://pypi.org/project/luqum/)与 [PLY 官方发行信息](https://pypi.org/project/ply/)，核定 Luqum 1.0.0 和其依赖 PLY 3.11；两者没有 LTS 发行线。查询方法、时间和解析器选择见 [事件搜索](event-search.md)。`build_tools/python-sources.json` 固定官方 wheel URL、SHA-256 和许可；构建器预生成匹配的 PLY 表并打包为只读 ZIP。后端发布、前端回归、预览与 `tests/run_backend.py` 自动准备临时依赖，不修改全局 Python 安装。生产运行不访问包仓库。
 
+## Go 后端工具链（2026-11-08）
+
+查询时间：2026-11-08 02:22 Australia/Perth（UTC+08:00，对应 2026-11-07 18:22 UTC）。通过 MCP Search Service 读取 [Go 官方发行索引](https://go.dev/dl/?mode=json)及 [go-sqlite3 官方发行页](https://github.com/mattn/go-sqlite3/releases)。条件为当前稳定版本，排除预发布；同时核对 Linux AMD64、ARM64 官方归档与 SHA-256，SQLite 驱动采用其内置 SQLite，不链接主机的旧 SQLite。
+
+核定 Go 1.27.3、`github.com/mattn/go-sqlite3` v1.14.53，内置 SQLite 3.54.1。版本、归档摘要与来源固定于 `build_tools/go-sources.json`，模块校验值固定于 `backend/go.sum`；构建设置 `GOTOOLCHAIN=local` 和 `-mod=readonly`，运行时不下载依赖。Go 没有单独 LTS 发行线，本次选择官方当前稳定版。
+
+`build_tools/go_backend.py` 自动获取缺失的核定 Go 工具链，所有模块、缓存及下载置于系统临时目录并随构建清理。ARM64 CGO 编译复用项目已有 Debian 交叉编译环境：GCC 14.2.0、binutils 2.44、ARM64 glibc 2.41；准备方式沿用 `README-deploy.md` 的引擎编译环境。Go 服务默认最多四个调度核心，SQLite 连接、前台查询、后台历史与规则来源任务均有独立并发边界。
+
+Go 控制台不加载 Luqum/PLY 或旧 Python Web 模块。发布包仍包含维护脚本、检测进程守护及上游 PulledPork3 使用的 Python 环境；这些与 Go HTTP、规则管理、事件采集和本地模型接口分开维护。
+
 ## 研判 Markdown 依赖（2026-11-05）
 
 Australia/Perth，MCP Search Service 查询 [Marked 的 npm 发布信息](https://www.npmjs.com/package/marked)、[渲染器扩展接口](https://marked.js.org/using_pro#renderer)及 [Angular HTML 安全绑定](https://angular.dev/best-practices/security)。核定 Marked 18.1.3 为稳定发行版，MIT，锁文件确认 Node.js >= 20，兼容项目工具链。解析器只在浏览器处理研判文本。原始 HTML 转义为文本，图片与链接渲染标签，HTML 输出通过 Angular 常规绑定净化。
