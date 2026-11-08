@@ -1,4 +1,4 @@
-"""Export the patched full ARM64 runtime for fresh activation or engine updates."""
+"""Export a patched Linux engine runtime with its target architecture label."""
 import argparse
 from build_tools.package_engine import build
 

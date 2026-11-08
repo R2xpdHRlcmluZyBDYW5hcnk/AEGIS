@@ -31,9 +31,10 @@ def prepare(manifest_path, work, prefix):
             package.extractall(destination,filter='data')
         receipt.write_text(json.dumps(spec,indent=2)+'\n')
     print('Pinned OpenAppID installed outside source')
-    for name,filename in (('snort','COPYING'),('snort','LICENSE'),('libdaq','COPYING'),('vectorscan','LICENSE')):
+    matching='vectorscan' if manifest['target']['architecture']=='aarch64' else 'hyperscan'
+    for name,filename in (('snort','COPYING'),('snort','LICENSE'),('libdaq','COPYING'),(matching,'LICENSE')):
         version=manifest[name]['version']
-        source_name={'snort':'snort3-','libdaq':'libdaq-','vectorscan':'vectorscan-vectorscan-'}[name]
+        source_name={'snort':'snort3-','libdaq':'libdaq-','vectorscan':'vectorscan-vectorscan-','hyperscan':'hyperscan-'}[name]
         source=work/'src'/(source_name+version)/filename
         if source.exists():
             target=prefix/'share/licenses'/name/filename

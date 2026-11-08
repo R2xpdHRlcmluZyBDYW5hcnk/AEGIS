@@ -1,4 +1,4 @@
-"""Export the prebuilt ARM64 runtime separately from the console release."""
+"""Export the prebuilt runtime separately from the console release."""
 import argparse
 import gzip
 import hashlib
@@ -6,6 +6,9 @@ import io
 import json
 from pathlib import Path
 import tarfile
+import sys
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+from build_tools.engine_platform import elf_architecture
 # Stable deployed location shared by existing units, wrappers and rollback tools.
 PREFIX=Path('/opt/ips-snort3/3.12.4.0')
 ROOT=Path(__file__).resolve().parents[1]
@@ -20,7 +23,8 @@ def build(output,prefix=None):
     if output.is_relative_to(ROOT):
         raise ValueError('Export engine packages outside the source directory')
     manifest=json.loads((prefix/'engine-manifest.json').read_text())
-    if manifest['architecture']!='aarch64' or hashlib.sha256((prefix/'bin/snort').read_bytes()).hexdigest()!=manifest['sha256']:
+    arch=elf_architecture(prefix/'bin/snort')
+    if manifest['architecture']!=arch or hashlib.sha256((prefix/'bin/snort').read_bytes()).hexdigest()!=manifest['sha256']:
         raise ValueError('Prebuilt engine verification failed')
     files=set()
     for base in (prefix/'bin',prefix/'lib/daq',prefix/'etc/snort',prefix/'share/appid',prefix/'share/licenses'):
@@ -64,7 +68,8 @@ def build(output,prefix=None):
         info=tarfile.TarInfo('ENGINE_SHA256SUMS.json');info.size=len(sums);info.mode=0o644
         package.addfile(info,io.BytesIO(sums))
     suffix={'ndr-session-1':'-session1','ndr-session-2':'-session2','ndr-session-3':'-session3'}.get(manifest.get('session_patch'),'')
-    archive=output/('ips-snort3-arm64-'+manifest['sources']['snort']['version']+suffix+'.tar.gz')
+    label={'aarch64':'arm64','x86_64':'amd64'}[arch]
+    archive=output/('ips-snort3-'+label+'-'+manifest['sources']['snort']['version']+suffix+'.tar.gz')
     archive.write_bytes(gzip.compress(stream.getvalue(),mtime=0))
     digest=hashlib.sha256(archive.read_bytes()).hexdigest()
     archive.with_suffix('.gz.sha256').write_text(digest+'  '+archive.name+'\n')

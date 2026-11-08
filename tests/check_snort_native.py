@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the prebuilt ARM64 engine locally using synthetic traffic only."""
+"""Exercise a prebuilt engine locally using synthetic traffic only."""
 import argparse
 import hashlib
 import http.client
@@ -23,6 +23,7 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 from deployment_support import SnortControl as DeploymentControl, PREFIX
 from tests.snort_pcap import capture
+from build_tools.engine_platform import elf_architecture,runner
 
 
 class SnortControl(DeploymentControl):
@@ -45,7 +46,7 @@ def execute(args, **kwargs):
 
 def engine():
     binary=Path(PREFIX)/'bin/snort'
-    command=[] if os.uname().machine in ('aarch64','arm64') else ['/usr/bin/qemu-aarch64']
+    command=runner(elf_architecture(binary))
     return command+[str(binary),'--daq-dir',PREFIX+'/lib/daq','--script-path',PREFIX+'/etc/snort']
 
 
@@ -105,7 +106,7 @@ def check_offline(root,config):
     signatures={int(row['sid']) for row in events if row.get('sid') is not None}
     assert {9000001,9000002,9000003,9000005}<=signatures,signatures
     assert 9000004 not in signatures,signatures
-    print('Native HTTP, DNS, TLS extraction and Vectorscan content/regex matching verified')
+    print('Native HTTP, DNS, TLS extraction and Hyperscan-compatible content/regex matching verified')
 
 
 def check_inline(root,config,workers=4,ipv6=False,suppressed=False):
@@ -192,6 +193,7 @@ def check_inline(root,config,workers=4,ipv6=False,suppressed=False):
             assert request('/allowed-again')==b'native-inline-ok'
             counters=SnortControl(str(control_path)).call(['dump-counters'])
             assert counters['dump-counters']['native']['ips_actions'].get('reject',0)>0,counters
+            assert counters['dump-counters']['native'].get('hyperscan',{}).get('searches',0)>0,counters
             if environment.get('NDR_RESPONSE_LIBRARY'):
                 active=counters['dump-counters']['native'].get('active',{})
                 assert active.get('injects',0)>=2 and not active.get('failed_injects',0),active
@@ -215,7 +217,7 @@ def check_inline(root,config,workers=4,ipv6=False,suppressed=False):
         alerts=[json.loads(line) for path in logs.glob('*alert_json.txt') for line in path.read_text().splitlines()]
         assert all(event.get('sid') not in quiet for event in alerts),alerts
         print('Suppressed block, reject and drop retain verdict records; suppressed alerts stay silent')
-    print(('IPv6' if ipv6 else 'IPv4')+' four NFQ workers: allowed traffic, actual block/reject and recovery verified in isolated namespace')
+    print(('IPv6' if ipv6 else 'IPv4')+f' {workers} NFQ workers: allowed traffic, actual block/reject and recovery verified in isolated namespace')
 
 
 def check_suppressed_passive(root,config):

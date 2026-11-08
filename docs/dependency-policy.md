@@ -61,6 +61,16 @@ Go 后端使用项目内的查询语法解析与参数化 SQLite 执行器。旧
 
 来源：[Vectorscan 5.4.13 正式发布](https://github.com/VectorCamp/vectorscan/releases/tag/vectorscan/5.4.13)、[固定版本构建配置](https://github.com/VectorCamp/vectorscan/blob/vectorscan/5.4.13/CMakeLists.txt)、[Vectorscan ARM 与 API 说明](https://github.com/VectorCamp/vectorscan/blob/vectorscan/5.4.13/README.md)、[Snort 3.13.2.0 HS 依赖检测](https://github.com/snort3/snort3/blob/3.13.2.0/cmake/FindHS.cmake)。MCP 对 Arm Learning Paths 的正文返回不支持的 MIME，兼容依据以这些已读的固定源码和项目说明为准。
 
+## x86-64 Hyperscan（2026-11-08）
+
+查询时间：2026-11-08 21:08 Australia/Perth（UTC+08:00）。先复用上述 ARM 匹配引擎、Snort 和 LibDAQ 来源，再通过 GitHub CLI 查询 `intel/hyperscan/releases/latest`，使用 MCP Search Service 读取固定版本构建配置、许可及官方硬件要求。条件为公开可获取的正式开源发行、Snort 3.13.2.0 的 HS API、x86-64 Linux 和 GCC 14，排除开发分支与预发布。
+
+核定 Intel Hyperscan 5.4.2，官方最新开源正式发行，BSD-3-Clause，没有独立 LTS 线。实际下载归档的 SHA-256 固定在 `build_tools/snort-sources.json`。不将商业 Hyperscan 版本视为公开可复现的源码依赖。ARM 继续采用 Vectorscan 5.4.13，构建器按目标架构隔离来源及 SDK，两个库均为 Snort 的 `hyperscan` 插件提供实现。
+
+Hyperscan 构建 fat runtime，保留 SSSE3 / SSE4.2 / AVX2 分派，关闭上游明确标注为实验性的 AVX-512 选项。Hyperscan 上游硬件最低要求是 SSSE3，并非仅限 Intel 品牌处理器；具体可用实现由运行库检测。构建只选择共享库目标，开发依赖由 `setup_wsl.py --architecture x86_64` 获取，产物附带原始 LICENSE。
+
+来源：[Hyperscan 5.4.2 发布](https://github.com/intel/hyperscan/releases/tag/v5.4.2)、[固定版本 CMake](https://github.com/intel/hyperscan/blob/v5.4.2/CMakeLists.txt)、[官方硬件要求](https://intel.github.io/hyperscan/dev-reference/getting_started.html#hardware)、[固定版本许可](https://github.com/intel/hyperscan/blob/v5.4.2/LICENSE)。
+
 ## Go 后端工具链（2026-11-08）
 
 查询时间：2026-11-08 02:22 Australia/Perth（UTC+08:00，对应 2026-11-07 18:22 UTC）。通过 MCP Search Service 读取 [Go 官方发行索引](https://go.dev/dl/?mode=json)及 [go-sqlite3 官方发行页](https://github.com/mattn/go-sqlite3/releases)。条件为当前稳定版本，排除预发布；同时核对 Linux AMD64、ARM64 官方归档与 SHA-256，SQLite 驱动采用其内置 SQLite，不链接主机的旧 SQLite。

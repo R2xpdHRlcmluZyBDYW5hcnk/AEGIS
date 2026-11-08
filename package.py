@@ -142,6 +142,7 @@ tests/test-overview-range.cjs
 tests/test-range-context.cjs
 tests/test-rule-job-logs.cjs
 tests/test_build_workflow.py
+tests/test_engine_platform.py
 tests/test_deploy_backend.py
 tests/test_deploy_nft.py
 tests/test_go_backend.py

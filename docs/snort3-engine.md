@@ -4,11 +4,13 @@
 
 ## 来源和构建边界
 
-可选引擎工具固定 Snort 3.13.2.0、LibDAQ 3.0.29、Vectorscan 5.4.13 与 OpenAppID 来源，版本、URL 和 SHA-256 见 `build_tools/snort-sources.json`。归档哈希由项目固定，不等同于上游签名。第三方源码、下载物和二进制在源码树外处理，不提交到面板仓库。
+可选引擎工具固定 Snort 3.13.2.0、LibDAQ 3.0.29、ARM 的 Vectorscan 5.4.13、x86-64 的 Hyperscan 5.4.2 与 OpenAppID 来源，版本、URL 和 SHA-256 见 `build_tools/snort-sources.json`。归档哈希由项目固定，不等同于上游签名。第三方源码、下载物和二进制在源码树外处理，不提交到面板仓库。
 
 `build_tools/build-snort3-arm64.sh` 在 Linux 交叉构建 Debian 13 ARM64、glibc 2.41 目标；`setup_wsl.py` 为 WSL Debian 安装该工具所需软件包。该路径是可选集成工具，不是面板的通用运行要求。构建和安装会修改指定的工具目录，执行前审阅路径与依赖。
 
-构建目录默认按清单版本隔离，当前为 `/opt/ips-snort3/3.13.2.0`。默认临时源码与缓存退出即清理；显式指定 `SNORT_BUILD_WORK` 时由调用者清理。导出包映射至已有实例的固定安装位置 `/opt/ips-snort3/3.12.4.0`，目录名仅为历史路径；运行版本以 `snort -V` 和 `engine-manifest.json` 为准。二进制使用相对 RPATH 寻找随包 LibDAQ，不依赖构建目录。
+`build_tools/build-snort3.sh` 按构建主机架构选择目标，也可用 `SNORT_ENGINE_ARCH` 显式指定。ARM64 入口保留既有 SDK 路径；`build-snort3-x86_64.sh` 在 x86-64 Linux / WSL 原生构建，默认 SDK 为 `/opt/ips-snort3/<版本>-x86_64`。目标清单只保留实际使用的匹配库，ELF 架构校验决定编译器、验证运行器和引擎包的架构标签，不能通过文件名选择另一种架构。
+
+ARM 构建目录默认按清单版本隔离，当前为 `/opt/ips-snort3/3.13.2.0`。默认临时源码与缓存退出即清理；显式指定 `SNORT_BUILD_WORK` 时由调用者清理。导出包映射至固定安装位置 `/opt/ips-snort3/3.12.4.0`，目录名仅为历史路径；运行版本以 `snort -V` 和 `engine-manifest.json` 为准。二进制使用相对 RPATH 寻找随包 LibDAQ 和匹配库，不依赖构建目录。
 
 ### ARM 匹配加速
 
@@ -17,6 +19,23 @@
 主配置选择 `search_engine.search_method = 'hyperscan'`。引擎升级在校验候选配置前追加同一设置，保留其余搜索参数、规则文件、策略、抑制及元数据检查器；校验或启动失败恢复整棵旧引擎及原配置。没有自动把 PCRE 改写为 regex，也不切换规则策略。已有无 Vectorscan 的 SDK 不能直接复用，升级构建时应指定独立的 `SNORT_ENGINE_PREFIX`。
 
 开发电脑的原生回放覆盖大小写不敏感 content、Hyperscan regex、未命中规则及 HTTP / DNS / TLS 输出，独立 ARM64 内核验证多队列内联阻断和告警抑制后的阻断保留。正确性回放不能作为生产吞吐提升比例的依据。
+
+### x86-64 Hyperscan
+
+x86-64 选用 Intel 开源 Hyperscan，仍配置 `search_engine.search_method = 'hyperscan'`。采用 fat runtime，在支持的 SSSE3 / SSE4.2 / AVX2 实现之间按 CPU 能力分派，不使用 `-march=native`，不启用上游标注为实验性的 AVX-512 选项。运行库、软链接和许可随 `ips-snort3-amd64-<版本>-session3.tar.gz` 导出。现有控制台部署器仍限定 ARM64，AMD64 引擎包用于独立的 x86 运行环境。
+
+WSL Debian 的本地构建与验证命令如下，均不连接外部实例：
+
+```sh
+sudo python3 -B build_tools/setup_wsl.py --architecture x86_64
+sudo bash build_tools/build-snort3-x86_64.sh
+export SNORT_ENGINE_PREFIX=/opt/ips-snort3/3.13.2.0-x86_64
+python3 -B tests/check_snort_native.py --suppressed-blocks
+sudo env SNORT_ENGINE_PREFIX="$SNORT_ENGINE_PREFIX" unshare -n \
+  python3 -B tests/check_snort_native.py --inline --workers 4 --suppressed-blocks
+```
+
+导出使用 `python3 -B package-session-engine.py --prefix "$SNORT_ENGINE_PREFIX" --output <源码树外目录>`。会话扩展使用 `build_session_logger.py --engine <SDK>/bin/snort --output <源码树外目录>`，按引擎 ELF 选择对应编译器和头文件，并核对 SDK 的架构、来源、补丁及引擎摘要。IPv6 主动响应的内联回归另需同架构响应适配器，通过 `NDR_RESPONSE_LIBRARY` 指定，并添加 `--ipv6`。测试使用隔离网络命名空间和合成报文；x86 原生运行，ARM 跨架构回放使用 QEMU。
 
 规则更新由 AEGIS 内置 Go 实现直接下载、校验并处理文本规则归档。现有 PulledPork3 安装和仓库保持独立，不再作为运行期依赖；`IPS_PULLEDPORK` 不影响新的更新入口。参见 [Go 运行服务](go-runtime.md)。
 

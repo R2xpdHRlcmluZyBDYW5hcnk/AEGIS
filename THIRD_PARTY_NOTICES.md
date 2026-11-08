@@ -12,6 +12,8 @@ Snort、LibDAQ、OpenAppID 及外部库不提交到源码仓库。可选构建�
 
 ARM64 引擎包另含 [Vectorscan](https://github.com/VectorCamp/vectorscan) 5.4.13（BSD-3-Clause），以 Hyperscan 兼容接口提供 NEON 多模式匹配。源码、来源摘要及构建选项由引擎构建清单固定；运行包附带上游 LICENSE，不将第三方源码或编译输出纳入面板仓库。
 
+x86-64 引擎包使用 [Intel Hyperscan](https://github.com/intel/hyperscan) 5.4.2（BSD-3-Clause）。归档、校验值与目标选择同样由引擎构建工具固定，包内保留上游 LICENSE 及其中列出的第三方声明。
+
 ## 前端依赖
 
 Angular、RxJS、Zone.js、tslib、Apache ECharts、ZRender、Marked 与构建工具通过 npm 锁文件获取，依赖目录不提交。版本、来源、完整性值和各包声明的许可见 `frontend/package-lock.json`。生产构建提取许可到 `frontend-licenses.txt`，分发静态资源时一并保留。

@@ -63,6 +63,7 @@ def prepare(test='native',ipv6=False):
     go([],root/'project/ips-supervisor')
     for name in ('check_snort_native.py','snort_pcap.py','check_nfq_nat.py'):
         copy(ROOT/'tests'/name,root/'project/tests'/name)
+    copy(ROOT/'build_tools/engine_platform.py',root/'project/build_tools/engine_platform.py')
     copy(os.environ.get('SNORT_ENGINE_PREFIX','/opt/ips-snort3/3.12.4.0'),root/'opt/ips-snort3/3.12.4.0')
     for name in ('sh','mount','modprobe','unshare','poweroff','mkdir'):
         path=root/'usr/bin'/name
