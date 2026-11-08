@@ -3,7 +3,9 @@ import importlib.util
 import ipaddress
 import json
 from pathlib import Path
+import struct
 import unittest
+import zlib
 
 spec = importlib.util.spec_from_file_location('public_source_check', Path(__file__).with_name('check_public_source.py'))
 check = importlib.util.module_from_spec(spec)
@@ -11,6 +13,20 @@ spec.loader.exec_module(check)
 
 
 class PublicSourceTests(unittest.TestCase):
+    def test_documentation_png_requires_valid_chunks_without_metadata(self):
+        def chunk(kind, data):
+            return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data))
+        header = b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', 1, 1, 8, 2, 0, 0, 0))
+        pixels = chunk(b'IDAT', zlib.compress(b'\0\0\0\0'))
+        png = header + pixels + chunk(b'IEND', b'')
+        self.assertEqual(list(check.findings('docs/images/dashboard.png', png)), [])
+        for invalid in (png[:-1], png + b'private data', png[:20] + b'x' + png[21:],
+                        header + chunk(b'tEXt', b'Author\0private') + pixels + chunk(b'IEND', b''),
+                        header + pixels + chunk(b'eXIf', b'private') + chunk(b'IEND', b'')):
+            with self.subTest(invalid=invalid[:24]):
+                self.assertTrue(list(check.findings('docs/images/dashboard.png', invalid)))
+        self.assertTrue(list(check.findings('tests/dashboard.png', png)))
+
     def test_private_host_is_rejected_but_standard_network_template_is_allowed(self):
         network = check.PRIVATE_NETWORKS[-1]
         host = str(network.network_address + 1)

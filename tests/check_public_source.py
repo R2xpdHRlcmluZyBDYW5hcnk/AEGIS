@@ -7,8 +7,10 @@ import ipaddress
 import json
 from pathlib import Path
 import re
+import struct
 import subprocess
 import sys
+import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
 FORBIDDEN_SUFFIXES = {
@@ -27,8 +29,48 @@ PRIVATE_NETWORKS = tuple(ipaddress.ip_network(value) for value in
 IPV4 = re.compile(r'(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])')
 
 
+def documentation_png(data):
+    """Allow documentation pixels without text, EXIF or other private metadata."""
+    if not data.startswith(b'\x89PNG\r\n\x1a\n') or len(data) > 8 << 20:
+        return False
+    offset, chunks = 8, []
+    while offset + 12 <= len(data):
+        size = int.from_bytes(data[offset:offset + 4], 'big')
+        end = offset + 12 + size
+        if end > len(data):
+            return False
+        kind = data[offset + 4:offset + 8]
+        body = data[offset + 8:end - 4]
+        if kind not in (b'IHDR', b'IDAT', b'IEND', b'sRGB'):
+            return False
+        if zlib.crc32(kind + body) != int.from_bytes(data[end - 4:end], 'big'):
+            return False
+        if kind == b'IHDR':
+            if chunks or size != 13:
+                return False
+            width, height, depth, color, compression, filtering, interlace = struct.unpack('>IIBBBBB', body)
+            if not (0 < width <= 4096 and 0 < height <= 4096 and depth == 8 and color in (2, 6)
+                    and compression == filtering == interlace == 0):
+                return False
+        elif not chunks:
+            return False
+        elif kind == b'IEND':
+            return size == 0 and end == len(data) and b'IDAT' in chunks
+        elif kind == b'sRGB' and (size != 1 or body[0] > 3 or b'IDAT' in chunks or kind in chunks):
+            return False
+        elif kind == b'IDAT' and size == 0:
+            return False
+        chunks.append(kind)
+        offset = end
+    return False
+
+
 def findings(name, data):
     path = Path(name)
+    if path.parent.as_posix() == 'docs/images' and path.suffix.lower() == '.png':
+        if not documentation_png(data):
+            yield 'invalid documentation PNG or embedded metadata'
+        return
     if path.suffix.lower() in FORBIDDEN_SUFFIXES or set(path.parts) & FORBIDDEN_PARTS:
         yield 'generated, binary, credential or runtime file'
     try:

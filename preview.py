@@ -2,6 +2,7 @@
 import os
 import platform
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -19,6 +20,7 @@ def main():
 def serve():
     with tempfile.TemporaryDirectory(prefix='aegis-preview-') as directory:
         build(Path(directory))
+        shutil.copy2(ROOT / 'favicon.svg', Path(directory) / 'favicon.svg')
         stop=Path(directory)/'fixture.stop'
         command,env=native_fixture_command(directory,stop,19090)
         options=dict(creationflags=subprocess.CREATE_NEW_PROCESS_GROUP|subprocess.CREATE_NO_WINDOW) if platform.system()=='Windows' else dict(start_new_session=True)
