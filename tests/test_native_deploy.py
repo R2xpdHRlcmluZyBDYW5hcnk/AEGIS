@@ -79,13 +79,22 @@ class ConsoleUpdateTests(unittest.TestCase):
         manifest=dict(sources=expected,session_patch='ndr-session-2')
         module.validate_upgrade_sources(manifest,previous,expected)
         module.validate_upgrade_sources(dict(manifest,session_patch='ndr-session-3'),previous,expected)
-        for key in ('snort','libdaq','target'):
+        for key in ('snort','libdaq','vectorscan','target'):
             with self.subTest(source=key):
                 altered=dict(expected);altered[key]={}
                 with self.assertRaisesRegex(ValueError,'pinned'):
                     module.validate_upgrade_sources(dict(manifest,sources=altered),previous,expected)
         with self.assertRaisesRegex(ValueError,'ABI'):
             module.validate_upgrade_sources(manifest,{'sources':{'target':{}}},expected)
+
+    def test_vectorscan_selection_preserves_rules_and_other_search_settings(self):
+        with mock.patch.dict(sys.modules,{'fcntl':types.SimpleNamespace()} if sys.platform=='win32' else {}):
+            module=load('deploy-session-engine')
+        current="ips.rules = [[include fixture.rules]]\nsuppress = {{gid=1,sid=42}}\nsearch_engine = {queue_limit=123,search_method='ac_full'}\n"
+        updated=module.matching_config(current)
+        self.assertTrue(updated.startswith(current))
+        self.assertTrue(updated.endswith("search_engine.search_method = 'hyperscan'\n"))
+        self.assertEqual(module.matching_config(updated),updated)
 
     @unittest.skipIf(sys.platform=='win32','The engine deployment uses Linux absolute runtime paths')
     def test_full_runtime_switch_and_failures_restore_libraries_lua_and_configuration(self):
@@ -115,7 +124,13 @@ class ConsoleUpdateTests(unittest.TestCase):
                     manifest=dict(sources=expected,session_patch='ndr-session-2',sha256=hashlib.sha256(b'new bin/snort').hexdigest())
                     (candidate/'engine-manifest.json').write_text(json.dumps(manifest));return {}
                 active=types.SimpleNamespace(unpack_engine=unpack,private_json=lambda p,v:p.write_text(json.dumps(v)))
+                running={'ips','ips-web','ips-event-bridge','ips-rule-manager'}
+                def command(*args):
+                    if args[:2]==('systemctl','start'):running.update(args[2:])
+                    if args[:2]==('systemctl','stop'):running.difference_update(args[2:])
                 def apply(*args):
+                    self.assertTrue({'ips-web','ips-event-bridge'}<=running,
+                        'Tool-only backend updates still require a running console for health checks')
                     (program/'ips-web').write_text('new web')
                     (program/'backend-build.json').write_text('new backend manifest')
                     if failure=='startup':raise RuntimeError('candidate startup failed')
@@ -129,7 +144,7 @@ class ConsoleUpdateTests(unittest.TestCase):
                     return rename(path,target)
                 with mock.patch.multiple(module,PREFIX=prefix,PROGRAM=program,BACKUPS=backups,STATE=stage,CONFIG=config,
                     WEB_CONFIG=web,STATIC=static,LAYOUT=layout,SESSION_RECEIPT=root/'receipt',ROTATION=root/'rotation'), \
-                    mock.patch.object(module,'load',side_effect=lambda _,name:modules[name]),mock.patch.object(module,'run'), \
+                    mock.patch.object(module,'load',side_effect=lambda _,name:modules[name]),mock.patch.object(module,'run',side_effect=command), \
                     mock.patch.object(module.subprocess,'run',return_value=types.SimpleNamespace(returncode=0,stdout='',stderr='')), \
                     mock.patch.object(module,'ready_engine'),mock.patch.object(module,'resume_manager'), \
                     mock.patch.object(ips_control,'Client',return_value=client),mock.patch.object(Path,'rename',move):

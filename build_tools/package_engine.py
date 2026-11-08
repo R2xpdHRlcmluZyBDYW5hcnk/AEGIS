@@ -27,6 +27,7 @@ def build(output,prefix=None):
         if base.exists():
             files.update(path for path in base.rglob('*') if path.is_file() or path.is_symlink())
     files.update(prefix.glob('lib/libdaq.so*'))
+    files.update(prefix.glob('lib/libhs.so*'))
     files.add(prefix/'engine-manifest.json')
     checksums={}
     output.mkdir(parents=True,exist_ok=True)

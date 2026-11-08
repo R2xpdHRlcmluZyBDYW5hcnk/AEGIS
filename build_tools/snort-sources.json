@@ -9,6 +9,11 @@
     "url": "https://codeload.github.com/snort3/libdaq/tar.gz/refs/tags/v3.0.29",
     "sha256": "136deba78d195163687eb71a6dc81b725c27fde7765b7ef70eb741c371e887a8"
   },
+  "vectorscan": {
+    "version": "5.4.13",
+    "url": "https://codeload.github.com/VectorCamp/vectorscan/tar.gz/refs/tags/vectorscan/5.4.13",
+    "sha256": "11bfcd2dde32d8a08d1a2eebb09294b12a3fa2be140078f8091b751fa1fabd89"
+  },
   "openappid": {
     "url": "https://www.snort.org/downloads/openappid/33380",
     "sha256": "3046c5af1dd81a104f13d8e895226ef64bca7fa358238fb5f29c659081eaee2a"

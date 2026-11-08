@@ -73,8 +73,8 @@ def verify(plugin,binary=None,previous=None):
                             if time.monotonic()>deadline:raise RuntimeError('Reload generation did not advance')
                             time.sleep(.1)
                         assert process.pid==pid and process.poll() is None
-                        result=control.call(['appid-reload-detectors'],timeout=60)
-                        assert 'appid-reload-detectors' in result,result
+                        result=control.command('appid.reload_detectors()',timeout=60)
+                        assert not any(word in result.lower() for word in ('failed','error:')),result
                         try:control.command('resume()',timeout=10)
                         except RuntimeError:pass  # Offline EOF can close the control channel.
                         process.wait(timeout=90)

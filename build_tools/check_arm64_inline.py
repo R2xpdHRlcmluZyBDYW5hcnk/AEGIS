@@ -9,6 +9,7 @@ import subprocess
 import sys
 
 ROOT=Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(ROOT))
 WORK=Path(os.environ.get('SNORT_INLINE_WORK','/var/tmp/ips-snort3-vm'))
 KERNEL='6.12.115+deb13-arm64'
 
@@ -29,7 +30,7 @@ def copy(source,target):
     else: shutil.copy2(source,target)
 
 
-def prepare(test='native'):
+def prepare(test='native',ipv6=False):
     if os.geteuid()!=0:
         raise RuntimeError('Run from WSL Debian as root')
     root=WORK/'root';init=WORK/'initramfs';downloads=WORK/'downloads'
@@ -118,6 +119,16 @@ busybox dmesg | busybox tail -n 12
         command={'nat':'tests/check_nfq_nat.py',
                  'suppressed':'tests/check_snort_native.py --inline --suppressed-blocks'}[test]
         path.write_text(path.read_text().replace('tests/check_snort_native.py --inline',command))
+    path=root/'run-test.sh'
+    if ipv6:
+        path.write_text(path.read_text().replace('tests/check_snort_native.py --inline',
+            'tests/check_snort_native.py --inline --ipv6'))
+    adapter=os.environ.get('NDR_RESPONSE_LIBRARY')
+    if adapter:
+        target=Path('/opt/ips-native-response/1/libips-response.so')
+        copy(adapter,root/target.relative_to('/'))
+        path.write_text(path.read_text().replace('cd /project\n',
+            'export NDR_RESPONSE_LIBRARY='+str(target)+'\ncd /project\n'))
     names=subprocess.check_output(['find','.','-print0'],cwd=init)
     archive=subprocess.run(['cpio','--null','-o','--format=newc'],input=names,cwd=init,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,check=True).stdout
     (WORK/'initrd.gz').write_bytes(gzip.compress(archive,compresslevel=1))
@@ -129,10 +140,12 @@ def main():
     tests=parser.add_mutually_exclusive_group()
     tests.add_argument('--nat',action='store_true')
     tests.add_argument('--suppressed-blocks',action='store_true')
+    parser.add_argument('--ipv6',action='store_true')
     args=parser.parse_args()
+    if args.ipv6 and args.nat:parser.error('--ipv6 applies to the native inline tests')
     if WORK.parent!=Path('/var/tmp') or not WORK.name.startswith('ips-snort3-vm'):
         raise ValueError('Unexpected VM workspace')
-    root=prepare('nat' if args.nat else 'suppressed' if args.suppressed_blocks else 'native')
+    root=prepare('nat' if args.nat else 'suppressed' if args.suppressed_blocks else 'native',args.ipv6)
     command=['qemu-system-aarch64','-machine','virt','-cpu','max','-smp','4','-m','2048','-nographic','-no-reboot',
              '-kernel',str(root/'boot'/('vmlinuz-'+KERNEL)),'-initrd',str(WORK/'initrd.gz'),
              '-append','console=ttyAMA0 panic=-1','-virtfs','local,path='+str(root)+',mount_tag=rootfs,security_model=none',

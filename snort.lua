@@ -49,3 +49,6 @@ extractor = {
         { service = 'file', on_events = 'eof', fields = common .. 'filename fuid source analyzers mime_type is_orig seen_bytes total_bytes duration timedout sha256' }
     }
 }
+
+search_engine = search_engine or {}
+search_engine.search_method = 'hyperscan'

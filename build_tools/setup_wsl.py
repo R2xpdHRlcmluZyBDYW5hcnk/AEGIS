@@ -9,7 +9,7 @@ def main():
         raise SystemExit('Run as root inside WSL Debian 13')
     packages=['gcc-aarch64-linux-gnu','g++-aarch64-linux-gnu','cmake','ninja-build','autoconf',
               'automake','libtool','pkg-config','flex','libfl-dev','qemu-user','patchelf',
-              'python3','python3-requests','ca-certificates','openssl']
+              'python3','python3-requests','ca-certificates','openssl','libboost-dev','ragel']
     packages += [name+':arm64' for name in ('libdumbnet-dev','libhwloc-dev','libluajit-5.1-dev',
                  'libpcap-dev','libpcre2-dev','libssl-dev','liblzma-dev','zlib1g-dev','libmnl-dev',
                  'libunwind-dev','libnuma-dev','uuid-dev','libbrotli-dev')]

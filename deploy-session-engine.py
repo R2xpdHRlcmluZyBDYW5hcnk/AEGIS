@@ -95,11 +95,19 @@ def extractor_config(current, revision):
 def validate_upgrade_sources(manifest, previous, expected):
     if manifest.get('session_patch') not in ('ndr-session-1','ndr-session-2','ndr-session-3'):
         raise ValueError('Engine session patch does not match')
-    for key in ('snort','libdaq','target'):
+    for key in ('snort','libdaq','vectorscan','target'):
         if manifest.get('sources',{}).get(key)!=expected.get(key):
             raise ValueError('Engine sources differ from the pinned release: '+key)
     if previous.get('sources',{}).get('target')!=expected.get('target'):
         raise ValueError('Engine target ABI differs from the installed runtime')
+
+
+def matching_config(current):
+    """Preserve inspector and rule settings while selecting the bundled matcher."""
+    selection="search_engine = search_engine or {}\nsearch_engine.search_method = 'hyperscan'"
+    if current.rstrip().endswith(selection):
+        return current
+    return current.rstrip()+'\n\n'+selection+'\n'
 
 
 def restore_engine_tree(backup):
@@ -174,7 +182,7 @@ def upgrade(release,engine,plugin=None):
             prepared=PREFIX.with_name(PREFIX.name+'.upgrade-'+backup.name)
             if prepared.exists():raise ValueError('Engine preparation directory already exists')
             shutil.copytree(candidate,prepared,symlinks=True)
-            updated=extractor_config(CONFIG.read_text(),revision)
+            updated=matching_config(extractor_config(CONFIG.read_text(),revision))
             extension_changes={}
             plugin_path=None
             validation_args=[]
@@ -240,8 +248,10 @@ def upgrade(release,engine,plugin=None):
                 if str(plugin_path) not in Path('/proc',str(pid),'maps').read_text():
                     raise RuntimeError('Updated session extension did not load')
                 session_logger.mark_loaded()
-            native.apply(release,web.wait_ready,{},static.snapshot)
+            # Backend updates may only replace tools and leave service selection empty.
+            # Restore the console before their health check, even for identical Go binaries.
             run('systemctl','start','ips-event-bridge','ips-web')
+            native.apply(release,web.wait_ready,{},static.snapshot)
             run(sys.executable,'-B',str(release/'deploy-angular.py'),'--release',str(release))
             if hashlib.sha256((PREFIX/'bin/snort').read_bytes()).hexdigest()!=manifest['sha256']:
                 raise RuntimeError('Installed engine digest changed')

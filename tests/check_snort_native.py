@@ -30,7 +30,10 @@ class SnortControl(DeploymentControl):
     def call(self,commands,timeout=10):
         if commands!=['dump-counters']:return super().call(commands,timeout)
         reply=self.command('dump_stats("json")',timeout)
-        return {'dump-counters':json.JSONDecoder().raw_decode(reply[reply.index('{'):])[0]}
+        data=json.JSONDecoder().raw_decode(reply[reply.index('{'):])[0]
+        native={group['name']:{counter['name']:counter['value'] for counter in group['counters']}
+            for section in data['sections'] for group in section['groups']}
+        return {'dump-counters':{'native':native}}
 
 
 def execute(args, **kwargs):
@@ -88,7 +91,10 @@ def stop(process):
 
 def check_offline(root,config):
     (root/'rules/local.rules').write_text('alert http any any -> any any (msg:"native HTTP"; http_uri; content:"/ndr-smoke"; sid:9000001; rev:1;)\n'
-        'alert dns any any -> any any (msg:"native DNS"; content:"|07|example|04|test|00|"; sid:9000002; rev:1;)\n')
+        'alert dns any any -> any any (msg:"native DNS"; content:"|07|example|04|test|00|"; sid:9000002; rev:1;)\n'
+        'alert http any any -> any any (msg:"native case-insensitive match"; http_uri; content:"/NDR-SMOKE",nocase; sid:9000003; rev:1;)\n'
+        'alert http any any -> any any (msg:"native negative match"; http_uri; content:"/not-present"; sid:9000004; rev:1;)\n'
+        r'alert http any any -> any any (msg:"native Hyperscan regex"; http_uri; regex:"/\/NDR-SMOKE/i"; sid:9000005; rev:1;)'+'\n')
     execute(engine()+['-T','-c',str(config)],timeout=90)
     logs=root/'offline';logs.mkdir();pcap=logs/'fixture.pcap';capture(pcap,tls_hostname='example.test')
     execute(engine()+['-c',str(config),'-r',str(pcap),'-l',str(logs)],timeout=90)
@@ -96,7 +102,10 @@ def check_offline(root,config):
     assert any(row.get('query')=='example.test' for row in events)
     assert any(row.get('uri')=='/ndr-smoke' for row in events)
     assert any(row.get('server_name')=='example.test' for row in events)
-    print('Native HTTP, DNS and TLS extraction verified')
+    signatures={int(row['sid']) for row in events if row.get('sid') is not None}
+    assert {9000001,9000002,9000003,9000005}<=signatures,signatures
+    assert 9000004 not in signatures,signatures
+    print('Native HTTP, DNS, TLS extraction and Vectorscan content/regex matching verified')
 
 
 def check_inline(root,config,workers=4,ipv6=False,suppressed=False):
@@ -182,7 +191,7 @@ def check_inline(root,config,workers=4,ipv6=False,suppressed=False):
                 assert dropped_packets()>before
             assert request('/allowed-again')==b'native-inline-ok'
             counters=SnortControl(str(control_path)).call(['dump-counters'])
-            assert counters['dump-counters']['ips']['rejected']>0,counters
+            assert counters['dump-counters']['native']['ips_actions'].get('reject',0)>0,counters
             if environment.get('NDR_RESPONSE_LIBRARY'):
                 active=counters['dump-counters']['native'].get('active',{})
                 assert active.get('injects',0)>=2 and not active.get('failed_injects',0),active
@@ -247,7 +256,7 @@ def check_suppressed_dump(root,config):
 def check_weird_sampling(root,config):
     """Verify the default sampling window without reducing NOTICE coverage."""
     import struct
-    from tests.check_native_rule_management import read_frames,write_frames
+    from tests.snort_pcap import read_frames,write_frames
     source=root/'weird-source.pcap';capture(source)
     frames=read_frames(source)
     query=frames[8][2];response=bytearray(frames[9][2])

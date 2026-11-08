@@ -4,11 +4,13 @@
 
 ## Snort 补丁
 
-`build_tools/patch_snort.py` 包含匹配 Snort 3.12.4.0 的上游片段和本项目 session_id 修改，按 GPL-2.0-only 提供，文件内标明维护日期。上游为 [Snort 3.12.4.0](https://github.com/snort3/snort3/tree/3.12.4.0)，完整许可和特别声明见 [Snort-COPYING.txt](LICENSES/Snort-COPYING.txt)，GPLv2 正文见 [GPL-2.0.txt](LICENSES/GPL-2.0.txt)。
+`build_tools/patch_snort.py` 包含匹配 Snort 3.13.2.0 的上游片段和本项目 session_id 修改，按 GPL-2.0-only 提供，文件内标明维护日期。上游为 [Snort 3.13.2.0](https://github.com/snort3/snort3/tree/3.13.2.0)，完整许可和特别声明见 [Snort-COPYING.txt](LICENSES/Snort-COPYING.txt)，GPLv2 正文见 [GPL-2.0.txt](LICENSES/GPL-2.0.txt)。
 
 `native_session_logger.cc` 使用同版 Snort 的 Flow、TCP tracker、AppID 和插件 API，按 GPL-2.0-only 提供。可选扩展包附带该文件、构建清单及上述许可；需要匹配经过 session 补丁的头文件与运行二进制，不能仅按版本号假定 ABI 相同。
 
 Snort、LibDAQ、OpenAppID 及外部库不提交到源码仓库。可选构建工具的来源和校验值见 `build_tools/snort-sources.json`。另行分发生成的引擎包时，需保留上游版权、许可和适用的对应源码，面板源码包不能替代这些义务。
+
+ARM64 引擎包另含 [Vectorscan](https://github.com/VectorCamp/vectorscan) 5.4.13（BSD-3-Clause），以 Hyperscan 兼容接口提供 NEON 多模式匹配。源码、来源摘要及构建选项由引擎构建清单固定；运行包附带上游 LICENSE，不将第三方源码或编译输出纳入面板仓库。
 
 ## 前端依赖
 

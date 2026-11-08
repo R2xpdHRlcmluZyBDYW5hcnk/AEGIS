@@ -4,11 +4,19 @@
 
 ## 来源和构建边界
 
-可选引擎工具固定 Snort 3.13.2.0、LibDAQ 3.0.29 与 OpenAppID 来源，版本、URL 和 SHA-256 见 `build_tools/snort-sources.json`。归档哈希由项目固定，不等同于上游签名。第三方源码、下载物和二进制在源码树外处理，不提交到面板仓库。
+可选引擎工具固定 Snort 3.13.2.0、LibDAQ 3.0.29、Vectorscan 5.4.13 与 OpenAppID 来源，版本、URL 和 SHA-256 见 `build_tools/snort-sources.json`。归档哈希由项目固定，不等同于上游签名。第三方源码、下载物和二进制在源码树外处理，不提交到面板仓库。
 
 `build_tools/build-snort3-arm64.sh` 在 Linux 交叉构建 Debian 13 ARM64、glibc 2.41 目标；`setup_wsl.py` 为 WSL Debian 安装该工具所需软件包。该路径是可选集成工具，不是面板的通用运行要求。构建和安装会修改指定的工具目录，执行前审阅路径与依赖。
 
 构建目录默认按清单版本隔离，当前为 `/opt/ips-snort3/3.13.2.0`。默认临时源码与缓存退出即清理；显式指定 `SNORT_BUILD_WORK` 时由调用者清理。导出包映射至已有实例的固定安装位置 `/opt/ips-snort3/3.12.4.0`，目录名仅为历史路径；运行版本以 `snort -V` 和 `engine-manifest.json` 为准。二进制使用相对 RPATH 寻找随包 LibDAQ，不依赖构建目录。
+
+### ARM 匹配加速
+
+引擎构建 Vectorscan 的 ARMv8 NEON 共享库并启用 Snort 的 `hyperscan` 搜索插件，不使用编译主机的 native 指令或要求 SVE / SVE2。发布包包含 `libhs.so` 链及对应许可，运行时不需要在目标设备安装开发工具。`verify_snort3.py` 同时检查固定库版本和实际搜索插件，缺失时构建失败。
+
+主配置选择 `search_engine.search_method = 'hyperscan'`。引擎升级在校验候选配置前追加同一设置，保留其余搜索参数、规则文件、策略、抑制及元数据检查器；校验或启动失败恢复整棵旧引擎及原配置。没有自动把 PCRE 改写为 regex，也不切换规则策略。已有无 Vectorscan 的 SDK 不能直接复用，升级构建时应指定独立的 `SNORT_ENGINE_PREFIX`。
+
+开发电脑的原生回放覆盖大小写不敏感 content、Hyperscan regex、未命中规则及 HTTP / DNS / TLS 输出，独立 ARM64 内核验证多队列内联阻断和告警抑制后的阻断保留。正确性回放不能作为生产吞吐提升比例的依据。
 
 规则更新由 AEGIS 内置 Go 实现直接下载、校验并处理文本规则归档。现有 PulledPork3 安装和仓库保持独立，不再作为运行期依赖；`IPS_PULLEDPORK` 不影响新的更新入口。参见 [Go 运行服务](go-runtime.md)。
 

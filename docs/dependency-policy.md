@@ -51,6 +51,16 @@ parse5 升级后引入其所需的 entities 9.0.0。锁文件通过核定工具�
 
 Go 后端使用项目内的查询语法解析与参数化 SQLite 执行器。旧 Luqum / PLY 查询解析实现及专用 Python 依赖包已移除；构建和部署工具只使用 Python 标准库。固定 Go 工具链、模块与 SQLite 版本见 build_tools/go-sources.json、backend/go.mod 和 backend/go.sum。
 
+## ARM Vectorscan（2026-11-08）
+
+查询及复核截至 2026-11-08 20:31 Australia/Perth（UTC+08:00）。先复用 `docs/snort3-engine.md` 的 Snort 3.13.2.0、LibDAQ 3.0.29 记录，再通过 GitHub CLI 查询 `VectorCamp/vectorscan/releases/latest`，使用 MCP Search Service 核对固定版本 CMake、Vectorscan ARM 支持与 Snort 搜索引擎源码。条件为当前正式稳定发行、ARM64 NEON、Hyperscan 5.4 API 兼容，排除预发布和开发分支。
+
+核定 Vectorscan 5.4.13，官方于 2026-08-23 发布，BSD-3-Clause；该项目没有单独 LTS 发行线。源码归档及实际下载的 SHA-256 固定在 `build_tools/snort-sources.json`，不把自算摘要描述为上游签名。构建依赖由 `build_tools/setup_wsl.py` 自动安装 Debian 的 Boost 开发头文件和 Ragel；库与引擎由同一 ARM64 GCC 14.2 工具链编译，不引入目标设备构建依赖。
+
+构建关闭上游示例、工具、微基准、文档及单元测试目标，只导出共享运行库；集成正确性由本项目合成流量、内联和部署回滚用例验证。匹配采用 ARMv8 NEON，关闭 host-native 和 SVE / SVE2，兼容目标 CPU 的两个集群。所有下载、源码和构建输出在源码树之外。
+
+来源：[Vectorscan 5.4.13 正式发布](https://github.com/VectorCamp/vectorscan/releases/tag/vectorscan/5.4.13)、[固定版本构建配置](https://github.com/VectorCamp/vectorscan/blob/vectorscan/5.4.13/CMakeLists.txt)、[Vectorscan ARM 与 API 说明](https://github.com/VectorCamp/vectorscan/blob/vectorscan/5.4.13/README.md)、[Snort 3.13.2.0 HS 依赖检测](https://github.com/snort3/snort3/blob/3.13.2.0/cmake/FindHS.cmake)。MCP 对 Arm Learning Paths 的正文返回不支持的 MIME，兼容依据以这些已读的固定源码和项目说明为准。
+
 ## Go 后端工具链（2026-11-08）
 
 查询时间：2026-11-08 02:22 Australia/Perth（UTC+08:00，对应 2026-11-07 18:22 UTC）。通过 MCP Search Service 读取 [Go 官方发行索引](https://go.dev/dl/?mode=json)及 [go-sqlite3 官方发行页](https://github.com/mattn/go-sqlite3/releases)。条件为当前稳定版本，排除预发布；同时核对 Linux AMD64、ARM64 官方归档与 SHA-256，SQLite 驱动采用其内置 SQLite，不链接主机的旧 SQLite。
