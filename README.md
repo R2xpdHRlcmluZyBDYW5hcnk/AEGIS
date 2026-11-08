@@ -10,7 +10,7 @@ Angular 与 Go 实现的 Snort 3 网络检测控制台，提供安全概览、�
 python -B preview.py
 ```
 
-打开 http://127.0.0.1:19090，账户 `admin`，密码 `preview-only`。预览通过真实 Go 请求路径运行，使用仅存在于测试程序的合成数据夹具，只绑定回环地址，退出后清理，不连接检测设备。`tests/serve_preview.py` 保留为旧实现的浏览器对照夹具，不随 Go 控制台启动。
+打开 http://127.0.0.1:19090，账户 `admin`，密码 `preview-only`。预览通过真实 Go 请求路径运行，使用仅存在于测试程序的合成数据夹具，只绑定回环地址，退出后清理，不连接检测设备。
 
 ## 构建
 
@@ -30,7 +30,7 @@ python3 -B build_frontend.py --output /var/tmp/ndr-console-static
 
 ## 部署
 
-运行环境为 Linux 与 systemd，后端需要 Python 3.13 或更新版本。Snort 3、LibDAQ、规则与 PulledPork3 独立安装。面板源码不限定目标 CPU 架构；可选引擎交叉编译工具仅覆盖清单声明的 ARM64 目标。
+运行环境为 Linux 与 systemd。运行服务与生产维护入口使用 Go，目标机无需 Go 工具链；Python 3.13 或更新版本仅供构建和安装部署工具使用。Snort 3、LibDAQ 与规则独立安装，规则更新由项目内的 Go 更新器执行。面板源码不限定目标 CPU 架构；可选引擎交叉编译工具仅覆盖清单声明的 ARM64 目标。
 
 首次接入、更新和回滚见 [部署说明](README-deploy.md)，功能说明见 [使用说明](IPS-使用说明.md)。本地模型总结、规则建议及取消行为见 [本地模型研判](docs/local-llm.md)。已有安装的更新必须显式指定 SSH 目标：
 
@@ -48,12 +48,12 @@ QUIC 握手及可见路径追踪可选接入受限的 Wireshark 观察组件，�
 
 ```sh
 python3 -B tests/run_backend.py discover -s tests -p 'test_*.py'
-python3 -B tests/run_backend.py -q test_ips_web
+python3 -B build_tools/go_backend.py -- test -race -count=1 -timeout=120s ./...
 ```
 
-生产构建包含前端产物一致性与组件回归。桌面浏览器回归使用 `tests/run_chart_regression.py --release <发布包>`，Chrome 路径可用 `CHROME_PATH` 指定。测试在开发机上使用合成数据或临时副本。维护约定见 [AGENTS.md](AGENTS.md)。提交公开源码前执行 `python -B tests/check_public_source.py`，检查暂存区中的凭据、个人路径、私网主机地址和运行产物。
+生产构建包含前端产物一致性与组件回归。桌面浏览器回归使用 `tests/run_browser_regression.py --release <发布包>`，Chrome 路径可用 `CHROME_PATH` 指定。测试在开发机上使用合成数据或临时副本。维护约定见 [AGENTS.md](AGENTS.md)。提交公开源码前执行 `python -B tests/check_public_source.py`，检查暂存区中的凭据、个人路径、私网主机地址和运行产物。
 
-搜索语法、OpenAppID 文本渲染、会话详情与本地推理取消可运行 `python -B tests/run_hunt_regression.py --release <发布包>`；该回归仅启动回环预览与无界面的桌面 Chrome，使用合成事件与模型响应。
+桌面回归通过真实 Go 入口验证登录、六个页面、查询、会话详情、分页和规则操作；仅启动回环预览和无界面桌面 Chrome。模型推理及取消行为由 Go 回归验证。
 
 ## 许可
 

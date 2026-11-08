@@ -40,7 +40,7 @@ def snapshot(cfg):
             'db_inode': db.stat().st_ino,
             'engine_pid': Path('/run/snort/snort.pid').read_text().strip() if Path('/run/snort/snort.pid').exists() else None,
             'supervisor_pid': supervisor.stdout.decode().strip() if supervisor.returncode == 0 else None,
-            'console_pids': subprocess.run(['pgrep', '-f', '^python3 '+re.escape(str(Path(current['program_dir'])/'ips-web'))],capture_output=True).stdout.decode().split(),
+            'console_pids': subprocess.run(['pgrep', '-f', '^'+re.escape(str(Path(current['program_dir'])/'ips-web'))+r'( |$)'],capture_output=True).stdout.decode().split(),
             'crontab': hashlib.sha256(cron.stdout).hexdigest() if cron is not None else None}
 
 

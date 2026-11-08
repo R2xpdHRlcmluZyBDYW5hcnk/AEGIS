@@ -24,7 +24,7 @@ def build(output):
         if binary[:6]!=b'\x7fELF\x02\x01' or int.from_bytes(binary[18:20],'little')!=183:raise ValueError('Expected ARM64 ELF')
         payload={'libips-response.so':binary,'native_response.c':(ROOT/'native_response.c').read_bytes(),
                  'deploy-native-response.py':(ROOT/'deploy-native-response.py').read_bytes(),
-                 'log_storage.py':(ROOT/'log_storage.py').read_bytes()}
+                 'deployment_support.py':(ROOT/'deployment_support.py').read_bytes()}
         metadata=dict(revision=1,architecture='aarch64',compiler=subprocess.check_output([compiler,'-dumpfullversion'],text=True).strip(),
             flags=flags,sha256={name:hashlib.sha256(value).hexdigest() for name,value in payload.items()})
         payload['manifest.json']=(json.dumps(metadata,indent=2)+'\n').encode()

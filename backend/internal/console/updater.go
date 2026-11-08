@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -20,7 +19,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 	"unicode/utf8"
 )
 
@@ -172,29 +170,7 @@ func downloadCustom(ctx context.Context, item Object, archive, receipt string) e
 	if err = os.Rename(name, archive); err != nil {
 		return err
 	}
-	return writeJSON(receipt, Object{"source": item["name"], "sha256": hex.EncodeToString(digest[:]), "updater": "PulledPork3", "definition": definitionDigest(item)})
-}
-func pulledPorkConfig(source string, settings Object, output, work string) (string, error) {
-	policy := text(get(settings, "ips_policy", "balanced"))
-	if policy != "balanced" && policy != "connectivity" && policy != "security" && policy != "max-detect" {
-		return "", errors.New("IPS 策略无效")
-	}
-	version := "3.13.2.0"
-	values := []string{"community_ruleset = " + strconv.FormatBool(source == "snort/community" || strings.HasPrefix(source, "custom/")), "registered_ruleset = " + strconv.FormatBool(source == "snort/registered"), "LightSPD_ruleset = " + strconv.FormatBool(source == "snort/lightspd"), "rule_mode = simple", "ips_policy = " + policy, "include_disabled_rules = true", "ignored_files = includes.rules,snort3-deleted.rules", "rule_path = " + output, "temp_path = " + work}
-	if source == "snort/registered" || source == "snort/lightspd" {
-		code := text(settings["oinkcode"])
-		if !oinkPattern.MatchString(code) {
-			return "", errors.New("此规则源需要有效 Oinkcode")
-		}
-		values = append(values, "oinkcode = "+code)
-	}
-	if source == "snort/registered" {
-		version = registeredSnapshot(text(settings["registered_version"]))
-		if !sourceVersion.MatchString(version) || version == "auto" {
-			return "", errors.New("Registered 规则快照无效")
-		}
-	}
-	return strings.Join(append(values, "snort_version = "+version), "\n") + "\n", nil
+	return writeJSON(receipt, Object{"source": item["name"], "sha256": hex.EncodeToString(digest[:]), "updater": "AEGIS Go", "definition": definitionDigest(item)})
 }
 func groupTokens(files map[string][]byte) map[string][]string {
 	members := map[string]map[string]bool{}
@@ -310,7 +286,7 @@ func applyRulePolicy(ctx context.Context, raw string, p rulePaths, groups map[st
 	}
 	return strings.Join(out, "\n"), nil
 }
-func updateRuleSource(ctx context.Context, p rulePaths, source string, settings Object, offline bool, custom Object, pool *Pool, budget int, log func(string)) (string, error) {
+func updateRuleSource(ctx context.Context, p rulePaths, source string, settings Object, offline bool, custom Object, pool *Pool, log func(string)) (string, error) {
 	log("处理规则来源 " + source)
 	key := sourceKey(source)
 	archive, receipt := filepath.Join(p.Cache, key+"-rules.tar.gz"), filepath.Join(p.Cache, key+"-receipt.json")
@@ -328,7 +304,7 @@ func updateRuleSource(ctx context.Context, p rulePaths, source string, settings 
 			}
 		}
 	}
-	recipe := Object{"source": source, "policy": get(settings, "ips_policy", "balanced"), "snapshot": snapshot, "definition": definition, "parser": "console-1"}
+	recipe := Object{"source": source, "policy": get(settings, "ips_policy", "balanced"), "snapshot": snapshot, "definition": definition, "parser": nativeRuleParserVersion}
 	var archiveDigest string
 	if offline || custom != nil {
 		var saved Object
@@ -364,112 +340,37 @@ func updateRuleSource(ctx context.Context, p rulePaths, source string, settings 
 			}
 		}
 	}
-	work, err := os.MkdirTemp(p.Cache, "pulledpork-")
+	work, err := os.MkdirTemp(p.Cache, "native-rules-")
 	if err != nil {
 		return "", err
 	}
 	defer os.RemoveAll(work)
-	cachedInput := ""
-	if offline || custom != nil {
-		filename := map[string]string{"snort/community": "snort3-community-rules.tar.gz", "snort/registered": "snortrules-snapshot-cached.tar.gz", "snort/lightspd": "Talos_LightSPD.tar.gz"}[source]
-		if filename == "" {
-			filename = "snort3-community-rules.tar.gz"
-		}
-		cachedInput = filepath.Join(work, filename)
-		if custom != nil {
-			files, err := customRuleFiles(archive)
-			if err != nil {
-				return "", err
-			}
-			names := []string{}
-			for n := range files {
-				names = append(names, n)
-			}
-			sort.Strings(names)
-			var merged bytes.Buffer
-			for _, n := range names {
-				merged.Write(files[n])
-				merged.WriteByte('\n')
-			}
-			data, err := rulesArchive(map[string][]byte{"snort3-community-rules/snort3-community.rules": merged.Bytes()})
-			if err != nil {
-				return "", err
-			}
-			if err = atomicWrite(cachedInput, data, 0600); err != nil {
-				return "", err
-			}
-		} else if err = copyFile(archive, cachedInput); err != nil {
-			return "", err
-		}
-	}
-	program := os.Getenv("IPS_PULLEDPORK")
-	if program == "" {
-		program = "/opt/pulledpork3/pulledpork.py"
-	}
-	candidate, attempt, diagnostics := "", "", ""
-	success := false
-	for i := 0; i < 3; i++ {
-		attempt = filepath.Join(work, "attempt-"+strconv.Itoa(i))
-		if err = os.Mkdir(attempt, 0700); err != nil {
-			return "", err
-		}
-		candidate = filepath.Join(attempt, "candidate.rules")
-		private := filepath.Join(attempt, "pulledpork.conf")
-		config, err := pulledPorkConfig(source, settings, candidate, attempt)
+	original := archive
+	if !offline && custom == nil {
+		log("下载并校验官方规则 " + source)
+		data, err := downloadOfficialRules(ctx, source, settings, func(ctx context.Context, address string, limit int64) ([]byte, error) {
+			return fetchDownload(ctx, address, limit, "", true)
+		})
 		if err != nil {
 			return "", err
 		}
-		if err = atomicWrite(private, []byte(config), 0600); err != nil {
+		original = filepath.Join(work, "source.tar.gz")
+		if err = atomicWrite(original, data, 0600); err != nil {
 			return "", err
 		}
-		args := []string{"-B", program, "-c", private, "-k", "-q"}
-		if cachedInput != "" {
-			args = append(args, "--file", cachedInput)
-		}
-		runCtx, cancel := context.WithTimeout(ctx, 900*time.Second)
-		cmd := exec.CommandContext(runCtx, "/usr/bin/python3", args...)
-		configureCommand(cmd)
-		cmd.Env = append(os.Environ(), "PYTHONUNBUFFERED=1", "PYTHONDONTWRITEBYTECODE=1", "IPS_PULLEDPORK_PROGRESS=1", "IPS_PULLEDPORK_TEXT_ONLY=1", "IPS_PULLEDPORK_WORKERS="+strconv.Itoa(budget))
-		var output bytes.Buffer
-		writer := &boundedLogWriter{max: 16 << 20, write: func(b []byte) { output.Write(b) }}
-		cmd.Stdout = writer
-		cmd.Stderr = writer
-		err = cmd.Run()
-		cancel()
-		diagnostics = output.String()
-		if err == nil && !writer.exceeded && fileExists(candidate) {
-			success = true
-			break
-		}
-		if !offline && custom == nil && strings.Contains(diagnostics, "Official rules checksum differs") && i < 2 {
-			log("上游摘要与归档不一致，重新下载校验")
-			continue
-		}
-		break
 	}
-	if !success {
-		return "", errors.New("PulledPork3 未能生成规则候选，活动规则已保留")
-	}
-	original := archive
-	if !offline && custom == nil {
-		downloaded, _ := filepath.Glob(filepath.Join(attempt, "PulledPork-*/downloaded_rulesets/*"))
-		matches := []string{}
-		for _, f := range downloaded {
-			if strings.HasSuffix(f, ".tar.gz") || strings.HasSuffix(f, ".tgz") {
-				matches = append(matches, f)
-			}
-		}
-		if len(matches) != 1 {
-			return "", errors.New("官方规则归档数量不符合预期")
-		}
-		original = matches[0]
-	}
-	files, err := archiveRules(original)
+	files, err := readRuleBundle(original)
 	if err != nil {
 		return "", err
 	}
-	groups := groupTokens(files)
-	raw, err := regularRead(candidate, 256<<20)
+	version := "3.13.2.0"
+	var engine Object
+	if readJSON(filepath.Join(enginePrefix(), "engine-manifest.json"), &engine) == nil {
+		if value := text(object(object(engine["sources"])["snort"])["version"]); value != "" {
+			version = value
+		}
+	}
+	raw, groups, err := compileRuleBundle(ctx, files, source, version, text(get(settings, "ips_policy", "balanced")), pool)
 	if err != nil {
 		return "", err
 	}
@@ -492,7 +393,7 @@ func updateRuleSource(ctx context.Context, p rulePaths, source string, settings 
 		if err != nil {
 			return "", err
 		}
-		if err = writeJSON(receipt, Object{"source": source, "sha256": archiveDigest, "updater": "PulledPork3"}); err != nil {
+		if err = writeJSON(receipt, Object{"source": source, "sha256": archiveDigest, "updater": "AEGIS Go"}); err != nil {
 			return "", err
 		}
 	}
@@ -558,15 +459,14 @@ func UpdateRules(ctx context.Context, p rulePaths, offline bool, sources string,
 	results := make([]candidate, len(selected))
 	queue := make(chan int)
 	var wg sync.WaitGroup
-	count := min(2, min(len(selected), WorkerCount()))
-	budget := max(1, WorkerCount()/max(1, count))
+	count := min(len(selected), WorkerCount())
 	for range count {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for index := range queue {
 				source := selected[index]
-				results[index].text, results[index].err = updateRuleSource(ctx, p, source, settings, offline, custom[source], pool, budget, log)
+				results[index].text, results[index].err = updateRuleSource(ctx, p, source, settings, offline, custom[source], pool, log)
 				if results[index].err != nil {
 					cancel()
 				}

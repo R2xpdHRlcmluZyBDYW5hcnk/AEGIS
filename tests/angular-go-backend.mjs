@@ -97,10 +97,26 @@ try {
   assert.deepEqual(await evaluate(`[...document.querySelectorAll('.network-summary .stat-card strong')].map(e=>e.textContent.trim())`),['1','2','1','1'],'network counters render');
   assert.equal(await evaluate(`document.querySelector('[data-testid="high-total"]').textContent.trim()`),'1');
   assert.equal(await evaluate(`document.querySelector('[data-testid="drops-total"]').textContent.trim()`),'2','suppressed blocking actions remain visible');
-  const overview=await api('/api/overview?scope=cache&view=panel');
+  // This key can still hold the initial prewarm snapshot while the UI uses a
+  // different time-window key. Ingestion intentionally preserves both snapshots
+  // until their background refresh completes.
+  let overview;
+  for(let i=0;i<100;i++){overview=await api('/api/overview?scope=cache&view=panel');if(overview.security.alerts===3)break;await pause(100);}
   assert.equal(overview.security.alerts,3);assert.equal(overview.security.high,1);assert.equal(overview.security.drops,2);
   assert.deepEqual(overview.series.reduce((sum,p)=>[sum[0]+p.alerts,sum[1]+p.drops],[0,0]),[3,2],'alert trend excludes suppression and block trend retains enforcement');
   assert.ok(overview.top.signatures.length>0&&overview.top.signatures.every(r=>!r.sig.includes('suppressed')),'signature ranks exclude suppressed records');
+  await clickText('表格',`document.querySelector('ndr-overview .three-grid section:nth-child(2)')`);
+  await until(`[...document.querySelectorAll('ndr-overview .three-grid section:nth-child(2) ndr-table tbody tr')].some(r=>r.textContent.includes('192.0.2.20'))`);
+  await holdOverviewRequests();
+  await evaluate(`[...document.querySelectorAll('ndr-overview .three-grid section:nth-child(2) ndr-table tbody tr')].find(r=>r.textContent.includes('192.0.2.20')).click()`);
+  await until(`document.querySelector('ndr-overview ndr-table#recent .table-scroll')?.getAttribute('aria-busy')==='true'`);
+  assert.equal(await evaluate(`document.querySelectorAll('ndr-overview ndr-table#recent tbody tr[tabindex]').length`),0,'changing filters hides logs from the previous selection while loading');
+  await releaseOverviewRequests();
+  await until(`document.querySelector('ndr-overview ndr-table#recent .table-scroll')?.getAttribute('aria-busy')==='false'&&document.querySelectorAll('ndr-overview ndr-table#recent tbody tr[tabindex]').length===1`);
+  assert.equal(await evaluate(`document.querySelector('ndr-overview ndr-table#recent tbody').textContent.includes('192.0.2.20')`),true,'overview source filter applies to latest logs');
+  assert.equal(await evaluate(`document.querySelector('[data-testid="alerts-total"]').textContent.trim()`),'0','statistics use the same source filter as logs');
+  await clickText('清除筛选',`document.querySelector('ndr-overview')`);
+  await until(`document.querySelector('[data-testid="alerts-total"]')?.textContent.trim()==='3'&&document.querySelectorAll('ndr-overview ndr-table#recent tbody tr[tabindex]').length===10`);
   await until(`!!document.querySelector('ndr-chart .echarts-surface svg')`);
   await shot('go-overview-desktop.png');
   await nav('system');await until(`!!document.querySelector('.database-card')`);
@@ -122,11 +138,28 @@ try {
   await nav('drops');await until(`document.querySelectorAll('ndr-events>section:last-of-type ndr-table tbody tr').length===2`);
   assert.ok(await evaluate(`document.querySelector('ndr-events>section:last-of-type').textContent.includes('Fixture suppressed block')`),'suppressed drop remains in the raw block list');
   await nav('rules');await ruleTab('检测签名');await until(`document.querySelectorAll('ndr-rules ndr-table tbody tr').length===50`);
+  for(const [width,height] of [[1280,800],[1440,1100],[1920,1080]]){
+    await cdp('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false});
+    assert.deepEqual(await evaluate(`(()=>{
+      const summary=document.querySelector('.rule-status-grid').getBoundingClientRect(),list=document.querySelector('.rules-list').getBoundingClientRect(),tabs=document.querySelector('ndr-rules .tabs'),actions=document.querySelector('.rule-actions'),t=tabs.getBoundingClientRect(),a=actions.getBoundingClientRect(),buttons=[...actions.querySelectorAll('button')],style=buttons.map(e=>getComputedStyle(e));
+      return {fullWidth:Math.abs(summary.left-list.left)<1&&Math.abs(summary.right-list.right)<1,rightAligned:Math.abs(a.right-list.right)<1,centered:Math.abs(t.y+t.height/2-a.y-a.height/2)<1,sameFont:style.every(s=>s.fontSize===getComputedStyle(tabs.querySelector('button')).fontSize&&s.lineHeight==='20px'),sameHeight:buttons.every(e=>e.getBoundingClientRect().height===38),outsideTablist:!actions.closest('[role=tablist]'),noOverlap:t.right<=a.left,noOverflow:document.documentElement.scrollWidth<=innerWidth};
+    })()`),{fullWidth:true,rightAligned:true,centered:true,sameFont:true,sameHeight:true,outsideTablist:true,noOverlap:true,noOverflow:true},'rule summary, tabs and actions align at '+width);
+    if(process.env.AEGIS_RULE_SCREENSHOT){const {data}=await cdp('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});await writeFile(process.env.AEGIS_RULE_SCREENSHOT.replace('.png','-'+width+'.png'),Buffer.from(data,'base64'));}
+  }
+  await cdp('Emulation.setDeviceMetricsOverride',{width:1440,height:1100,deviceScaleFactor:1,mobile:false});
+  await evaluate(`document.querySelector('ndr-rules [role=tab][aria-selected=true]').focus()`);
+  await cdp('Input.dispatchKeyEvent',{type:'keyDown',key:'ArrowRight',code:'ArrowRight'});await cdp('Input.dispatchKeyEvent',{type:'keyUp',key:'ArrowRight',code:'ArrowRight'});
+  await until(`document.activeElement?.id==='rule-tab-groups'&&document.activeElement?.getAttribute('aria-selected')==='true'`);
+  await ruleTab('检测签名');
+  await clickText('↻ 刷新',`document.querySelector('.rule-actions')`);
   await clickText('下一页 →',`document.querySelector('ndr-rules ndr-table')`);await until(`document.querySelector('ndr-rules .pager')?.textContent.includes('2 / 3')`);
   await ruleTab('禁用策略');await clickText('＋ 新建');await until(`document.querySelectorAll('ndr-picker tbody input').length===50`);
   await evaluate(`document.querySelector('ndr-picker tbody input').click()`);await clickText('确认保存');await until(`!document.querySelector('ndr-picker')`);
-  assert.equal((await api('/api/rules/governance')).disable.length,1);
+  const disabledPolicy=(await api('/api/rules/governance')).disable;assert.equal(disabledPolicy.length,1);
+  assert.ok(disabledPolicy[0].name.startsWith('Fixture signature '),'disabled policies resolve a signature description');
+  await until(`document.querySelector('ndr-rules tbody')?.textContent.includes(${JSON.stringify(disabledPolicy[0].name)})`);
   const groups=(await api('/api/rules/groups')).groups;assert.ok(groups.some(g=>g.total===125));
+  await ruleTab('规则分组');await until(`document.querySelector('ndr-rules tbody')?.textContent.includes('snort/community')`);
   const group=groups.find(g=>g.total===125);assert.equal((await api('/api/rules/suppress-groups','POST',{groups:[group.selector]})).ok,true);
   assert.equal((await api('/api/rules/governance')).suppress_groups[0].total,125);
   assert.equal((await api('/api/hunt/rules','POST',{rule:'alert tcp any any -> any 443 (msg:"Browser fixture"; sid:9900101; rev:1;)'})).ok,true);
@@ -134,6 +167,45 @@ try {
   assert.equal((await api('/api/bans','POST',{target:'192.0.2.99'})).ok,true);
   const schedule=await api('/api/rules/schedule','POST',{enabled:true,frequency:'weekly',time:'05:17',weekday:0});assert.equal(schedule.time,'05:17');assert.ok(schedule.next_run>0);
   await api('/api/rules/pending/discard','POST');assert.equal((await api('/api/actions/status')).pending,false);
+  await ruleTab('规则源');
+  async function configureOfficial(name){
+    await evaluate(`(()=>{const row=[...document.querySelectorAll('ndr-rules tbody tr')].find(r=>r.textContent.includes(${JSON.stringify(name)}));if(!row)throw Error('Official source missing');const box=row.querySelector('input[type="checkbox"]');if(!box.checked)box.click();})()`);
+    await clickText('配置规则源');await until(`!!document.querySelector('ndr-source-editor select[name="ips_policy"]')`);
+  }
+  await configureOfficial('snort/lightspd');
+  assert.deepEqual(await evaluate(`[...document.querySelector('select[name="ips_policy"]').options].map(o=>o.value)`),['connectivity','balanced','security','max-detect']);
+  await set('select[name="ips_policy"]','max-detect','change');await clickText('保存',`document.querySelector('ndr-source-editor')`);await until(`!document.querySelector('ndr-source-editor')`);
+  assert.ok((await api('/api/rules/sources')).sources.filter(r=>r.requires_code).every(r=>r.ips_policy==='max-detect'));
+  await until(`document.querySelector('ndr-rules tbody')?.textContent.includes('max-detect 最大检测覆盖')`);
+  await configureOfficial('snort/registered');assert.equal(await evaluate(`document.querySelector('select[name="ips_policy"]').value`),'max-detect');
+  await pause(450);
+  assert.equal(await evaluate(`(()=>{const a=document.querySelector('ndr-source-editor input[name="oinkcode"]').getBoundingClientRect(),b=document.querySelector('select[name="ips_policy"]').getBoundingClientRect();return Math.abs(a.x-b.x)<1&&Math.abs(a.width-b.width)<1;})()`),true,'source controls align and fill the form');
+  await evaluate(`document.querySelector('select[name="ips_policy"]').focus()`);
+  for(const key of ['Home','End']){await cdp('Input.dispatchKeyEvent',{type:'keyDown',key,code:key});await cdp('Input.dispatchKeyEvent',{type:'keyUp',key,code:key});await until(`document.querySelector('select[name="ips_policy"]').value==='${key==='Home'?'connectivity':'max-detect'}'`);}
+  await shot('go-source-policy-desktop.png');await closeModal();
+  await api('/api/rules/pending/discard','POST');await clickText('↻ 刷新');
+  assert.ok((await api('/api/rules/sources')).sources.filter(r=>r.requires_code).every(r=>r.ips_policy==='balanced'));
+  await api('/api/rules/source/config','POST',{name:'snort/lightspd',ips_policy:'security'});
+  await api('/api/rules/disable','POST',{value:'sid:2100100'});
+  await api('/api/rules/action','POST',{selector:'sid:2100101',action:'reject'});
+  await api('/api/rules/suppress','POST',{sids:['2100102']});
+  await api('/api/hunt/rules','POST',{rule:'alert tcp any any -> any 443 (msg:"Updated manual fixture"; sid:9900102; rev:1;)'});
+  await api('/api/bans','POST',{target:'192.0.2.99'});
+  await clickText('↻ 刷新');await until(`!!document.querySelector('.pending-rules')`);
+  assert.equal(await evaluate(`document.querySelector('ndr-rules').textContent.includes('再点击“应用更改”启用')`),false,'source hint matches automatic update application');
+  await evaluate(`window.__jobLogWarnings=[];window.__jobLogObserver=new MutationObserver(()=>{if(document.querySelector('ndr-rules')?.textContent.includes('操作日志更新失败'))window.__jobLogWarnings.push(true);});window.__jobLogObserver.observe(document.querySelector('ndr-rules'),{subtree:true,childList:true,characterData:true});`);
+  await clickText('更新规则集 ↗');
+  await until(`document.querySelector('ndr-rules .tabs button.active')?.textContent.trim()==='操作日志'`);
+  await until(`document.querySelector('ndr-rules .job-log')?.textContent.includes('规则已校验并完成热重载')&&!document.querySelector('.pending-rules')`);
+  const updated=await api('/api/actions/status');assert.equal(updated.rc,0);assert.equal(updated.pending,false);assert.ok(updated.log_bytes>0);
+  assert.equal((await api('/api/rules/governance')).disable.length,1);
+  assert.ok((await api('/api/hunt/rules')).rules.some(r=>r.sid===9900102));
+  assert.ok((await api('/api/rules/sources')).sources.filter(r=>r.requires_code).every(r=>r.ips_policy==='security'));
+  await api('/api/rules/action','POST',{selector:'sid:2100103',action:'drop'});
+  await clickText('应用更改 →');
+  await until(`(async()=>{const r=await fetch('/api/actions/status').then(r=>r.json());return r.id!==${JSON.stringify(updated.id)}&&r.state==='done'&&r.rc===0&&!r.pending;})()`);
+  await until(`!document.querySelector('.pending-rules')&&document.querySelector('ndr-rules .job-log')?.textContent.includes('规则已校验并完成热重载')`);
+  await evaluate(`window.__jobLogObserver.disconnect()`);assert.deepEqual(await evaluate(`window.__jobLogWarnings`),[],'starting update and apply jobs does not flash a log-read error');
   await shot('go-rules-desktop.png');
   await nav('system');await until(`!!document.querySelector('.database-card')`);await shot('go-system-desktop.png');
   const health=await api('/healthz');assert.equal(health.backend,'go');assert.equal(health.go_version,'go1.27.3');

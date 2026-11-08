@@ -20,7 +20,7 @@ class NativeResponseDeployCase(unittest.TestCase):
         temporary=tempfile.TemporaryDirectory();self.addCleanup(temporary.cleanup);self.root=Path(temporary.name)
         self.release=self.root/'release';self.release.mkdir()
         elf=bytearray(64);elf[:6]=b'\x7fELF\x02\x01';elf[18:20]=(183).to_bytes(2,'little')
-        for name,value in {'libips-response.so':elf,'native_response.c':b'source','deploy-native-response.py':b'deployer','log_storage.py':b'helper'}.items():(self.release/name).write_bytes(value)
+        for name,value in {'libips-response.so':elf,'native_response.c':b'source','deploy-native-response.py':b'deployer','deployment_support.py':b'helper'}.items():(self.release/name).write_bytes(value)
         self.manifest=dict(revision=1,architecture='aarch64',sha256={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in self.release.iterdir()})
         (self.release/'manifest.json').write_text(json.dumps(self.manifest))
         self.logs=self.root/'logs';self.logs.mkdir();self.raw=self.logs/'0_file_connector_ndr_transmit';self.raw.write_text('native evidence\n')
@@ -71,8 +71,8 @@ class NativeResponseDeployCase(unittest.TestCase):
 
     def context(self):
         stack=__import__('contextlib').ExitStack();self.addCleanup(stack.close)
-        client=stack.enter_context(mock.patch('ips_control.Client'));client.return_value.request.return_value={'ok':True}
-        stack.enter_context(mock.patch('snort_engine.configuration_lock',return_value=nullcontext()))
+        client=stack.enter_context(mock.patch('deployment_support.Client'));client.return_value.request.return_value={'ok':True}
+        stack.enter_context(mock.patch('deployment_support.configuration_lock',return_value=nullcontext()))
         stack.enter_context(mock.patch.object(m,'active',return_value=True))
         commands=stack.enter_context(mock.patch.object(m,'run',return_value=subprocess.CompletedProcess([],0,'')))
         drain=stack.enter_context(mock.patch.object(m,'drain'))

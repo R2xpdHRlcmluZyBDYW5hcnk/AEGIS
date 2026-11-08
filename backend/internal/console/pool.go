@@ -3,9 +3,7 @@ package console
 import (
 	"context"
 	"errors"
-	"os"
 	"runtime"
-	"strconv"
 	"sync"
 )
 
@@ -22,14 +20,10 @@ type Pool struct {
 }
 
 func WorkerCount() int {
-	n := min(4, runtime.GOMAXPROCS(0))
-	if value, err := strconv.Atoi(os.Getenv("IPS_CPU_WORKERS")); err == nil && value > 0 {
-		n = min(n, value)
-	}
-	return max(1, n)
+	return max(1, runtime.GOMAXPROCS(0))
 }
 func NewPool(workers int) *Pool {
-	workers = bounded(workers, 1, 4)
+	workers = max(1, workers)
 	p := &Pool{jobs: make(chan work, workers*2), stop: make(chan struct{}), Workers: workers}
 	for range workers {
 		p.wg.Add(1)

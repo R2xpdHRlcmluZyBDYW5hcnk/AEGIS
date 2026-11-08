@@ -257,3 +257,39 @@ func TestSourceSelectionAndOfflinePolicyApplication(t *testing.T) {
 		t.Fatal("disabled source remained in the active merged ruleset")
 	}
 }
+
+func TestOfficialIPSPolicyConfigurationIsSharedValidatedAndStaged(t *testing.T) {
+	m := testManager(t)
+	for _, policy := range []string{"balanced", "connectivity", "security", "max-detect"} {
+		editManager(t, m, "/api/rules/source/config", Object{"name": "snort/lightspd", "ips_policy": policy})
+		public, err := publicSources(m.drafts.paths.Sources, Object{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, raw := range array(public["sources"]) {
+			if item := object(raw); item["requires_code"] == true && item["ips_policy"] != policy {
+				t.Fatal("Registered and LightSPD must share one staged policy")
+			}
+		}
+		if !m.drafts.Dirty || readText(filepath.Join(m.live.Sources, "credentials.json")) != "" {
+			t.Fatal("saving a policy must leave the active configuration unchanged")
+		}
+	}
+	before := readText(filepath.Join(m.drafts.paths.Sources, "credentials.json"))
+	for _, policy := range []any{"invalid", "../security", true, []any{"security"}} {
+		_, err := m.Dispatch(t.Context(), Object{"operation": "mutate", "method": "POST", "path": "/api/rules/source/config", "body": Object{"name": "snort/registered", "ips_policy": policy}}, false)
+		if err == nil || readText(filepath.Join(m.drafts.paths.Sources, "credentials.json")) != before {
+			t.Fatal("invalid policy modified staged configuration")
+		}
+	}
+	editManager(t, m, "/api/rules/pending/discard", Object{})
+	public, err := publicSources(m.drafts.paths.Sources, Object{"ips_policy": "connectivity"})
+	if err != nil || m.drafts.Dirty {
+		t.Fatal("discarding policy edit failed", err)
+	}
+	for _, raw := range array(public["sources"]) {
+		if item := object(raw); item["ips_policy"] != "connectivity" {
+			t.Fatal("existing file-based policy fallback was lost")
+		}
+	}
+}

@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-import session_logger as runtime
+import deployment_support as runtime
 
 ROOT=Path(__file__).resolve().parents[1]
 spec=importlib.util.spec_from_file_location('session_deployer',ROOT/'deploy-session-logger.py')
@@ -35,7 +35,7 @@ class DeployTests(unittest.TestCase):
             binary=root/'snort';binary.write_bytes(b'engine');config=root/'config.lua';config.write_bytes(b'old config\n')
             rotation=root/'rotation';rotation.write_bytes(b'/var/log/snort/*alert_json.txt {}\n')
             (program/'ips-supervisor').write_bytes(b'old supervisor')
-            for name in ('session_logger.py','runtime_status.py','ips-supervisor'):
+            for name in ('deployment_support.py','ips-supervisor'):
                 (release/name).write_bytes(b'new program')
                 if name!='ips-supervisor':(program/name).write_bytes(b'new program')
             (release/'native_session_logger.cc').write_bytes(b'logger source')

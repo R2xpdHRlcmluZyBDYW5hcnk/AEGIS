@@ -2,7 +2,7 @@
 
 ## 运行前提
 
-控制台面向 ARM64 Linux 与 systemd。HTTP、事件入库、规则管理、事件桥接与本地模型接口由 Go 1.27.3 可执行文件提供，目标机不需要 Go 工具链或 Node.js。维护脚本、检测守护与独立安装的 PulledPork3 仍需要 Python 3.13 或更新版本；Snort 3、LibDAQ、规则与 PulledPork3 单独安装。
+控制台面向 ARM64 Linux 与 systemd。HTTP、事件入库、规则管理、事件桥接、检测守护、QUIC 观察、HOME_NET 刷新、数据库恢复和本地模型接口由 Go 1.27.3 可执行文件提供。运行服务及生产维护入口不调用 Python；构建、部署和兼容性测试工具继续使用 Python。目标机不需要 Go 工具链或 Node.js；Snort 3、LibDAQ 和 Wireshark 解码器保持独立系统组件。规则更新由 AEGIS 内置 Go 实现处理，不再运行外部 PulledPork3。完整入口及资源分配见 [Go 运行服务](docs/go-runtime.md)。
 
 部署者需确定采集位置、检测模式、HOME_NET、日志存储和访问方式。服务模板不固定 CPU 编号，也不预设具体网卡。先完成 Snort 自身配置校验，再接入面板。
 
@@ -14,11 +14,11 @@
 .\deploy.ps1 -BuildOnly -OutputDirectory "$env:TEMP\ndr-console-release"
 ```
 
-输出为 `snort-ndr-<release>.tar.gz` 与 SHA-256 文件。依赖和缓存使用系统临时目录，构建完成后清理。发布包包含 Go 控制台、静态资源及 `backend-licenses.txt`，不附带外部 Snort 引擎或 PulledPork3。
+输出为 `snort-ndr-<release>.tar.gz` 与 SHA-256 文件。依赖和缓存使用系统临时目录，构建完成后清理。发布包包含 Go 控制台、检测守护与维护入口、静态资源及 `backend-licenses.txt`，不附带外部 Snort 引擎或 PulledPork3。控制台、维护程序及 supervisor 分别由独立构建清单校验。
 
 Windows 构建的 Go 部分自动进入 WSL Debian；Linux 构建可直接运行。复用本文引擎构建环境中的 GCC 与 `aarch64-linux-gnu-gcc`，缺失的核定 Go 工具链由构建器自动下载并校验。`backend-build.json` 记录架构、Go / SQLite 版本与四个服务入口的摘要；四个入口使用同一个程序，按服务名选择职责。构建器先运行本机 Go 回归，再生成 ARM64 CGO 产物。SQLite 编译进 Go 程序，不需要额外替换目标机的系统 SQLite。
 
-已有独立布局使用 `deploy.ps1 -UpdateBackend` 切换。部署器核对 ELF 架构、摘要与运行版本，暂停规则任务，备份程序和配置，只停止并重启控制台相关服务，检查 HTTP、管理器和检测进程标识；失败恢复旧程序。既有数据库、认证、规则、设备配置与回滚备份保留。旧 Python Web 代码仅作为兼容性对照，Go 服务不导入或执行这些模块；本地合成对照位于 `backend/internal/console/testdata`。
+已有独立布局使用 `deploy.ps1 -UpdateBackend` 切换。部署器核对 ELF 架构、摘要与运行版本，暂停规则任务，备份程序和配置，只停止并重启控制台相关服务，检查 HTTP、管理器和检测进程标识；失败恢复旧程序。既有数据库、认证、规则、设备配置与回滚备份保留。旧 Python 组件已删除，升级后备份并退役安装目录内对应模块；本地合成对照位于 `backend/internal/console/testdata`。
 
 传输后核对归档 SHA-256；解包后在包目录执行 `sha256sum --strict -c SHA256SUMS`。仅需要静态资源时可运行 `python3 -B build_frontend.py --output /var/tmp/ndr-console-static`。
 
@@ -27,7 +27,7 @@ Windows 构建的 Go 部分自动进入 WSL Debian；Linux 构建可直接运行
 以下步骤需要目标主机管理权限。路径为项目默认约定；已有安装先核对冲突并备份，不直接覆盖其配置、规则与运行数据。
 
 1. 配置并验证 Snort 3。`snort.lua` 提供 extractor、alert_json 和本地控制接口配置模板。调整引擎 include、日志及规则路径，将 `home-net.lua` 中 HOME_NET 改为实际监控范围。也可只合并日志配置，保留已有采集服务。
-2. 将 `ips-web`、`ips-rule-manager`、`ips-event-bridge`、`ips-snort-rules`、`ips-log-maintenance`、`snort-home-net` 安装到 `/opt/ips-console/bin`，权限为 0755。同时将 `ips_control.py`、`rule_drafts.py`、`snort_engine.py`、`snort_rules.py`、`rule_policy.py`、`parallel_cpu.py`、`parallel_sql.py`、`event_processing.py`、`native_rules.py`、`rule_sources.py`、`rule_identity.py`、`rule_inventory.py`、`runtime_status.py`、`history_reset.py`、`log_storage.py`、`deployment_layout.py` 安装到同目录，权限为 0644。
+2. 将发布包中经清单验证的九个 Go 入口安装到 `/opt/ips-console/bin`，权限为 0755；部署辅助模块 `deployment_support.py` 与 `deployment_layout.py` 权限为 0644。入口及更新顺序见 [Go 运行服务](docs/go-runtime.md)。
 3. 将生成的 `index.html`、`app.js`、`ui.js`、`app.css`、全部 `chunk-*.js`、`frontend-build.json`、`frontend-licenses.txt`，以及源码中的 `favicon.svg` 安装到 `/usr/local/share/ips-snort-web`。程序与静态目录由管理员所有，Web 用户只读。
 4. 以 root 所有、0600 权限将模板安装为 `/etc/ips-snort-web.conf`。将配置中的 static_dir 改为 `/usr/local/share/ips-snort-web`。默认监听 `127.0.0.1:9000`，没有生产密码。执行 `/opt/ips-console/bin/ips-web --gen-password`，将输出的 `password_pbkdf2` 填入配置，私下保存密码。不要提交本机配置或凭据。
 5. 创建系统组 `ips-console`，准备 `/etc/snort`、`/var/lib/snort/rules`、`/var/lib/snort/update`、`/var/log/snort`、`/var/log/ips` 与 `/run/snort`。规则模板仅用于新安装，已有规则保留。规则管理器需要配置与规则目录的写权限，事件桥接器读取 Snort 日志并写入 `/var/log/ips/events.json`。隔离 Web 只读该事件流，数据库由 systemd StateDirectory 管理。
@@ -64,14 +64,7 @@ PY
 Environment=SNORT_ENGINE_PREFIX=/opt/snort
 ```
 
-为 `ips-rule-manager.service` 指定外部更新器入口：
-
-```ini
-[Service]
-Environment=IPS_PULLEDPORK=/opt/pulledpork3/pulledpork.py
-```
-
-更新器需支持面板调用的来源配置、规则输出和离线候选处理接口，能力以安装版本为准。面板不会下载、修补或升级其代码。账户源凭据保存在目标主机 `/etc/snort/rule-update.conf`，权限为 root 0600。
+规则更新使用 AEGIS 内置 Go 实现，无需外部 PulledPork3 路径。账户源凭据继续保存在目标主机受保护的规则源配置中，不写入进程参数、源码或公共日志；已有外部更新器安装不删除、不修改。
 
 连接关联采用可选的 Snort `session_id` 扩展；缺少该字段时不会推测合并不同事件。来源和边界见 [引擎说明](docs/snort3-engine.md)。
 

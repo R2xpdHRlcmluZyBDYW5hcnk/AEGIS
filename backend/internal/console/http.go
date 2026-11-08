@@ -31,7 +31,7 @@ type HTTPHandler struct {
 }
 
 func NewHTTPHandler(app *App) *HTTPHandler {
-	return &HTTPHandler{App: app, loginSlots: make(chan struct{}, 2), streams: make(chan struct{}, 32)}
+	return &HTTPHandler{App: app, loginSlots: make(chan struct{}, max(1, WorkerCount()/2)), streams: make(chan struct{}, 8*WorkerCount())}
 }
 func jsonReply(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -632,7 +632,7 @@ func ServeHTTP(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return err
 	}
-	limited := &limitedListener{Listener: listener, slots: make(chan struct{}, 128), stop: make(chan struct{})}
+	limited := &limitedListener{Listener: listener, slots: make(chan struct{}, 32*WorkerCount()), stop: make(chan struct{})}
 	server := &http.Server{Handler: NewHTTPHandler(app), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 32 << 10}
 	done := make(chan struct{})
 	defer close(done)

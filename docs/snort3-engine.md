@@ -10,7 +10,7 @@
 
 构建目录默认按清单版本隔离，当前为 `/opt/ips-snort3/3.13.2.0`。默认临时源码与缓存退出即清理；显式指定 `SNORT_BUILD_WORK` 时由调用者清理。导出包映射至已有实例的固定安装位置 `/opt/ips-snort3/3.12.4.0`，目录名仅为历史路径；运行版本以 `snort -V` 和 `engine-manifest.json` 为准。二进制使用相对 RPATH 寻找随包 LibDAQ，不依赖构建目录。
 
-PulledPork3 独立安装。面板仅通过 `IPS_PULLEDPORK` 指定的入口传递配置并读取候选结果，不包含更新器修改，也不负责它的安装或升级。
+规则更新由 AEGIS 内置 Go 实现直接下载、校验并处理文本规则归档。现有 PulledPork3 安装和仓库保持独立，不再作为运行期依赖；`IPS_PULLEDPORK` 不影响新的更新入口。参见 [Go 运行服务](go-runtime.md)。
 
 ## 会话标识
 
@@ -58,7 +58,7 @@ MCP 未能打开检查器目录且未定位到事件产生器，因此补充通�
 
 2026-11-04 追加核查，MCP Search Service 查询条件为规则 `flow` 的含义、固定标签 `3.12.4.0` 的连接 extractor 与会话身份实现。查询前复用上面的引擎和会话记录；补充读取 [flow 规则选项](https://docs.snort.org/rules/options/non_payload/flow)、[连接 extractor](https://github.com/snort3/snort3/blob/3.12.4.0/src/network_inspectors/extractor/extractor_conn.cc)及 [通用 extractor 字段](https://github.com/snort3/snort3/blob/3.12.4.0/src/network_inspectors/extractor/extractors.h)。前者控制方向、建立状态、重组等规则匹配条件，不是面板日志合并 API。连接 extractor 订阅 FLOW_END；原生 UID 优先使用 connection_id，否则取 FlowKey 哈希。
 
-使用与部署二进制 SHA-256 一致的本地副本，在开发环境回放完全合成的 HTTP / DNS 报文及同五元组复用场景。告警、HTTP 事务与连接结束日志共享引擎 session_id；新连接得到新 session_id，样例的原生 UID 被复用。`tests/check_snort_sessions.py` 将这些输出继续送入正式解析和事件库，并验证以单个告警时间打开详情仍能查询同会话的已保留日志。用户态回放不等同于生产流量完整性证明。
+使用与部署二进制 SHA-256 一致的本地副本，在开发环境回放完全合成的 HTTP / DNS 报文及同五元组复用场景。告警、HTTP 事务与连接结束日志共享引擎 session_id；新连接得到新 session_id，样例的原生 UID 被复用。Go 事件规范化与会话查询回归使用合成兼容样例验证同一告警可关联已保留的同会话日志。用户态回放不等同于生产流量完整性证明。
 
 入库修复移除了新表的旧 UNIQUE(ts,type,sid,src,dst,sport,dport) 约束。该约束未包含生成器、会话及原始记录身份，合成测试可复现不同证据被 INSERT OR IGNORE 丢弃。仅 event_key 对完全相同的来源记录进行幂等去重。既有非空数据库不会在启动时自动重建；需要经过明确的历史清理或离线迁移后才获得新表结构。
 

@@ -100,13 +100,19 @@ def release(directory):
     run(['test', '-count=1', '-timeout=120s', './...'], target)
     for name in names[1:]:
         shutil.copy2(target, directory / name)
+    maintenance=('snort-home-net','ips-quic-observer','ips-maintenance','recover-event-db')
+    for name in (*maintenance,'ips-supervisor'):
+        shutil.copy2(target,directory/name)
     target.with_name(target.name+'.licenses.txt').replace(directory/'backend-licenses.txt')
     spec = json.loads(SOURCES.read_text())
     manifest = dict(schema=1, backend='go', go_version=spec['version'], target='linux-arm64',
                     sqlite_version=spec['sqliteDriver']['sqliteVersion'],
                     files={name: hashlib.sha256((directory/name).read_bytes()).hexdigest() for name in names})
     (directory/'backend-build.json').write_text(json.dumps(manifest, sort_keys=True, indent=2)+'\n', encoding='utf-8')
-    return (*names, 'backend-build.json','backend-licenses.txt')
+    for receipt,programs in (('maintenance-build.json',maintenance),('supervisor-build.json',('ips-supervisor',))):
+        value=dict(manifest,files={name:hashlib.sha256((directory/name).read_bytes()).hexdigest() for name in programs})
+        (directory/receipt).write_text(json.dumps(value,sort_keys=True,indent=2)+'\n',encoding='utf-8')
+    return (*names,*maintenance,'ips-supervisor','backend-build.json','maintenance-build.json','supervisor-build.json','backend-licenses.txt')
 
 
 if __name__ == '__main__':

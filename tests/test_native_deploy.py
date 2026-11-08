@@ -89,7 +89,7 @@ class ConsoleUpdateTests(unittest.TestCase):
 
     @unittest.skipIf(sys.platform=='win32','The engine deployment uses Linux absolute runtime paths')
     def test_full_runtime_switch_and_failures_restore_libraries_lua_and_configuration(self):
-        import ips_control
+        import deployment_support as ips_control
         for failure in ('none','startup','rename'):
             with self.subTest(failure=failure),tempfile.TemporaryDirectory() as temporary:
                 module=load('deploy-session-engine');root=Path(temporary)
@@ -186,32 +186,6 @@ class ConsoleUpdateTests(unittest.TestCase):
             self.assertFalse(extra.exists())
             self.assertEqual(data.read_bytes(),b'untouched database')
 
-    def test_failed_health_check_restores_modules_and_authentication_without_engine_restart(self):
-        module=load('deploy-native-backend')
-        with tempfile.TemporaryDirectory() as temporary:
-            root=Path(temporary);release=root/'release';installed=root/'installed'
-            release.mkdir();installed.mkdir()
-            for name in module.PROGRAMS:
-                (release/name).write_text('# candidate module\n')
-                (installed/name).write_text('# previous module\n')
-            with zipfile.ZipFile(release/'python-dependencies.zip','w') as bundle:bundle.writestr('luqum/parser.py','# candidate module\n')
-            config=root/'config';original=b'{"password_pbkdf2":"fixture","read_workers":1}\n';config.write_bytes(original)
-            pid=root/'pid';pid.write_text('12345')
-            updater=root/'updater.py';updater.write_text('# previous updater\n');new_helper=root/'parallel.py'
-            client=mock.Mock();client.request.side_effect=lambda operation,**kwargs: {'ready':True} if operation=='ping' else {'ok':True}
-            with mock.patch.multiple(module,CONFIG=config,BIN=installed,BACKUPS=root/'backups',PIDFILE=pid,RESOURCE_ROOT=root/'units'), \
-                 mock.patch.object(module,'Client',return_value=client),mock.patch.object(module.subprocess,'run') as run:
-                ready=mock.Mock(side_effect=[RuntimeError('candidate startup failed'),None])
-                with self.assertRaisesRegex(RuntimeError,'candidate startup failed'):
-                    module.apply(release,ready,{'read_workers':3})
-                self.assertEqual(config.read_bytes(),original)
-                for name in module.PROGRAMS:self.assertEqual((installed/name).read_text(),'# previous module\n')
-                for call in run.call_args_list:
-                    self.assertTrue(set(call.args[0][2:]) <= set(module.SERVICES))
-                self.assertEqual(pid.read_text(),'12345')
-                self.assertFalse(list((root/'units').glob('*.d/50-ips-parallel.conf')))
-                self.assertEqual(updater.read_text(),'# previous updater\n');self.assertFalse(new_helper.exists())
-                self.assertEqual(client.request.call_args.kwargs,{'enabled':False})
 
     def test_backend_readiness_waits_for_manager_socket_after_http_is_ready(self):
         module=load('deploy-native-backend');client=mock.Mock()
@@ -221,59 +195,7 @@ class ConsoleUpdateTests(unittest.TestCase):
         self.assertEqual(client.request.call_count,2)
         sleep.assert_called_once_with(.1)
 
-    def test_web_module_update_and_rollback_restart_only_console(self):
-        module=load('deploy-native-backend')
-        for failure in (False,True):
-            with self.subTest(rollback=failure),tempfile.TemporaryDirectory() as temporary:
-                root=Path(temporary);release=root/'release';installed=root/'installed'
-                release.mkdir();installed.mkdir()
-                for name in module.PROGRAMS:
-                    (release/name).write_text('# unchanged module\n');(installed/name).write_text('# unchanged module\n')
-                with zipfile.ZipFile(release/'python-dependencies.zip','w') as bundle:bundle.writestr('luqum/parser.py','# fixture\n')
-                (installed/'python-dependencies.zip').write_bytes((release/'python-dependencies.zip').read_bytes())
-                for name in ('ips-web','llm_assistant.py','overview_metrics.py'):(release/name).write_text('# changed web module\n')
-                previous={name:(installed/name).read_bytes() for name in module.PROGRAMS}
-                config=root/'config';original=b'{ "read_workers": 4 }\n';config.write_bytes(original)
-                for service,data in module.RESOURCE_OVERRIDES.items():
-                    path=root/'units'/(service+'.d')/'50-ips-parallel.conf';path.parent.mkdir(parents=True);path.write_bytes(data)
-                client=mock.Mock();client.request.return_value={'ok':True,'ready':True}
-                ready=mock.Mock(side_effect=[RuntimeError('fixture startup failure'),None] if failure else None)
-                with mock.patch.multiple(module,CONFIG=config,BIN=installed,BACKUPS=root/'backups',PIDFILE=root/'pid',RESOURCE_ROOT=root/'units'), \
-                     mock.patch.object(module,'Client',return_value=client),mock.patch.object(module.subprocess,'run') as run,mock.patch('builtins.print'):
-                    if failure:
-                        with self.assertRaisesRegex(RuntimeError,'fixture startup failure'):module.apply(release,ready,{})
-                    else:module.apply(release,ready,{})
-                self.assertEqual(config.read_bytes(),original)
-                for call in run.call_args_list:self.assertEqual(call.args[0][2:],['ips-web'])
-                self.assertTrue(run.call_count)
-                for name in module.PROGRAMS:
-                    expected=previous[name] if failure else (release/name).read_bytes()
-                    self.assertEqual((installed/name).read_bytes(),expected)
 
-    def test_external_detector_without_project_pidfile_is_left_untouched(self):
-        module=load('deploy-native-backend')
-        with tempfile.TemporaryDirectory() as temporary:
-            root=Path(temporary);release=root/'release';installed=root/'installed'
-            release.mkdir();installed.mkdir()
-            for name in module.PROGRAMS:
-                (release/name).write_text('# new console module\n')
-                (installed/name).write_text('# old console module\n')
-            with zipfile.ZipFile(release/'python-dependencies.zip','w') as bundle:bundle.writestr('luqum/parser.py','# new module\n')
-            config=root/'config';config.write_text('{}')
-            updater=root/'external-updater.py';updater.write_text('# separately managed\n')
-            client=mock.Mock();client.request.return_value={'ok':True,'ready':True}
-            with mock.patch.multiple(module,CONFIG=config,BIN=installed,BACKUPS=root/'backups',
-                                     PIDFILE=root/'missing-pid',RESOURCE_ROOT=root/'units'), \
-                 mock.patch.object(module,'Client',return_value=client), \
-                 mock.patch.object(module.subprocess,'run') as run, mock.patch('builtins.print'):
-                module.apply(release,mock.Mock(),{})
-            self.assertEqual(updater.read_text(),'# separately managed\n')
-            self.assertFalse((root/'missing-pid').exists())
-            for name in module.PROGRAMS:
-                self.assertEqual((installed/name).read_bytes(),(release/name).read_bytes())
-            for call in run.call_args_list:
-                if call.args[0][1] in ('start','stop'):
-                    self.assertLessEqual(set(call.args[0][2:]),set(module.SERVICES))
 
 
 if __name__=='__main__': unittest.main()

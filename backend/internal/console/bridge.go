@@ -361,7 +361,7 @@ func (b *Bridge) Poll(ctx context.Context) (int64, error) {
 		sort.Strings(matches)
 		paths = append(paths, matches...)
 	}
-	if len(paths) > 128 {
+	if len(paths) > max(128, 4*detectorQueueCount()+16) {
 		return 0, errors.New("原始日志文件过多")
 	}
 	if len(paths) > 0 {

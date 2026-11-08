@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -28,10 +29,11 @@ type NetworkSnapshots struct {
 	entries map[string]*networkEntry
 	queue   chan string
 	bytes   int64
+	Version atomic.Uint64
 }
 
 func NewNetworkSnapshots(app *App) *NetworkSnapshots {
-	return &NetworkSnapshots{app: app, entries: map[string]*networkEntry{}, queue: make(chan string, 32)}
+	return &NetworkSnapshots{app: app, entries: map[string]*networkEntry{}, queue: make(chan string, 8*WorkerCount())}
 }
 func emptyNetwork(value any) Object {
 	r := Object{}
@@ -65,7 +67,7 @@ func (n *NetworkSnapshots) Get(low, high float64, parts []string, args []any, pa
 			n.bytes -= entry.bytes
 			delete(n.entries, key)
 		}
-		if len(n.entries) >= 32 {
+		if len(n.entries) >= cap(n.queue) {
 			var oldest string
 			var stamp time.Time
 			for k, v := range n.entries {
@@ -112,6 +114,7 @@ func (n *NetworkSnapshots) Invalidate() {
 	defer n.mu.Unlock()
 	n.entries = map[string]*networkEntry{}
 	n.bytes = 0
+	n.Version.Add(1)
 }
 func (n *NetworkSnapshots) Run(ctx context.Context) {
 	ticker := time.NewTicker(time.Second)
@@ -183,6 +186,7 @@ func (n *NetworkSnapshots) Run(ctx context.Context) {
 						entry.value = value
 						entry.updated = time.Now()
 						entry.err = ""
+						n.Version.Add(1)
 					}
 				} else {
 					entry.err = "网络统计刷新失败"

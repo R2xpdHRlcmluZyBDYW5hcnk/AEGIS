@@ -15,7 +15,7 @@ import tempfile
 import time
 import urllib.request
 from contextlib import closing
-from log_storage import log_paths, validate_log_storage
+from deployment_support import log_paths, validate_log_storage
 
 NATIVE,STREAM=log_paths()
 CHECKPOINT=Path('/var/lib/ips-event-bridge/offsets.json')
@@ -178,7 +178,7 @@ def main():
     if os.geteuid()!=0:raise SystemExit('Run as root')
     if not args.apply:raise SystemExit('Use --apply only after validating native event ingestion')
     validate_log_storage()
-    from ips_control import Client
+    from deployment_support import Client
     client=Client(timeout=3)
     if not client.request('ping').get('ready'):raise RuntimeError('Rule manager unavailable')
     for unit in ('ips','ips-web','ips-event-bridge'):

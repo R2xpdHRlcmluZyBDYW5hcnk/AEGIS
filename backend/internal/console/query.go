@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 const detectionSQL = "((type='alert' OR (type='drop' AND sid>0)) AND COALESCE(alert_suppressed,0)=0)"
@@ -28,11 +29,32 @@ type Snapshot struct {
 	connections []*sql.Conn
 	release     func()
 	ctx         context.Context
+	bounds      [2]float64
+	count       int64
 }
 
-var sqlHelpers = make(chan struct{}, 3)
+var sqlHelpers chan struct{}
+var sqlHelpersOnce sync.Once
+
+func reserveSQLHelpers() (int, func()) {
+	sqlHelpersOnce.Do(func() { sqlHelpers = make(chan struct{}, max(0, WorkerCount()-1)) })
+	n := 0
+	for range cap(sqlHelpers) {
+		select {
+		case sqlHelpers <- struct{}{}:
+			n++
+		default:
+		}
+	}
+	return n, func() {
+		for range n {
+			<-sqlHelpers
+		}
+	}
+}
 
 func (s *Store) Snapshot(ctx context.Context, parallel bool) (*Snapshot, error) {
+	sqlHelpersOnce.Do(func() { sqlHelpers = make(chan struct{}, max(0, WorkerCount()-1)) })
 	group := &Snapshot{ctx: ctx}
 	ok := false
 	defer func() {
@@ -42,21 +64,12 @@ func (s *Store) Snapshot(ctx context.Context, parallel bool) (*Snapshot, error) 
 	}()
 	if parallel && s.Gate.TryLock() {
 		defer s.Gate.Unlock()
-		for range 3 {
-			select {
-			case sqlHelpers <- struct{}{}:
-				group.helpers = append(group.helpers, nil)
-			default:
-			}
-		}
+		n, release := reserveSQLHelpers()
+		group.helpers = make([]*sql.Tx, n)
+		group.release = release
 	}
 	reserved := len(group.helpers)
 	group.helpers = nil
-	group.release = func() {
-		for range reserved {
-			<-sqlHelpers
-		}
-	}
 	for i := 0; i <= reserved; i++ {
 		conn, err := s.Readers.Conn(ctx)
 		if err != nil {
@@ -98,29 +111,41 @@ func (g *Snapshot) Close() {
 }
 func (g *Snapshot) Many(statements []statement) ([][]Object, error) {
 	out := make([][]Object, len(statements))
-	for offset := 0; offset < len(statements); {
-		var wg sync.WaitGroup
-		errs := make([]error, len(g.helpers)+1)
-		count := min(len(g.helpers)+1, len(statements)-offset)
-		for i := 1; i < count; i++ {
-			i := i
-			query := statements[offset+i]
-			index := offset + i
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				out[index], errs[i] = queryRows(g.ctx, g.helpers[i-1], query.SQL, query.Args...)
-			}()
-		}
-		query := statements[offset]
-		out[offset], errs[0] = queryRows(g.ctx, g.main, query.SQL, query.Args...)
-		wg.Wait()
-		for _, err := range errs {
-			if err != nil {
-				return nil, err
+	if len(statements) == 0 {
+		return out, nil
+	}
+	ctx, cancel := context.WithCancel(g.ctx)
+	defer cancel()
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	var once sync.Once
+	var failure error
+	worker := func(tx *sql.Tx) {
+		for ctx.Err() == nil {
+			index := int(next.Add(1) - 1)
+			if index >= len(statements) {
+				return
 			}
+			query := statements[index]
+			rows, err := queryRows(ctx, tx, query.SQL, query.Args...)
+			if err != nil {
+				once.Do(func() { failure = err; cancel() })
+				return
+			}
+			out[index] = rows
 		}
-		offset += count
+	}
+	for _, helper := range g.helpers[:min(len(g.helpers), len(statements)-1)] {
+		wg.Add(1)
+		go func(tx *sql.Tx) { defer wg.Done(); worker(tx) }(helper)
+	}
+	worker(g.main)
+	wg.Wait()
+	if failure != nil {
+		return nil, failure
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -230,6 +255,14 @@ func securitySource(where string, dedup bool) string {
 	return " FROM (SELECT e.* FROM events e" + where + " AND (e.type='alert' OR COALESCE(e.session_id,'')='' OR NOT EXISTS (SELECT 1 FROM events a WHERE a.type='alert' AND " + strings.Join(same, " AND ") + " AND a.session_id=e.session_id)))"
 }
 func search(ctx context.Context, g *Snapshot, low, high float64, parts []string, args []any, limit, offset int, list, network, dedup bool) (int64, []Object, error) {
+	results, err := g.Many(searchStatements(low, high, parts, args, limit, offset, list, dedup))
+	if err != nil {
+		return 0, nil, err
+	}
+	out, err := searchRows(results[1], list, network)
+	return integer(results[0][0]["n"]), out, err
+}
+func searchStatements(low, high float64, parts []string, args []any, limit, offset int, list, dedup bool) []statement {
 	where := " WHERE ts>=? AND ts<=?"
 	bound := append([]any{low * 1000, high * 1000}, args...)
 	if len(parts) > 0 {
@@ -242,30 +275,35 @@ func search(ctx context.Context, g *Snapshot, low, high float64, parts []string,
 			columns = append(columns, name)
 		}
 	}
-	results, err := g.Many([]statement{{"SELECT COUNT(*) n" + source, bound}, {"SELECT " + strings.Join(columns, ",") + source + " ORDER BY ts DESC,id DESC LIMIT ? OFFSET ?", append(append([]any{}, bound...), limit, offset)}})
-	if err != nil {
-		return 0, nil, err
-	}
+	return []statement{{"SELECT COUNT(*) n" + source, bound}, {"SELECT " + strings.Join(columns, ",") + source + " ORDER BY ts DESC,id DESC LIMIT ? OFFSET ?", append(append([]any{}, bound...), limit, offset)}}
+}
+func searchRows(rows []Object, list, network bool) ([]Object, error) {
 	out := []Object{}
-	for _, row := range results[1] {
+	for _, row := range rows {
 		record, err := readRecordRow(row, list, network)
 		if err != nil {
-			return 0, nil, err
+			return nil, err
 		}
 		out = append(out, record)
 	}
-	return integer(results[0][0]["n"]), out, nil
+	return out, nil
 }
 func networkSummary(ctx context.Context, g *Snapshot, low, high float64, parts []string, args []any) (Object, error) {
+	results, err := g.Many(networkStatements(low, high, parts, args))
+	if err != nil {
+		return nil, err
+	}
+	return networkResult(results, low, high)
+}
+func networkStatements(low, high float64, parts []string, args []any) []statement {
 	filter := ""
 	if len(parts) > 0 {
 		filter = "AND " + strings.Join(parts, " AND ")
 	}
 	bound := append([]any{low * 1000, high * 1000}, args...)
-	results, err := g.Many([]statement{{strings.ReplaceAll(networkSQL, "{{FILTER}}", filter), bound}, {strings.ReplaceAll(networkLogsSQL, "{{FILTER}}", filter), bound}})
-	if err != nil {
-		return nil, err
-	}
+	return []statement{{strings.ReplaceAll(networkSQL, "{{FILTER}}", filter), bound}, {strings.ReplaceAll(networkLogsSQL, "{{FILTER}}", filter), bound}}
+}
+func networkResult(results [][]Object, low, high float64) (Object, error) {
 	r := Object{"range": []float64{low, high}, "as_of": now(), "records": int64(0), "flows": int64(0), "dns": int64(0), "tls": int64(0), "newest": float64(0), "bytes": int64(0), "bidirectional": int64(0), "one_way": int64(0), "addresses": int64(0), "source_count": int64(0), "destination_count": int64(0)}
 	for _, key := range strings.Fields("applications protocols dns_names tls_names sources event_types log_sources log_destinations") {
 		r[key] = []Object{}
@@ -349,6 +387,13 @@ func orderedValues(row Object, keys []string) []any {
 }
 func appendObject(m Object, key string, value Object) { m[key] = append(m[key].([]Object), value) }
 func securitySummary(ctx context.Context, g *Snapshot, low, high float64, parts []string, args []any, dedup bool, kind string, top int) (Object, error) {
+	values, err := g.Many(securityStatements(low, high, parts, args, dedup, kind, top))
+	if err != nil {
+		return nil, err
+	}
+	return securityResult(values), nil
+}
+func securityStatements(low, high float64, parts []string, args []any, dedup bool, kind string, top int) []statement {
 	where := " WHERE ts>=? AND ts<=? AND type IN ('alert','drop')"
 	bound := append([]any{low * 1000, high * 1000}, args...)
 	if len(parts) > 0 {
@@ -369,10 +414,9 @@ func securitySummary(ctx context.Context, g *Snapshot, low, high float64, parts 
 		queries = append(queries, statement{"SELECT " + column + " value,COUNT(*) count" + source + extra + column + "!='' GROUP BY " + column + " ORDER BY count DESC," + column + " LIMIT ?", append(append([]any{}, bound...), top)})
 	}
 	queries = append(queries, statement{"SELECT dport,proto,COUNT(*) count" + source + extra + "dport IS NOT NULL GROUP BY dport,proto ORDER BY count DESC LIMIT ?", append(append([]any{}, bound...), top)}, statement{"SELECT MIN(ts) oldest FROM events", nil})
-	values, err := g.Many(queries)
-	if err != nil {
-		return nil, err
-	}
+	return queries
+}
+func securityResult(values [][]Object) Object {
 	r := values[0][0]
 	for _, key := range strings.Fields("total alerts drops high sources_count destinations_count") {
 		r[key] = integer(r[key])
@@ -394,19 +438,27 @@ func securitySummary(ctx context.Context, g *Snapshot, low, high float64, parts 
 		ports = append(ports, Object{"port": text(row["dport"]) + "/" + strings.ToLower(text(row["proto"])), "count": row["count"]})
 	}
 	r["ports"] = ports
-	return r, nil
+	return r
 }
 func securitySeries(ctx context.Context, g *Snapshot, low, high float64, bucket int, parts []string, args []any) ([]Object, error) {
+	query := seriesStatement(low, high, bucket, parts, args)
+	rows, err := queryRows(ctx, g.main, query.SQL, query.Args...)
+	if err != nil {
+		return nil, err
+	}
+	return seriesResult(rows, low, high, bucket), nil
+}
+func seriesStatement(low, high float64, bucket int, parts []string, args []any) statement {
 	span := float64(bucket * 60)
 	where := " WHERE ts>=? AND ts<=? AND type IN ('alert','drop')"
 	if len(parts) > 0 {
 		where += " AND " + strings.Join(parts, " AND ")
 	}
 	bound := append([]any{span * 1000, low * 1000, high * 1000}, args...)
-	rows, err := queryRows(ctx, g.main, "SELECT CAST(ts/? AS INTEGER) slot,SUM("+detectionSQL+") alerts,SUM("+blockedSQL+") drops"+securitySource(where, true)+" GROUP BY slot", bound...)
-	if err != nil {
-		return nil, err
-	}
+	return statement{"SELECT CAST(ts/? AS INTEGER) slot,SUM(" + detectionSQL + ") alerts,SUM(" + blockedSQL + ") drops" + securitySource(where, true) + " GROUP BY slot", bound}
+}
+func seriesResult(rows []Object, low, high float64, bucket int) []Object {
+	span := float64(bucket * 60)
 	counts := map[int64]Object{}
 	for _, row := range rows {
 		counts[integer(row["slot"])] = row
@@ -416,5 +468,36 @@ func securitySeries(ctx context.Context, g *Snapshot, low, high float64, bucket 
 		row := counts[slot]
 		out = append(out, Object{"t": float64(slot) * span, "alerts": integer(row["alerts"]), "drops": integer(row["drops"])})
 	}
-	return out, nil
+	return out
+}
+
+// Start the two largest aggregations first; the shared reader group then takes
+// smaller queries as connections become free, without per-stage barriers.
+func overviewSummary(ctx context.Context, g *Snapshot, low, high float64, bucket int, parts []string, args []any) (Object, []Object, []Object, Object, error) {
+	queries := []statement{}
+	if g.recent {
+		queries = append(queries, networkStatements(low, high, parts, args)...)
+	}
+	securityStart := len(queries)
+	queries = append(queries, securityStatements(low, high, parts, args, true, "all", 5)...)
+	recentIndex := len(queries)
+	queries = append(queries, searchStatements(low, high, parts, args, 10, 0, true, false)[1])
+	seriesIndex := len(queries)
+	queries = append(queries, seriesStatement(low, high, bucket, parts, args))
+	values, err := g.Many(queries)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	var network Object
+	if g.recent {
+		network, err = networkResult(values[:securityStart], low, high)
+		if err != nil {
+			return nil, nil, nil, nil, err
+		}
+	}
+	recent, err := searchRows(values[recentIndex], true, false)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	return securityResult(values[securityStart:recentIndex]), recent, seriesResult(values[seriesIndex], low, high, bucket), network, nil
 }

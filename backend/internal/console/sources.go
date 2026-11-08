@@ -21,6 +21,14 @@ var customNamePattern = regexp.MustCompile(`^custom/[a-z0-9][a-z0-9_-]{0,63}$`)
 var oinkPattern = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
 var sourceVersion = regexp.MustCompile(`^(?:auto|3\.[0-9]+\.[0-9]+\.[0-9]+)$`)
 
+func validIPSPolicy(value string) bool {
+	switch value {
+	case "balanced", "connectivity", "security", "max-detect":
+		return true
+	}
+	return false
+}
+
 func registeredSnapshot(version string) string {
 	switch version {
 	case "auto", "", "3.13.2.0":
@@ -115,11 +123,15 @@ func publicSources(directory string, fallback Object) (Object, error) {
 	rows := []Object{}
 	for _, name := range names {
 		spec := officialSources[name]
+		policy := text(get(credentials, "ips_policy", get(fallback, "ips_policy", "balanced")))
+		if !validIPSPolicy(policy) {
+			return nil, errors.New("已保存 IPS 策略无效")
+		}
 		version := text(get(credentials, "registered_version", "auto"))
 		if version == "3.12.4.0" {
 			version = "auto"
 		}
-		rows = append(rows, Object{"name": name, "vendor": spec[0], "summary": spec[1], "license": spec[2], "enabled": sourceEnabled(directory, name, custom), "custom": false, "requires_code": name != "snort/community", "credential_configured": text(credentials["oinkcode"]) != "", "registered_version": version, "effective_version": registeredSnapshot(version)})
+		rows = append(rows, Object{"name": name, "vendor": spec[0], "summary": spec[1], "license": spec[2], "enabled": sourceEnabled(directory, name, custom), "custom": false, "requires_code": name != "snort/community", "credential_configured": text(credentials["oinkcode"]) != "", "registered_version": version, "effective_version": registeredSnapshot(version), "ips_policy": policy})
 	}
 	names = nil
 	for name := range custom {
@@ -167,6 +179,11 @@ func configureSource(directory string, value, fallback Object) error {
 			return errors.New("Registered 规则快照版本无效")
 		}
 		current["registered_version"] = version
+		policy := text(get(value, "ips_policy", get(current, "ips_policy", get(fallback, "ips_policy", "balanced"))))
+		if !validIPSPolicy(policy) {
+			return errors.New("请选择 balanced、connectivity、security 或 max-detect IPS 策略")
+		}
+		current["ips_policy"] = policy
 		return writeJSON(filepath.Join(directory, "credentials.json"), current)
 	}
 	path, err := customPath(directory, name)

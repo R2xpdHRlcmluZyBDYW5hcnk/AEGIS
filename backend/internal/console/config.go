@@ -26,6 +26,7 @@ type Config struct {
 	ReadWorkers                               int
 	PreloadBytes                              int64
 	SessionTTL                                time.Duration
+	snapshotDir                               string
 }
 
 func LoadConfig(path string) (Config, error) {
@@ -36,7 +37,7 @@ func LoadConfig(path string) (Config, error) {
 	if raw == nil {
 		return Config{}, errors.New("配置必须为 JSON 对象")
 	}
-	c := Config{Raw: raw, Bind: text(get(raw, "bind", "127.0.0.1")), Port: int(integer(get(raw, "port", 9000))), User: text(get(raw, "user", "admin")), PasswordSHA: strings.TrimSpace(text(raw["password_sha256"])), PasswordPBKDF: strings.TrimSpace(text(raw["password_pbkdf2"])), SecureCookie: raw["secure_cookie"] == true, StaticDir: text(get(raw, "static_dir", "/usr/local/share/ips-web")), EventDB: text(get(raw, "event_db", "/var/lib/ips-web/snort-ndr.db")), Stream: text(get(raw, "eve", "/var/log/ips/events.json")), ManagerSocket: text(get(raw, "rule_manager_socket", "")), ReadWorkers: bounded(int(integer(get(raw, "read_workers", 4))), 1, 4), PreloadBytes: integer(get(raw, "preload_memory_mib", 128)) << 20, SessionTTL: time.Duration(integer(get(raw, "session_ttl", 43200))) * time.Second}
+	c := Config{Raw: raw, Bind: text(get(raw, "bind", "127.0.0.1")), Port: int(integer(get(raw, "port", 9000))), User: text(get(raw, "user", "admin")), PasswordSHA: strings.TrimSpace(text(raw["password_sha256"])), PasswordPBKDF: strings.TrimSpace(text(raw["password_pbkdf2"])), SecureCookie: raw["secure_cookie"] == true, StaticDir: text(get(raw, "static_dir", "/usr/local/share/ips-web")), EventDB: text(get(raw, "event_db", "/var/lib/ips-web/snort-ndr.db")), Stream: text(get(raw, "eve", "/var/log/ips/events.json")), ManagerSocket: text(get(raw, "rule_manager_socket", "")), ReadWorkers: WorkerCount(), PreloadBytes: integer(get(raw, "preload_memory_mib", 128)) << 20, SessionTTL: time.Duration(integer(get(raw, "session_ttl", 43200))) * time.Second}
 	if os.Getenv("IPS_WEB_ISOLATED") == "1" {
 		c.ManagerSocket = "/run/ips-rule-manager/control.sock"
 		dir := os.Getenv("STATE_DIRECTORY")
@@ -44,6 +45,10 @@ func LoadConfig(path string) (Config, error) {
 			dir = "/var/lib/ips-web"
 		}
 		c.EventDB = filepath.Join(dir, "snort-ndr.db")
+		c.snapshotDir = overviewRuntimeDirectory()
+		if c.snapshotDir == "" {
+			return Config{}, errors.New("概览内存快照目录不可用")
+		}
 	}
 	if root := os.Getenv("IPS_LOG_STORAGE_ROOT"); root != "" {
 		if root != "/var/lib/ips-snort-logs" {

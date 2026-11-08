@@ -247,13 +247,14 @@ func queueListeners() Object {
 	}
 	queues := []Object{}
 	var total, drops, user int64
+	count := detectorQueueCount()
 	for _, line := range strings.Split(string(data), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 7 {
 			continue
 		}
 		id, err := strconv.Atoi(fields[0])
-		if err != nil || id < 0 || id > 3 || integer(fields[1]) == 0 {
+		if err != nil || id < 0 || id >= count || integer(fields[1]) == 0 {
 			continue
 		}
 		backlog, kd, ud := integer(fields[2]), integer(fields[5]), integer(fields[6])

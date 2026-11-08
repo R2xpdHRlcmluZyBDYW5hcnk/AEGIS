@@ -360,7 +360,7 @@ func (a *Assistant) infer(ctx context.Context, messages []Object, options Object
 		return "", "", err
 	}
 	request.Header.Set("Content-Type", "application/json")
-	updates := make(chan Object, 16)
+	updates := make(chan Object, 4*WorkerCount())
 	done := make(chan streamResult, 1)
 	workerCtx, cancel := context.WithCancel(ctx)
 	workerFinished := make(chan struct{})

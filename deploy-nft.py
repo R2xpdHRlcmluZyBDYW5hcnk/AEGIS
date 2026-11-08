@@ -27,24 +27,6 @@ def run(args, text=None):
         raise RuntimeError('Command failed: ' + ' '.join(args) + '\n' + error.stderr.strip()) from error
 
 
-def load_source(source):
-    tree = ast.parse(source)
-    compile(tree, str(TARGET), 'exec')
-    return tree
-
-
-def validate_source(before, after):
-    def remaining(source):
-        result = []
-        for node in load_source(source).body:
-            if isinstance(node, ast.FunctionDef) and node.name == 'nft_rules':
-                continue
-            result.append(node)
-        return ast.dump(ast.Module(body=result, type_ignores=[]), include_attributes=False)
-    if remaining(before) != remaining(after):
-        raise ValueError('Supervisor has unrelated changes; refusing NFQUEUE-only deployment')
-
-
 def ingress_rule(table):
     rules = [obj['rule'] for obj in table['nftables'] if 'rule' in obj]
     matches = [rule for rule in rules if rule.get('chain') == 'prerouting'
@@ -147,11 +129,8 @@ def atomic_write(data, target, mode):
 
 
 def generated_rules(path):
-    loader = importlib.machinery.SourceFileLoader('nfqueue_candidate', str(path))
-    spec = importlib.util.spec_from_loader(loader.name, loader)
-    module = importlib.util.module_from_spec(spec)
-    loader.exec_module(module)
-    return module.nft_rules()
+    if path.read_bytes()[:4]!=b'\x7fELF':raise ValueError('Deploy the Go supervisor first')
+    return run([str(path.resolve()),'--nft-rules'])
 
 
 def upgrade(release):
@@ -163,15 +142,15 @@ def upgrade(release):
     if not target.is_file():
         raise ValueError('Expected a regular installed supervisor file')
     original = target.read_bytes()
-    candidate = (release / 'ips-supervisor').read_bytes()
-    validate_source(original, candidate)
+    if original[:4]!=b'\x7fELF':raise ValueError('Deploy the Go supervisor first')
+    candidate=original
     before_processes = processes()
     before = json.loads(run([NFT, '-j', 'list', 'table', 'inet', 'ips']))
     rule = ingress_rule(before)
     old_priority=next(obj['chain']['prio'] for obj in before['nftables'] if 'chain' in obj)
     change = priority_transaction(before, -90)
     rollback = priority_transaction(before, old_priority)
-    run([NFT, '-c', '-f', '-'], generated_rules(release / 'ips-supervisor'))
+    run([NFT, '-c', '-f', '-'], generated_rules(target))
     run([NFT, '-c', '-j', '-f', '-'], change)
     backup = BACKUPS / (datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ'))
     backup.mkdir(parents=True, mode=0o700)
@@ -182,7 +161,6 @@ def upgrade(release):
     mode = target.stat().st_mode & 0o777
     applied = False
     try:
-        atomic_write(candidate, target, mode)
         run([NFT, '-j', '-f', '-'], change)
         applied = True
         after = json.loads(run([NFT, '-j', 'list', 'table', 'inet', 'ips']))
@@ -197,15 +175,13 @@ def upgrade(release):
         if target.read_bytes() != candidate:
             raise RuntimeError('Installed generator verification failed')
     except BaseException:
-        atomic_write(original, target, mode)
         if applied:
             run([NFT, '-j', '-f', '-'], rollback)
         raise
     print('NFQUEUE ingress: prerouting priority -90, after destination NAT')
     print('Generator installed; supervisor and Snort process identities unchanged.')
     print('Backup: ' + str(backup))
-    print('The running supervisor retains its old generator until its next start;')
-    print('if the IPS table disappears before then, it may recreate the previous policy.')
+    print('The Go supervisor and its service-sized queue generator were preserved.')
 
 
 def prepare(output):
@@ -215,9 +191,9 @@ def prepare(output):
         raise ValueError('Stage NFQUEUE releases outside the source directory')
     output.mkdir(parents=True, exist_ok=True)
     checksums = []
-    for name in ('ips-supervisor', 'log_storage.py', 'deploy-nft.py'):
+    for name in ('deploy-nft.py',):
         data = (root / name).read_bytes().removeprefix(b'\xef\xbb\xbf').replace(b'\r\n', b'\n')
-        load_source(data)
+        compile(data,name,'exec')
         (output / name).write_bytes(data)
         checksums.append(hashlib.sha256(data).hexdigest() + '  ' + name + '\n')
     (output / 'SHA256SUMS').write_text(''.join(checksums), encoding='utf-8', newline='\n')

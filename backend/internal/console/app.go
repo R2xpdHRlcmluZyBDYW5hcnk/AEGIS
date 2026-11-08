@@ -38,6 +38,7 @@ type App struct {
 	cacheBytes                     int64
 	Network                        *NetworkSnapshots
 	Recent                         *RecentEvents
+	Overview                       *OverviewSnapshots
 	Assistant                      *Assistant
 	mutation                       sync.Mutex
 	historySlot                    chan struct{}
@@ -63,7 +64,8 @@ func NewApp(parent context.Context, cfg Config) (*App, error) {
 		return nil, err
 	}
 	a.Assistant = NewAssistant(a)
-	for _, run := range []func(context.Context){store.Run, a.Network.Run, a.Recent.Run} {
+	a.Overview = NewOverviewSnapshots(a)
+	for _, run := range []func(context.Context){store.Run, a.Network.Run, a.Recent.Run, a.Overview.Run} {
 		a.wg.Add(1)
 		go func(run func(context.Context)) { defer a.wg.Done(); run(ctx) }(run)
 	}
@@ -74,6 +76,9 @@ func (a *App) Health() Object {
 	result := Object{"ok": true, "uptime": int64(time.Since(a.Started).Seconds()), "ingest_lag_bytes": a.Store.Lag(), "recent_ingest_lag_bytes": a.Store.RecentLag(), "recent_events_range": a.Recent.Range(), "event_db_ready": a.Store.Error() == "", "overview_ready": a.Recent.Ready(), "sqlite_version": sqliteVersion(a.ctx, a.Store.Readers), "backend": "go", "go_version": runtime.Version(), "cpu_workers": a.Pool.Workers}
 	result["recent_events_error"] = a.Recent.Error()
 	result["recent_events_diagnostics"] = a.Recent.Diagnostics()
+	if a.Overview != nil {
+		result["overview_snapshot"] = a.Overview.Status()
+	}
 	return result
 }
 func BuildInfo() Object {
@@ -86,6 +91,9 @@ func BuildInfo() Object {
 	return Object{"backend": "go", "go_version": runtime.Version(), "sqlite_version": version, "target": runtime.GOOS + "-" + runtime.GOARCH}
 }
 func (a *App) Read(ctx context.Context, name string, params url.Values) (Object, error) {
+	if name == "overview" && a.Overview != nil && params.Get("format") != "csv" {
+		return a.Overview.Read(ctx, params)
+	}
 	if name == "hunt" && params.Get("source") == "file" {
 		select {
 		case a.historySlot <- struct{}{}:
@@ -231,7 +239,19 @@ func (a *App) execute(ctx context.Context, name string, params url.Values) (Obje
 			return Object{"total": 0, "events": []Object{}, "query": params.Get("q"), "source": "memory", "warming": true, "truncated": false}, nil
 		}
 	} else {
-		g, release, err = a.querySource(ctx, cacheScope, low, high)
+		if name == "overview" && ctx.Value(overviewParallelKey{}) == true && a.Config.snapshotDir != "" {
+			if cacheScope {
+				g, release, err = a.Recent.waitFrozenSnapshot(ctx)
+			} else {
+				var ok bool
+				g, release, ok, err = a.Recent.frozenSnapshot(ctx, low, high, false)
+				if err == nil && !ok {
+					g, release, err = a.querySource(ctx, false, low, high)
+				}
+			}
+		} else {
+			g, release, err = a.querySource(ctx, cacheScope, low, high)
+		}
 	}
 	if err != nil {
 		return nil, err
@@ -272,7 +292,7 @@ func (a *App) execute(ctx context.Context, name string, params url.Values) (Obje
 		return securitySummary(ctx, g, low, high, parts, args, false, params.Get("type"), 8)
 	case "overview":
 		if a.Recent.Owns(g) && cacheScope {
-			low, high = a.Recent.Bounds()
+			low, high = g.bounds[0], g.bounds[1]
 		}
 		parts, args, err := overviewFilter(params, low, high)
 		if err != nil {
@@ -290,30 +310,17 @@ func (a *App) execute(ctx context.Context, name string, params url.Values) (Obje
 		default:
 			bucket = max(60, int(math.Ceil(float64(minutes)/720)))
 		}
-		security, err := securitySummary(ctx, g, low, high, parts, args, true, "all", 5)
+		security, recent, series, network, err := overviewSummary(ctx, g, low, high, bucket, parts, args)
 		if err != nil {
 			return nil, err
 		}
-		_, recent, err := search(ctx, g, low, high, parts, args, 10, 0, true, false, false)
-		if err != nil {
-			return nil, err
-		}
-		series, err := securitySeries(ctx, g, low, high, bucket, parts, args)
-		if err != nil {
-			return nil, err
-		}
-		var network Object
-		if a.Recent.Owns(g) {
-			network, err = networkSummary(ctx, g, low, high, parts, args)
-			if err != nil {
-				return nil, err
-			}
-		} else {
+		if !a.Recent.Owns(g) {
 			network = a.Network.Get(low, high, parts, args, params)
 		}
 		runtimeData := a.Runtime(ctx)
 		result := Object{"ts": now(), "source": "db", "series": series, "coverage": int64(max(0, now()-number(security["oldest"]))), "security": security, "network": network, "sensor": Object{"ingest_lag_bytes": a.Store.Lag(), "error": a.Store.Error(), "scope": "Snort 配置的采集范围", "limitations": "可见性取决于采集位置、双向流量和协议加密"}, "window": minutes, "range": []float64{low, high}, "bucket": bucket, "top": Object{"signatures": security["signatures"], "sources": network["log_sources"], "destinations": network["log_destinations"]}, "recent": recent, "events_total": a.Recent.Count()}
 		if a.Recent.Owns(g) {
+			result["events_total"] = g.count
 			result["source"] = "memory"
 			if state := a.Recent.ReadState(); state != nil {
 				result["read_state"] = state
@@ -427,6 +434,9 @@ func (a *App) Invalidate() {
 	a.cacheBytes = 0
 	a.cacheMu.Unlock()
 	a.Network.Invalidate()
+	if a.Overview != nil {
+		a.Overview.Invalidate()
+	}
 }
 
 var _ = fmt.Sprint

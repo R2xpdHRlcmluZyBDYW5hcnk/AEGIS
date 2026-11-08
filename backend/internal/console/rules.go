@@ -1,9 +1,7 @@
 package console
 
 import (
-	"archive/tar"
 	"bufio"
-	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -564,9 +562,6 @@ func (c *RuleCatalog) Load(ctx context.Context) ([]*Rule, []Object, error) {
 				return nil
 			}
 			if entry.IsDir() {
-				if path == filepath.Join(c.live.Cache, "derived") {
-					return filepath.SkipDir
-				}
 				return nil
 			}
 			if len(paths) > 10000 {
@@ -610,6 +605,7 @@ func (c *RuleCatalog) Load(ctx context.Context) ([]*Rule, []Object, error) {
 		group, source    string
 		enabled, managed bool
 		active           bool
+		members          map[RuleID][]string
 	}
 	jobs := []batch{}
 	var identities map[string]Object
@@ -619,8 +615,18 @@ func (c *RuleCatalog) Load(ctx context.Context) ([]*Rule, []Object, error) {
 		if strings.HasSuffix(path, ".json") || strings.HasSuffix(path, ".yaml") {
 			continue
 		}
-		if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() || info.Size() > 128<<20 {
+		if filepath.Dir(path) == filepath.Join(c.live.Cache, "derived") {
+			continue // Included in the signature; loaded through its source archive.
+		}
+		archive := strings.HasSuffix(path, "-rules.tar.gz")
+		limit := int64(128 << 20)
+		if archive {
+			limit = 256 << 20
+		}
+		if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
 			continue
+		} else if info.Size() > limit {
+			return nil, nil, errors.New("规则目录输入超过容量限制")
 		}
 		source, enabled := "本地目录", true
 		managed := false
@@ -640,11 +646,20 @@ func (c *RuleCatalog) Load(ctx context.Context) ([]*Rule, []Object, error) {
 			managed = true
 		}
 		files := map[string][]byte{}
-		if strings.HasSuffix(path, ".tar.gz") {
-			var err error
-			files, err = archiveRules(path)
-			if err != nil {
-				return nil, nil, err
+		var members map[RuleID][]string
+		if archive {
+			key := strings.TrimSuffix(filepath.Base(path), "-rules.tar.gz")
+			if raw, groups, ok := cachedCatalogRules(c.live.Cache, key, source); ok {
+				files[filepath.Base(path)] = raw
+				members = groups
+			} else {
+				paths := c.draft
+				paths.Config = c.live.Config
+				var err error
+				files, err = catalogArchiveRules(path, source, paths)
+				if err != nil {
+					return nil, nil, err
+				}
 			}
 		} else {
 			data, err := regularRead(path, 128<<20)
@@ -666,7 +681,7 @@ func (c *RuleCatalog) Load(ctx context.Context) ([]*Rule, []Object, error) {
 			text := strings.ReplaceAll(strings.ReplaceAll(string(files[name]), "\\\r\n", ""), "\\\n", "")
 			lines := strings.Split(text, "\n")
 			for i := 0; i < len(lines); i += 512 {
-				jobs = append(jobs, batch{lines[i:min(i+512, len(lines))], g, source, enabled, managed, active[path]})
+				jobs = append(jobs, batch{lines[i:min(i+512, len(lines))], g, source, enabled, managed, active[path], members})
 			}
 		}
 	}
@@ -679,6 +694,16 @@ func (c *RuleCatalog) Load(ctx context.Context) ([]*Rule, []Object, error) {
 		for _, line := range b.lines {
 			if r := parseRule(line, b.group, b.source, b.enabled); r != nil {
 				r.PolicyManaged = b.managed
+				if b.members != nil {
+					groups := b.members[r.ID]
+					if len(groups) == 0 {
+						return parsedBatch{}, errors.New("规则分组缓存缺少签名，请重新应用规则")
+					}
+					r.Group, r.Origins = groups[0], nil
+					for _, group := range groups {
+						r.Origins = append(r.Origins, Object{"group": group, "source": b.source})
+					}
+				}
 				rows = append(rows, r)
 			}
 		}
@@ -704,23 +729,25 @@ func (c *RuleCatalog) Load(ctx context.Context) ([]*Rule, []Object, error) {
 			if batch.active && row.Group == "local/snort" {
 				continue
 			}
-			key := row.Source + "\x00" + row.Group
-			if groupMembers[key] == nil {
-				groupMembers[key] = map[RuleID]*Rule{}
+			for _, origin := range row.Origins {
+				key := text(origin["source"]) + "\x00" + text(origin["group"])
+				if groupMembers[key] == nil {
+					groupMembers[key] = map[RuleID]*Rule{}
+				}
+				groupMembers[key][row.ID] = row
 			}
-			groupMembers[key][row.ID] = row
 			old := byID[row.ID]
 			if old == nil || (!old.SourceEnabled && row.SourceEnabled) {
 				byID[row.ID] = row
 			} else if old.SourceEnabled == row.SourceEnabled {
-				known := false
-				for _, origin := range old.Origins {
-					if origin["group"] == row.Group && origin["source"] == row.Source {
-						known = true
+				for _, candidate := range row.Origins {
+					known := false
+					for _, origin := range old.Origins {
+						known = known || origin["group"] == candidate["group"] && origin["source"] == candidate["source"]
 					}
-				}
-				if !known {
-					old.Origins = append(old.Origins, Object{"group": row.Group, "source": row.Source})
+					if !known {
+						old.Origins = append(old.Origins, candidate)
+					}
 				}
 			}
 		}
@@ -730,6 +757,9 @@ func (c *RuleCatalog) Load(ctx context.Context) ([]*Rule, []Object, error) {
 		return nil, nil, err
 	}
 	for _, row := range builtins {
+		if selected := compiled[row.ID]; selected != nil {
+			row.Action = selected.Action
+		}
 		byID[row.ID] = row
 		disabled := false
 		for _, s := range configured(c.live.controls["DISABLE_CONF"]) {
@@ -793,47 +823,6 @@ func (c *RuleCatalog) Load(ctx context.Context) ([]*Rule, []Object, error) {
 	})
 	c.signature, c.rules, c.groups, c.byID = signature, rows, groups, byID
 	return rows, groups, nil
-}
-func archiveRules(path string) (map[string][]byte, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	gz, err := gzip.NewReader(f)
-	if err != nil {
-		return nil, err
-	}
-	defer gz.Close()
-	reader := tar.NewReader(gz)
-	files := map[string][]byte{}
-	total := int64(0)
-	for {
-		entry, err := reader.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, err
-		}
-		if entry.Typeflag != tar.TypeReg || !strings.HasSuffix(entry.Name, ".rules") {
-			continue
-		}
-		name := filepath.ToSlash(filepath.Clean(entry.Name))
-		if strings.HasPrefix(name, "../") || strings.HasPrefix(name, "/") || strings.Contains(name, "\\") {
-			return nil, errors.New("规则归档路径不安全")
-		}
-		if entry.Size > 128<<20 || entry.Size < 0 || total+entry.Size > 512<<20 || len(files) >= 10000 {
-			return nil, errors.New("规则归档超过容量限制")
-		}
-		data, err := io.ReadAll(io.LimitReader(reader, entry.Size+1))
-		if err != nil || int64(len(data)) != entry.Size {
-			return nil, errors.New("规则归档不完整")
-		}
-		files[name] = data
-		total += entry.Size
-	}
-	return files, nil
 }
 func (c *RuleCatalog) Search(ctx context.Context, params Object, selector string) (Object, error) {
 	rows, groups, err := c.Load(ctx)

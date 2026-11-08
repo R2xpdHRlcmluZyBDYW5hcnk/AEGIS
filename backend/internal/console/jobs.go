@@ -262,19 +262,28 @@ func (j *RuleJobs) Status() Object {
 	result := Object{"state": "idle", "kind": "", "lines": []string{}, "pending": pending}
 	for _, r := range j.records {
 		if text(r["id"]) == j.current {
-			result = clone(r)
+			result = j.recordStatus(r)
 		}
 	}
 	for key, id := range map[string]string{"recent_manual": j.manual, "recent_scheduled": j.scheduled} {
 		for _, r := range j.records {
 			if text(r["id"]) == id {
-				result[key] = clone(r)
+				result[key] = j.recordStatus(r)
 			}
 		}
 	}
 	result["pending"] = pending
 	if j.logError != "" {
 		result["log_error"] = j.logError
+	}
+	return result
+}
+func (j *RuleJobs) recordStatus(record Object) Object {
+	result := clone(record)
+	if path, err := j.logPath(text(record["id"])); err == nil {
+		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
+			result["log_bytes"] = info.Size()
+		}
 	}
 	return result
 }
@@ -398,11 +407,24 @@ func (j *RuleJobs) Start(kind, trigger, rule string) (Object, error) {
 		j.mu.Unlock()
 		return nil, err
 	}
+	// Publish a job only after its empty log is readable. Draft promotion can
+	// take time before the worker writes the first line.
+	logPath, _ := j.logPath(id)
+	if err := atomicWrite(logPath, nil, 0600); err != nil {
+		backup.Close(j.manager.state)
+		j.mu.Lock()
+		j.running = false
+		j.mu.Unlock()
+		return nil, errors.New("操作日志初始化失败")
+	}
 	record := Object{"state": "running", "kind": kind, "trigger": trigger, "started": now(), "finished": 0, "rc": nil, "lines": []string{}, "id": id, "log_ref": id}
 	if rule != "" {
 		record["manual_rule"] = rule
 	}
 	j.mu.Lock()
+	previousRecords := append([]Object(nil), j.records...)
+	previousCurrent, previousManual, previousScheduled, previousReload := j.current, j.manual, j.scheduled, j.reload
+	retiredLogs := []string{}
 	j.current = id
 	if trigger == "scheduled" {
 		j.scheduled = id
@@ -417,19 +439,24 @@ func (j *RuleJobs) Start(kind, trigger, rule string) (Object, error) {
 			continue
 		}
 		if path, e := j.logPath(text(old["id"])); e == nil {
-			os.Remove(path)
+			retiredLogs = append(retiredLogs, path)
 		}
 		j.records = j.records[1:]
 	}
 	j.reload = Object{"state": "running", "since": time.Now().Format("2006-01-02 15:04:05")}
 	err = j.persistLocked()
-	j.mu.Unlock()
 	if err != nil {
-		backup.Close(j.manager.state)
-		j.mu.Lock()
+		j.records = previousRecords
+		j.current, j.manual, j.scheduled, j.reload = previousCurrent, previousManual, previousScheduled, previousReload
 		j.running = false
 		j.mu.Unlock()
+		os.Remove(logPath)
+		backup.Close(j.manager.state)
 		return nil, err
+	}
+	j.mu.Unlock()
+	for _, path := range retiredLogs {
+		os.Remove(path)
 	}
 	j.wg.Add(1)
 	go func() { defer j.wg.Done(); defer guard.Close(); j.worker(record, backup) }()
@@ -496,13 +523,12 @@ func (j *RuleJobs) worker(record Object, backup *ruleBackup) {
 		j.mu.Unlock()
 	}()
 	beforeDetector := readText(m.live.controls["BAN_DETECTOR"])
-	downloadPending := false
+	applyPending := kind == "apply" || kind == "update" && trigger == "manual"
 	m.mu.Lock()
 	if kind == "manual-add" {
 		failure = appendPrivateLine(m.live.controls["HUNT_RULES"], text(record["manual_rule"]))
 	}
-	downloadPending = kind == "update" && trigger == "manual" && m.drafts.SourcesChanged()
-	if failure == nil && kind == "apply" && m.drafts.Dirty {
+	if failure == nil && applyPending && m.drafts.Dirty {
 		failure = m.drafts.Promote()
 	}
 	m.mu.Unlock()
@@ -510,12 +536,8 @@ func (j *RuleJobs) worker(record Object, backup *ruleBackup) {
 		return
 	}
 	if kind == "update" || kind == "apply" {
-		sources := ""
-		if downloadPending {
-			sources = m.drafts.paths.Sources
-		}
 		j.append(id, "开始处理规则来源")
-		failure = UpdateRules(m.ctx, m.live, kind == "apply", sources, downloadPending, m.pool, func(message string) { j.append(id, message) })
+		failure = UpdateRules(m.ctx, m.live, kind == "apply", "", false, m.pool, func(message string) { j.append(id, message) })
 		if failure != nil {
 			return
 		}
@@ -533,16 +555,6 @@ func (j *RuleJobs) worker(record Object, backup *ruleBackup) {
 		detectorsChanged = changed
 	}
 	detectorsChanged = detectorsChanged || beforeDetector != readText(m.live.controls["BAN_DETECTOR"])
-	if downloadPending && !detectorsChanged {
-		if err = writeJSON(filepath.Join(backup.Directory, "committed.json"), Object{"clear_pending": false}); err != nil {
-			failure = err
-			return
-		}
-		committed = true
-		backup.Close(m.state)
-		j.append(id, "所选规则源已下载，点击“应用更改”启用")
-		return
-	}
 	j.append(id, "开始 Snort 配置校验")
 	if failure = m.prepareThresholds(m.ctx); failure != nil {
 		return
@@ -567,13 +579,11 @@ func (j *RuleJobs) worker(record Object, backup *ruleBackup) {
 			return
 		}
 	}
-	if !downloadPending {
-		j.append(id, "开始 Snort 热重载")
-		if _, failure = m.engineCall(m.ctx, "ruleset-reload-rules", 300*time.Second); failure != nil {
-			return
-		}
+	j.append(id, "开始 Snort 热重载")
+	if _, failure = m.engineCall(m.ctx, "ruleset-reload-rules", 300*time.Second); failure != nil {
+		return
 	}
-	commit := Object{"clear_pending": kind == "apply"}
+	commit := Object{"clear_pending": applyPending}
 	if kind == "manual-add" {
 		commit["applied_manual"] = record["manual_rule"]
 	}
@@ -585,7 +595,7 @@ func (j *RuleJobs) worker(record Object, backup *ruleBackup) {
 	m.mu.Lock()
 	if kind == "manual-add" {
 		failure = appendPrivateLine(m.drafts.paths.controls["HUNT_RULES"], text(record["manual_rule"]))
-	} else if kind == "apply" || !m.drafts.Dirty {
+	} else if applyPending || !m.drafts.Dirty {
 		failure = m.drafts.Reset()
 	}
 	m.mu.Unlock()
@@ -596,11 +606,7 @@ func (j *RuleJobs) worker(record Object, backup *ruleBackup) {
 		j.append(id, "规则已生效，但自动同步状态记录失败")
 	}
 	backup.Close(m.state)
-	if downloadPending {
-		j.append(id, "所选规则源已下载，点击“应用更改”启用；OpenAppID 更新已完成")
-	} else {
-		j.append(id, "规则已校验并完成热重载")
-	}
+	j.append(id, "规则已校验并完成热重载")
 }
 func (m *RuleManager) pauseRecovery() {
 	m.mu.Lock()

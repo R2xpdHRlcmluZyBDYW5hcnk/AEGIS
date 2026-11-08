@@ -10,7 +10,7 @@ import re
 import subprocess
 import time
 
-from log_storage import validate_log_storage,log_paths
+from deployment_support import validate_log_storage,log_paths
 
 
 def execute(*args):
@@ -25,8 +25,12 @@ def deploy(release,interface):
         raise ValueError('Choose an existing capture interface')
     release=Path(release);validate_log_storage()
     spec=json.loads((release/'build_tools/quic-sources.json').read_text())
-    compile((release/'quic_observer.py').read_bytes(),'quic_observer.py','exec')
-    if Path('/opt/ips-console/bin/quic_observer.py').read_bytes()!=(release/'quic_observer.py').read_bytes():
+    binary=release/'ips-quic-observer'
+    manifest=json.loads((release/'maintenance-build.json').read_text())
+    import hashlib
+    if hashlib.sha256(binary.read_bytes()).hexdigest()!=manifest['files']['ips-quic-observer'] or binary.read_bytes()[:4]!=b'\x7fELF':
+        raise ValueError('Invalid native observer release')
+    if Path('/opt/ips-console/bin/ips-quic-observer').read_bytes()!=binary.read_bytes():
         raise ValueError('Deploy the matching console backend before enabling the observer')
     # Use the target distribution's signed, ABI-compatible security packages.
     # Do not replace system libraries with packages from another Debian suite.

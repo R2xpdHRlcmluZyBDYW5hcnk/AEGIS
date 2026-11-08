@@ -24,14 +24,13 @@ NEW_CONFIG=Path('/etc/ips-snort-web.conf')
 PROGRAM_DIR=Path('/opt/ips-console/bin')
 STATIC_DIR=Path('/usr/local/share/ips-snort-web')
 LAYOUT=Path('/etc/ips-snort-deployment.json')
-PROGRAMS=('ips-web','ips-supervisor','ips-rule-manager','ips-event-bridge','ips-snort-rules','ips-log-maintenance',
-          'ips_control.py','rule_drafts.py','llm_assistant.py','quic_observer.py','dns_context.py','llm_hunting.py','overview_metrics.py','hunt_query.py','python_dependencies.py','python-dependencies.zip','openappid_update.py','session_logger.py','snort_engine.py','snort_rules.py','rule_policy.py','parallel_cpu.py','parallel_sql.py','event_processing.py','native_rules.py','rule_sources.py','rule_identity.py','rule_inventory.py','runtime_status.py','history_reset.py','log_storage.py','deployment_layout.py','snort-home-net')
+PROGRAMS=('ips-web','ips-supervisor','ips-rule-manager','ips-event-bridge','ips-snort-rules','ips-log-maintenance','deployment_support.py','deployment_layout.py','snort-home-net')
 UNITS=('ips.service','ips-web.service','ips-rule-manager.service','ips-event-bridge.service',
        'snort-home-net.service','snort-home-net.timer','ips-log-maintenance.service','ips-log-maintenance.timer')
 ACTIVE_UNITS=('ips-web','ips-rule-manager','ips-event-bridge','ips')
 DEPENDENCIES=('libdumbnet1','libhwloc15','libluajit-5.1-2','libpcap0.8t64','libpcre2-8-0',
               'libssl3t64','liblzma5','zlib1g','libmnl0','libunwind8','libnuma1','libuuid1',
-              'libbrotli1','libstdc++6','nftables','python3-nftables','python3-requests','logrotate')
+              'libbrotli1','libstdc++6','nftables','logrotate')
 
 
 def run(*args,check=True):
@@ -256,6 +255,13 @@ def activate(release,engine_archive):
             run(str(PREFIX/'bin/snort'),'-V')
             PROGRAM_DIR.mkdir(parents=True,exist_ok=True)
             for name in PROGRAMS: install_file(release/name,PROGRAM_DIR/name,0o644 if name.endswith(('.py','.zip')) else 0o755)
+            for receipt in ('backend-build.json','maintenance-build.json','supervisor-build.json'):
+                if (release/receipt).is_file():
+                    value=json.loads((release/receipt).read_text())
+                    for name,expected in value['files'].items():
+                        if Path(name).name!=name or digest(release/name)!=expected:raise ValueError('Native program checksum differs')
+                        install_file(release/name,PROGRAM_DIR/name,0o755)
+                    install_file(release/receipt,PROGRAM_DIR/receipt,0o644)
             for directory in ('/etc/snort','/var/lib/snort/rules','/var/log/snort','/var/log/ips',
                               '/var/lib/snort/update/sources','/var/lib/snort/appid/custom/lua'):
                 Path(directory).mkdir(parents=True,exist_ok=True)
@@ -277,8 +283,10 @@ def activate(release,engine_archive):
                 if link.is_symlink() and link.readlink()==target: continue
                 if link.exists() or link.is_symlink(): raise ValueError('Native AppID link differs')
                 link.symlink_to(target,target_is_directory=target.is_dir())
-            run(sys.executable,'-B',str(PROGRAM_DIR/'ips-snort-rules'),'enable-source','snort/community')
-            run(sys.executable,'-B',str(PROGRAM_DIR/'ips-snort-rules'),'--no-reload')
+            entry=PROGRAM_DIR/'ips-snort-rules'
+            prefix=[str(entry)]
+            run(*prefix,'enable-source','snort/community')
+            run(*prefix,'--no-reload')
             run(str(PREFIX/'bin/snort'),'-T','-c','/etc/snort/snort.lua')
             if STATIC_DIR.exists() and not (STATIC_DIR/'frontend-build.json').exists():
                 raise ValueError('Unrecognized native static directory')

@@ -1,6 +1,6 @@
 # QUIC 连接与握手观察
 
-可选采集组件复用 Wireshark / TShark 的协议解析及连接关联，不自行实现 QUIC 解密器。dumpcap 只捕获指定接口的 UDP，通过有界管道交给 TShark，不保存报文文件。面板只接收字段白名单内的观察记录。
+Go 可选采集组件复用 Wireshark / TShark 的协议解析及连接关联，不自行实现 QUIC 解密器。dumpcap 只捕获指定接口的 UDP，通过有界管道交给 TShark，不保存报文文件。面板只接收字段白名单内的观察记录。
 
 ## 安装和资源
 
@@ -28,10 +28,10 @@
 
 ## 验证与来源
 
-`tests/test_quic_observer.py` 覆盖身份、重置、路径变化、资源限制、歧义、缺少握手及入库口径。`tests/check_quic_observer.py` 使用本地合成的 example.test 握手和路径变化 PCAP 验证真实解析器及正式事件库：
+`backend/internal/console/runtime_maintenance_test.go` 覆盖身份、重置、路径变化、资源限制、歧义、缺少握手及入库口径。`tests/check_quic_observer.py` 使用本地合成的 example.test 握手和路径变化 PCAP 验证真实解析器和 Go 观察入口：
 
 ```sh
-python3 -B -m tests.check_quic_observer --tshark /path/to/tshark --pcap /path/to/synthetic-quic.pcap
+python3 -B -m tests.check_quic_observer --tshark /path/to/tshark --pcap /path/to/synthetic-quic.pcap --observer /path/to/ips-quic-observer
 ```
 
 回放在开发电脑进行。部署后只检查服务、资源限制、采集通道和正常生产记录，不在检测设备生成流量或运行回放、压测。
@@ -45,3 +45,5 @@ python3 -B -m tests.check_quic_observer --tshark /path/to/tshark --pcap /path/to
 本地实际解析使用 Wireshark 4.4.19。握手样例由 aioquic 1.7.2 生成，该库不成为面板依赖。样例覆盖 QUIC v1 握手及相同可见 CID 下的源端口变化，不扩大为所有版本、CID 轮换或网络环境的支持证明。
 
 状态重置会重新编号 frame.number。输出过滤保留每个解析周期的首帧，即使它不是 QUIC，避免过滤掉重置边界后将复用的连接编号误合并。首帧标记只更新生命周期，不产生 QUIC 事件。重置时提交待写观察并清空连接状态，随后分配新会话身份；真实解析器回归覆盖重复 Initial 跨多个重置周期。CPU 限额下可能发生采集丢包，覆盖范围始终标记为部分观察。
+
+运行入口为 `ips-quic-observer`；Go 适配器按自身服务的 CPU 分配建立有界解析队列，并按原始顺序更新会话。原 Python 实现已删除，详见 [Go 运行服务](go-runtime.md)。

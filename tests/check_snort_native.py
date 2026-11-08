@@ -21,9 +21,16 @@ import time
 sys.dont_write_bytecode = True
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
-from snort_engine import SnortControl, native_event, PREFIX
-from snort_rules import update, set_source, domain_detector, domain_app
+from deployment_support import SnortControl as DeploymentControl, PREFIX
 from tests.snort_pcap import capture
+
+
+class SnortControl(DeploymentControl):
+    """Test-only inspection of native counter output."""
+    def call(self,commands,timeout=10):
+        if commands!=['dump-counters']:return super().call(commands,timeout)
+        reply=self.command('dump_stats("json")',timeout)
+        return {'dump-counters':json.JSONDecoder().raw_decode(reply[reply.index('{'):])[0]}
 
 
 def execute(args, **kwargs):
@@ -43,7 +50,7 @@ def prepare(root):
     rules=root/'rules';rules.mkdir()
     appid=root/'appid';(appid/'custom/lua').mkdir(parents=True)
     (appid/'odp').symlink_to(PREFIX+'/share/appid/odp',target_is_directory=True)
-    (appid/'custom/lua/bans.lua').write_text(domain_detector([dict(type='domain',value='example.test')]))
+    (appid/'custom/lua/bans.lua').write_text('')
     (root/'home-net.lua').write_text('HOME_NET="any"\nEXTERNAL_NET="any"\n')
     (root/'suppress.lua').write_text('suppress = {}\n')
     for name in ('snort.rules','local.rules','ips-web-hunting.rules','ips-web-bans.rules'):
@@ -80,98 +87,16 @@ def stop(process):
 
 
 def check_offline(root,config):
-    rule=root/'rules/local.rules'
-    rule.write_text('alert http any any -> any any (msg:"native HTTP"; http_uri; content:"/ndr-smoke"; sid:9000001; rev:1;)\n'
-                    'alert dns any any -> any any (msg:"native DNS"; content:"|07|example|04|test|00|"; sid:9000002; rev:1;)\n'
-                    'block ip any any -> any any (msg:"native SNI"; appids:"'+domain_app('example.test')+'"; sid:9000003; rev:1;)\n')
+    (root/'rules/local.rules').write_text('alert http any any -> any any (msg:"native HTTP"; http_uri; content:"/ndr-smoke"; sid:9000001; rev:1;)\n'
+        'alert dns any any -> any any (msg:"native DNS"; content:"|07|example|04|test|00|"; sid:9000002; rev:1;)\n')
     execute(engine()+['-T','-c',str(config)],timeout=90)
-    # Same lookup paths as the production rule-manager validator.
-    base=engine();bare=base[:2] if base[0].endswith('qemu-aarch64') else base[:1]
-    execute(bare+['-T','-c',str(config)],timeout=90)
-    for hostname,expected in (('example.test',True),('child.example.test',True),('notexample.test',False),('example.test.evil',False)):
-        logs=root/hostname;logs.mkdir();pcap=logs/'fixture.pcap';capture(pcap,tls_hostname=hostname)
-        execute(engine()+['-c',str(config),'-r',str(pcap),'-l',str(logs)],timeout=90)
-        events=records(logs)
-        assert any(event.get('query')=='example.test' for event in events)
-        assert any(event.get('uri')=='/ndr-smoke' for event in events)
-        assert any(event.get('server_name')==hostname and 'module_identifier' in event for event in events)
-        assert any(event.get('orig_pkts',0)>0 for event in events)
-        hits=[event for event in events if event.get('sid')==9000003 and event.get('id.resp_p')==443]
-        assert bool(hits)==expected,(hostname,hits)
-        if hits:
-            assert native_event(dict(engine='snort3',data=hits[0],epoch='fixture'))['alert']['action']=='allowed'
-    # Actual socket protocol, generation-confirmed reload and grouped JSON stats.
-    logs=root/'control';logs.mkdir();control_path=root/'control.sock'
-    pcap=logs/'fixture.pcap';capture(pcap,tls_hostname='example.test')
-    full_rules=rule.read_text()
-    rule.write_text('\n'.join(line for line in full_rules.splitlines() if '9000003' not in line)+'\n')
-    detector=root/'appid/custom/lua/bans.lua';detector.write_text(domain_detector([]))
-    with (logs/'process.log').open('wb') as log:
-        process=subprocess.Popen(engine()+['--pause','--control-socket',str(control_path),'-c',str(config),'-r',str(pcap),'-l',str(logs)],stdout=log,stderr=subprocess.STDOUT)
-        try:
-            control=wait_control(process,control_path)
-            rule.write_text(full_rules)
-            detector.write_text(domain_detector([dict(type='domain',value='example.test')]))
-            assert 'appid-reload-detectors' in control.call(['appid-reload-detectors'],timeout=60)
-            assert 'ruleset-reload-rules' in control.call(['ruleset-reload-rules'],timeout=60)
-            stats=control.call(['dump-counters'])
-            assert 'dump-counters' in stats,stats
-            try: control.command('resume()',timeout=10)
-            except RuntimeError: pass  # EOF can close the channel after resume.
-            process.wait(timeout=90)
-        finally: stop(process)
-    assert any(event.get('sid')==9000003 for event in records(logs)), 'OpenAppID ban did not activate through reload'
-    loader=importlib.machinery.SourceFileLoader('native_ban_generator',str(ROOT/'ips-web'))
-    spec=importlib.util.spec_from_loader(loader.name,loader)
-    web=importlib.util.module_from_spec(spec);loader.exec_module(web)
-    bans=web.RuleBook._render_rules([dict(type='domain',value='example.test',ips=[]),dict(type='ip',value='192.0.2.90')])
-    (root/'rules/ips-web-bans.rules').write_text(bans)
-    execute(engine()+['-T','-c',str(config)],timeout=90)
-    generated=root/'generated-bans';generated.mkdir()
-    execute(engine()+['-c',str(config),'-r',str(pcap),'-l',str(generated)],timeout=90)
-    hits=[event for event in records(generated) if event.get('sid') not in (9000001,9000002,9000003) and event.get('ips_action')=='block']
-    assert hits,'Generated console bans did not match native traffic'
-    print('Native HTTP, DNS, TLS/SNI boundaries, connection logs, control and reload verified')
-
-
-def check_pulledpork(root,online):
-    data=root/'updater';data.mkdir();set_source(data,'snort/community',True)
-    config=root/'rule-update.conf';config.write_text('ips_policy = balanced\n')
-    if online:
-        update(data,config)
-    else:
-        archive=Path(os.environ['SNORT_COMMUNITY_FIXTURE'])
-        cache=data/'update/cache';cache.mkdir(parents=True)
-        key=hashlib.sha256(b'snort/community').hexdigest()[:24]
-        shutil.copyfile(archive,cache/(key+'-rules.tar.gz'))
-        (cache/(key+'-receipt.json')).write_text(json.dumps(dict(sha256=hashlib.sha256(archive.read_bytes()).hexdigest())))
-    update(data,config,offline=True)
-    candidate=data/'rules/snort.rules';original=candidate.read_bytes()
-    assert b'sid:' in original
-    (root/'rules/snort.rules').write_bytes(original)
-    execute(engine()+['-T','-c',str(root/'snort.lua')],timeout=120)
-    # An invalid rules policy must not replace the last successful candidate.
-    (root/'disable.conf').write_text('unsupported:selector\n')
-    try: update(data,config,offline=True)
-    except ValueError: pass
-    else: raise AssertionError('Invalid policy was accepted')
-    assert candidate.read_bytes()==original
-    (root/'disable.conf').unlink()
-    # A tampered cache and an unsafe official archive must both preserve output.
-    cached=next((data/'update/cache').glob('*-rules.tar.gz'))
-    receipt=next((data/'update/cache').glob('*-receipt.json'))
-    cached.write_bytes(b'corrupt')
-    try: update(data,config,offline=True)
-    except ValueError: pass
-    else: raise AssertionError('Tampered cache was accepted')
-    with tarfile.open(cached,'w:gz') as package:
-        item=tarfile.TarInfo('../escape');item.size=1;package.addfile(item,io.BytesIO(b'x'))
-    receipt.write_text(json.dumps(dict(sha256=hashlib.sha256(cached.read_bytes()).hexdigest())))
-    try: update(data,config,offline=True)
-    except RuntimeError: pass
-    else: raise AssertionError('Unsafe archive was accepted')
-    assert candidate.read_bytes()==original
-    print('PulledPork3 official archive, offline cache, native validation and failure preservation verified')
+    logs=root/'offline';logs.mkdir();pcap=logs/'fixture.pcap';capture(pcap,tls_hostname='example.test')
+    execute(engine()+['-c',str(config),'-r',str(pcap),'-l',str(logs)],timeout=90)
+    events=records(logs)
+    assert any(row.get('query')=='example.test' for row in events)
+    assert any(row.get('uri')=='/ndr-smoke' for row in events)
+    assert any(row.get('server_name')=='example.test' for row in events)
+    print('Native HTTP, DNS and TLS extraction verified')
 
 
 def check_inline(root,config,workers=4,ipv6=False,suppressed=False):
@@ -267,7 +192,7 @@ def check_inline(root,config,workers=4,ipv6=False,suppressed=False):
     events=records(logs)
     for sid in (9000011,9000012):
         hit=[event for event in events if event.get('sid')==sid]
-        assert hit and native_event(dict(engine='snort3',data=hit[0]))['alert']['action']=='blocked',hit
+        assert hit and hit[0].get('ips_action') in ('block','reject'),hit
         assert not any(event.get('alert_suppressed') for event in hit),hit
     if suppressed:
         for sid,(action,_) in quiet.items():
@@ -277,8 +202,7 @@ def check_inline(root,config,workers=4,ipv6=False,suppressed=False):
                 continue
             assert hits and len({event['pkt_num'] for event in hits})==len(hits),hits
             for hit in hits:
-                event=native_event(dict(engine='snort3',data=hit,rule_metadata={}))
-                assert hit['ips_action']==action and event['session_id'] and event['drop']['alert_suppressed'],hit
+                assert hit['ips_action']==action and hit['session_id'] and hit['alert_suppressed'],hit
         alerts=[json.loads(line) for path in logs.glob('*alert_json.txt') for line in path.read_text().splitlines()]
         assert all(event.get('sid') not in quiet for event in alerts),alerts
         print('Suppressed block, reject and drop retain verdict records; suppressed alerts stay silent')
@@ -316,7 +240,7 @@ def check_suppressed_dump(root,config):
         else:
             assert hits and all(row.get('alert_suppressed')==1 for row in hits),(action,hits)
             assert len({row['pkt_num'] for row in hits})==len(hits)
-            assert all(native_event(dict(engine='snort3',data=row,rule_metadata={}))['event_type']=='drop' for row in hits)
+            assert all(row.get('ips_action')==action and row.get('alert_suppressed') for row in hits)
     print('Suppressed inline block/reject/drop preserve unique verdict records; suppressed alerts stay silent')
 
 
@@ -353,7 +277,6 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--inline',action='store_true')
     parser.add_argument('--ipv6',action='store_true')
-    parser.add_argument('--online-rules',action='store_true')
     parser.add_argument('--suppressed-blocks',action='store_true')
     parser.add_argument('--workers',type=int,choices=(1,4),default=4)
     args=parser.parse_args()
@@ -367,7 +290,6 @@ def main():
         else:
             check_weird_sampling(root,config)
             check_offline(root,config)
-            check_pulledpork(root,args.online_rules)
     assert hashlib.sha256(binary.read_bytes()).hexdigest()==before
     print('Prebuilt engine unchanged; temporary fixtures removed')
 

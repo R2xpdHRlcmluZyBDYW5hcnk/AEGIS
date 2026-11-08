@@ -22,7 +22,6 @@ param(
     [string]$ReuseUiPackage = '',
     [switch]$BuildOnly,
     [string]$OutputDirectory = '',
-    [ValidateRange(1,8)][Nullable[int]]$WebReadWorkers,
     [ValidateRange(0.1,10)][Nullable[double]]$CacheMemoryPercent,
     [ValidateRange(1,1024)][Nullable[int]]$CacheMaxMiB,
     [ValidateRange(1,1024)][Nullable[int]]$PreloadMemoryMiB,
@@ -50,7 +49,7 @@ if ($SessionLoggerDirectory -and (-not $UpdateBackend -or $BuildOnly -or -not (T
 if ($ReleasePackage -and ($BuildOnly -or -not (Test-Path -LiteralPath $ReleasePackage))) { throw '-ReleasePackage requires an existing release and cannot be combined with -BuildOnly' }
 if ($UpdateSnortConfig -and (-not $UpdateBackend -or $BuildOnly -or $InstallSnort3 -or $UpdateEngine -or $NativeResponse)) { throw '-UpdateSnortConfig requires -UpdateBackend on an existing engine' }
 if ($ReuseUiPackage -and ($ReleasePackage -or -not (Test-Path -LiteralPath $ReuseUiPackage))) { throw '-ReuseUiPackage requires an existing UI release and cannot be combined with -ReleasePackage' }
-$resourceFlags = [ordered]@{WebReadWorkers='--read-workers';CacheMemoryPercent='--cache-memory-percent';CacheMaxMiB='--cache-max-mib';PreloadMemoryMiB='--preload-memory-mib';StatsBatchSize='--stats-batch-size';StatsDutyPercent='--stats-duty-percent';LlmSummaryMaxTokens='--llm-summary-max-tokens'}
+$resourceFlags = [ordered]@{CacheMemoryPercent='--cache-memory-percent';CacheMaxMiB='--cache-max-mib';PreloadMemoryMiB='--preload-memory-mib';StatsBatchSize='--stats-batch-size';StatsDutyPercent='--stats-duty-percent';LlmSummaryMaxTokens='--llm-summary-max-tokens'}
 $resourceArguments = @()
 foreach ($parameter in $resourceFlags.Keys) {
     if ($PSBoundParameters.ContainsKey($parameter)) {
@@ -63,7 +62,7 @@ if (($InstallSnort3 -or $UpdateEngine) -and $resourceArguments.Count) { throw 'A
 if ($UpdateNftRules -and ($UpdateBackend -or $InstallSnort3 -or $UpdateEngine -or $BuildOnly -or $OutputDirectory -or $resourceArguments.Count)) {
     throw '-UpdateNftRules is a standalone NFQUEUE-only deployment'
 }
-if ($UpdateSupervisor -and ($UpdateBackend -or $UpdateNftRules -or $InstallSnort3 -or $UpdateEngine -or $BuildOnly -or $OutputDirectory -or $ReleasePackage -or $ReuseUiPackage)) {
+if ($UpdateSupervisor -and ($UpdateBackend -or $UpdateNftRules -or $InstallSnort3 -or $UpdateEngine -or $BuildOnly -or $OutputDirectory -or $ReuseUiPackage)) {
     throw '-UpdateSupervisor is a standalone detector-supervisor deployment'
 }
 $buildWorkspace = Join-Path ([System.IO.Path]::GetTempPath()) ('aegis-release-' + [guid]::NewGuid().ToString('N'))
@@ -106,15 +105,17 @@ try {
     }
     if ($UpdateNftRules -or $UpdateSupervisor) {
         $deployer = if ($UpdateSupervisor) { 'deploy-supervisor.py' } else { 'deploy-nft.py' }
-        $tests = @('tests.test_nft_rules', 'tests.test_deploy_nft')
-        $files = @('ips-supervisor', 'log_storage.py', 'deploy-nft.py', 'SHA256SUMS')
+        $tests = @('tests.test_deploy_nft')
+        $files = @('deploy-nft.py', 'SHA256SUMS')
         if ($UpdateSupervisor) {
-            $tests += 'tests.test_supervisor'
-            $files += @('snort_engine.py', 'deploy-supervisor.py')
+            $tests += @('tests.test_go_runtime')
+            $files += @('ips-supervisor','deployment_support.py', 'deploy-supervisor.py','supervisor-build.json','backend-licenses.txt')
         }
         & python -B -m unittest -q @tests
         if ($LASTEXITCODE -ne 0) { throw 'Detector regression checks failed' }
-        & python -B $deployer --prepare $destination
+        $prepareArguments = @('--prepare',$destination)
+        if ($UpdateSupervisor -and $ReleasePackage) { $prepareArguments += @('--package',[System.IO.Path]::GetFullPath($ReleasePackage)) }
+        & python -B $deployer @prepareArguments
         if ($LASTEXITCODE -ne 0) { throw 'Detector package preparation failed' }
         $options = @('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10')
         $defaultIdentity = "$env:USERPROFILE/.ssh/id_ed25519"

@@ -11,8 +11,7 @@ import subprocess
 
 from deployment_layout import layout
 
-PROGRAMS=('ips-web','ips-supervisor','ips-rule-manager','ips_control.py','rule_drafts.py',
-          'ips-rule-actions','ips-log-maintenance','suricata-home-net.sh')
+PROGRAMS=('ips-web','ips-supervisor','ips-rule-manager','deployment_support.py','deployment_layout.py')
 UNITS=('ips-legacy.service','ips-web-legacy.service','ips-rule-manager-legacy.service',
        'ips-log-maintenance-legacy.service','ips-log-maintenance-legacy.timer',
        'suricata-home-net.service','suricata-home-net.timer','suricata.service','var-log-suricata.mount')
@@ -112,7 +111,7 @@ def verify_native(config):
     pid=Path('/run/snort/snort.pid').read_text().strip()
     if str(Path('/proc',pid,'exe').resolve())!='/opt/ips-snort3/3.12.4.0/bin/snort':
         raise ValueError('Unexpected running detection binary')
-    from ips_control import Client
+    from deployment_support import Client
     if not Client(timeout=3).request('ping').get('ready'):raise RuntimeError('Rule manager unavailable')
     return pid
 

@@ -49,7 +49,7 @@ parse5 升级后引入其所需的 entities 9.0.0。锁文件通过核定工具�
 
 ## Python 搜索依赖（2026-11-04）
 
-根据 [Luqum 官方发行信息](https://pypi.org/project/luqum/)与 [PLY 官方发行信息](https://pypi.org/project/ply/)，核定 Luqum 1.0.0 和其依赖 PLY 3.11；两者没有 LTS 发行线。查询方法、时间和解析器选择见 [事件搜索](event-search.md)。`build_tools/python-sources.json` 固定官方 wheel URL、SHA-256 和许可；构建器预生成匹配的 PLY 表并打包为只读 ZIP。后端发布、前端回归、预览与 `tests/run_backend.py` 自动准备临时依赖，不修改全局 Python 安装。生产运行不访问包仓库。
+Go 后端使用项目内的查询语法解析与参数化 SQLite 执行器。旧 Luqum / PLY 查询解析实现及专用 Python 依赖包已移除；构建和部署工具只使用 Python 标准库。固定 Go 工具链、模块与 SQLite 版本见 build_tools/go-sources.json、backend/go.mod 和 backend/go.sum。
 
 ## Go 后端工具链（2026-11-08）
 

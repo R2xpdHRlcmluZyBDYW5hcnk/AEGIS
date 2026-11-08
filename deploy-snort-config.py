@@ -8,9 +8,9 @@ from pathlib import Path
 import subprocess
 import time
 
-from ips_control import Client
-from snort_engine import BINARY, SOCKET, SnortControl, configuration_lock
-import session_logger
+from deployment_support import Client
+from deployment_support import BINARY, SOCKET, SnortControl, configuration_lock
+import deployment_support as session_logger
 
 CONFIG = Path('/etc/snort/snort.lua')
 BACKUPS = Path('/var/backups/ips-snort-config')

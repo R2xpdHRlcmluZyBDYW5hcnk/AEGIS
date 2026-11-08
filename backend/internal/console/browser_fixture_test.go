@@ -2,6 +2,8 @@ package console
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -29,6 +31,9 @@ func TestBrowserFixture(t *testing.T) {
 	defer os.RemoveAll(root)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
+	engine := filepath.Join(root, "fixture-engine")
+	t.Setenv("SNORT_ENGINE_PREFIX", engine)
+	fixtureBuiltinEngine(t, engine, false)
 	live := liveRulePaths(root)
 	for key, p := range live.controls {
 		data := []byte{}
@@ -49,6 +54,17 @@ func TestBrowserFixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fixtureRuleDownloads(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/downloads/community/snort3-community-rules.tar.gz":
+			w.Write(archive)
+		case "/downloads/community/snort3-community-rules.tar.gz.md5":
+			sum := md5.Sum(archive)
+			w.Write([]byte(hex.EncodeToString(sum[:])))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
 	key := sourceKey("snort/community")
 	atomicWrite(filepath.Join(live.Cache, key+"-rules.tar.gz"), archive, 0600)
 	writeJSON(filepath.Join(live.Cache, "sources.json"), Object{key: Object{"source": "snort/community", "enabled": true}})
@@ -59,6 +75,7 @@ func TestBrowserFixture(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer manager.Close()
+	manager.engineOverride = func(context.Context, string, time.Duration) (any, error) { return Object{"confirmed": true}, nil }
 	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
 	if err != nil {
 		t.Fatal(err)
@@ -91,6 +108,9 @@ func TestBrowserFixture(t *testing.T) {
 		if kind == "drop" {
 			object(event["alert"])["action"] = "blocked"
 		}
+		if kind == "dns" {
+			event["src_ip"] = "192.0.2.20"
+		}
 		json.NewEncoder(f).Encode(event)
 	}
 	// Suppression removes alert evidence from detection views, while a real
@@ -107,7 +127,12 @@ func TestBrowserFixture(t *testing.T) {
 	})
 	f.Close()
 	cfg := Config{User: "admin", PasswordPBKDF: hash, StaticDir: static, EventDB: filepath.Join(root, "events.db"), Stream: stream, ManagerSocket: socket, ReadWorkers: 4, PreloadBytes: 16 << 20, SessionTTL: time.Hour, Raw: Object{"local_llm": Object{"enabled": false}}}
+	cfg.snapshotDir = filepath.Join(root, "snapshots")
+	if err = os.Mkdir(cfg.snapshotDir, 0700); err != nil {
+		t.Fatal(err)
+	}
 	app, err := NewApp(ctx, cfg)
+	// The fixture copies only synthetic records in its developer-owned temp tree.
 	if err != nil {
 		t.Fatal(err)
 	}

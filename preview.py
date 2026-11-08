@@ -13,8 +13,7 @@ ROOT = Path(__file__).resolve().parent
 
 
 def main():
-    from build_tools.python_dependencies import environment
-    with environment(): return serve()
+    return serve()
 
 
 def serve():

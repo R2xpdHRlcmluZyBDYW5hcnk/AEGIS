@@ -37,12 +37,12 @@ ARM64 发布包可使用 `deploy.ps1 -WslBuild -BuildOnly -WithSqliteRuntime -Ou
 
 ## 离线工具
 
-`recover-event-db.py` 只接受已封存的文件组：目录包含 `snapshot.json` 与 `original/`，清单记录 `database_path`，以及以文件名为键的 `files`（每项含 `bytes`、`sha256`）。制作快照时先冻结或停止写入，逐个复制数据库、WAL 和存在的 SHM，复制后再次核实源文件没有变化。冻结期间不得打开数据库；制作完成后停止故障控制台，检测引擎保持运行。
+Go `recover-event-db` 只接受已封存的文件组：目录包含 `snapshot.json` 与 `original/`，清单记录 `database_path`，以及以文件名为键的 `files`（每项含 `bytes`、`sha256`）。制作快照时先冻结或停止写入，逐个复制数据库、WAL 和存在的 SHM，复制后再次核实源文件没有变化。冻结期间不得打开数据库；制作完成后停止故障控制台，检测引擎保持运行。
 
 在健康的存储上运行，输出目录必须尚不存在：
 
 ```sh
-python -B recover-event-db.py --snapshot /path/to/snapshot --output /path/to/new-recovery --sqlite-cli /path/to/verified/sqlite3 --reference /path/to/reference.db
+/opt/ips-console/bin/recover-event-db --snapshot /path/to/snapshot --output /path/to/new-recovery --sqlite-cli /path/to/verified/sqlite3 --reference /path/to/reference.db
 ```
 
 工具先验证全部快照校验值，并用含 AUTOINCREMENT 的测试库验证 CLI 恢复链路。然后复制数据库与 WAL 到独立工作目录，不复制 SHM，不用 SQLite 打开封存原件。恢复 SQL 经有界流传输，保留失败日志，任一进程失败都拒绝继续校验。
@@ -88,7 +88,9 @@ python -B recover-event-db.py --snapshot /path/to/snapshot --output /path/to/new
 回归检查使用临时数据库，不接触设备数据：
 
 ```sh
-SQLITE_RECOVERY_CLI=/path/to/verified/sqlite3 python -B -m unittest tests.test_event_db_recovery -q
+AEGIS_SQLITE_CLI=/path/to/verified/sqlite3 python3 -B build_tools/go_backend.py -- test -count=1 -run TestRecovery ./internal/console
 ```
 
 未提供 CLI 时仍运行清单保护与身份比较用例，真实表页损坏恢复用例跳过；正式恢复前须提供经校验的 CLI 跑完该用例。
+
+当前生产恢复入口为 Go `recover-event-db`，参数与封存快照格式保持兼容。原 Python 恢复实现已删除。Go 恢复入口与验证范围见 [Go 运行服务](go-runtime.md)。

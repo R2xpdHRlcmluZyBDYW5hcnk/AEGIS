@@ -56,6 +56,14 @@ HTTP 422 本身不能证明注册码无效或缺少付费订阅。下载流程�
 
 本项目当前处理两种包中的文本规则，不因选择 LightSPD 自动部署其中全部 Lua 配置或共享对象。包内共享对象的平台支持必须另行核对 manifest。Registered 已完成本地下载与原生校验；LightSPD 的官方推荐不应替代本项目尚未完成的完整能力验证。
 
+## LightSPD 文本策略格式与版本增量
+
+查询时间：2026-11-08 18:28 Australia/Perth (UTC+08:00)。查询前复用上述规则包范围记录；通过 MCP Search Service 读取 [Snort 3.13.2.0 策略解析实现](https://github.com/snort3/snort3/blob/3.13.2.0/src/parser/parse_rule.cc)及 [PulledPork3 上游入口](https://github.com/shirkdog/pulledpork3/blob/master/pulledpork.py)，核对策略动作和版本目录含义。另将已有 LightSPD 缓存归档只读复制到开发电脑的系统临时目录，检查 `manifest.json`、`policies/common/ruledirs.conf.lua`、`policies/common/load_ips.lua` 及四种 `rulestates-*-ips.states`；未执行归档内 Lua，未将授权规则正文或凭据保存到仓库。
+
+核实结果：策略条目在右括号前带有分号，除启用状态外还指定 `alert` 或 `block` 动作。官方目录表按最低引擎版本累积加载基础规则和后续版本增量；较后策略条目覆盖较早条目。只选择最新目录会漏掉基础规则。当前文本导入范围仍不包含模块 stubs、共享对象与整套上游 Lua 配置，也不声明对旧引擎 backport 例外的完整支持。
+
+回归入口：`TestNativeLightSPDArchiveReplay` 通过 `AEGIS_LIGHTSPD_ARCHIVE` 接受本机临时归档，回放 balanced、connectivity、security 和 max-detect，检查基础与兼容增量签名均保留、无重复身份且策略动作正确；`TestNativeLightSPDRebuildsLegacyDerivedCacheOffline` 验证旧配方派生缓存离线重建，原始归档仍可复用。临时归档与生成规则在验收后清理。
+
 ## 整组告警抑制边界
 
 2026-11-03，MCP Search Service 查询 `site.docs.snort.org suppress gid sid configuration`、`site.github.com/shirkdog/pulledpork3 suppression suppress threshold group`，并复用现有上游 README 记录。结果：[Snort GID 说明](https://docs.snort.org/rules/options/general/gid)及 [PulledPork3 README](https://github.com/shirkdog/pulledpork3)分别定义生成器身份与规则包/策略处理；所读文档未确认 PulledPork3 提供按来源和目录的整组告警抑制接口，不能把它当作已有功能。

@@ -245,6 +245,14 @@ func TestHTTPAuthenticationQueriesAndSources(t *testing.T) {
 	if res.StatusCode != 401 {
 		t.Fatal("unauthorized query accepted")
 	}
+	res, err = client.Post(server.URL+"/api/actions/update", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != 401 {
+		t.Fatal("unauthorized rule update accepted")
+	}
 	res, err = client.PostForm(server.URL+"/login", url.Values{"username": {"admin"}, "password": {"fixture-password"}})
 	if err != nil {
 		t.Fatal(err)
@@ -286,6 +294,21 @@ func TestHTTPAuthenticationQueriesAndSources(t *testing.T) {
 	res.Body.Close()
 	if res.StatusCode != 403 {
 		t.Fatal("untrusted origin accepted")
+	}
+	for _, origin := range []string{"", "https://untrusted.example"} {
+		req, _ := http.NewRequest("POST", server.URL+"/api/actions/update", strings.NewReader(`{}`))
+		if origin != "" {
+			req.Header.Set("X-Requested-With", "ips-web")
+			req.Header.Set("Origin", origin)
+		}
+		res, err = client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		if origin == "" && res.StatusCode != 400 || origin != "" && res.StatusCode != 403 {
+			t.Fatal("rule update request bypassed the authorization boundary", res.StatusCode)
+		}
 	}
 }
 func TestConcurrentReadSnapshotsStayConsistent(t *testing.T) {

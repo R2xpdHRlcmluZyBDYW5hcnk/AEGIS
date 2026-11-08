@@ -93,9 +93,14 @@ class BuildWorkflowCase(unittest.TestCase):
             work = Path(directory)
             generated = work / 'static'
             generated.mkdir()
-            for name in ('index.html', 'app.js', 'ui.js', 'app.css', 'frontend-build.json', 'frontend-licenses.txt', 'python-dependencies.zip'):
+            for name in ('index.html', 'app.js', 'ui.js', 'app.css', 'frontend-build.json', 'frontend-licenses.txt'):
                 (generated / name).write_text(name, encoding='utf-8')
             (generated / 'chunk-ABC123.js').write_text('export const chart = true;', encoding='utf-8')
+            from tests.test_go_backend import native_fixture,deployer
+            native_fixture(generated,deployer())
+            (generated/'ips-supervisor').write_bytes(b'\x7fELF'+bytes(60))
+            (generated/'backend-licenses.txt').write_text('fixture license')
+            (generated/'supervisor-build.json').write_text(json.dumps(dict(files={'ips-supervisor':hashlib.sha256((generated/'ips-supervisor').read_bytes()).hexdigest()})))
             assets=('index.html','app.js','ui.js','app.css','chunk-ABC123.js')
             (generated/'frontend-build.json').write_text(json.dumps(dict(sources={},files={name:hashlib.sha256((generated/name).read_bytes()).hexdigest() for name in assets})))
             with mock.patch('sys.stdout', new=io.StringIO()):
@@ -109,7 +114,8 @@ class BuildWorkflowCase(unittest.TestCase):
             self.assertIn('snort-ndr/AGENTS.md', names)
             self.assertIn('snort-ndr/ips-web.service', names)
             self.assertIn('snort-ndr/deploy-snort3.py', names)
-            self.assertIn('snort-ndr/snort_engine.py', names)
+            self.assertIn('snort-ndr/deployment_support.py', names)
+            self.assertNotIn('snort-ndr/snort_engine.py', names)
             self.assertIn('snort-ndr/tests/test_native_deploy.py', names)
             self.assertIn('snort-ndr/chunk-ABC123.js', names)
             for name in assets:self.assertIn('snort-ndr/'+name,names)

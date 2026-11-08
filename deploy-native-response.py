@@ -11,7 +11,7 @@ import shutil
 import subprocess
 import sys
 import time
-from log_storage import log_paths
+from deployment_support import log_paths
 
 PROGRAM=Path('/opt/ips-console/bin')
 LIBRARY=Path('/opt/ips-native-response/1/libips-response.so')
@@ -37,7 +37,7 @@ def verified(release):
     release=Path(release)
     manifest=json.loads((release/'manifest.json').read_text())
     if manifest.get('revision')!=1 or manifest.get('architecture')!='aarch64':raise ValueError('Unsupported response adapter')
-    if set(manifest['sha256'])!={'libips-response.so','native_response.c','deploy-native-response.py','log_storage.py'}:raise ValueError('Unexpected response package files')
+    if set(manifest['sha256'])!={'libips-response.so','native_response.c','deploy-native-response.py','deployment_support.py'}:raise ValueError('Unexpected response package files')
     for name,value in manifest['sha256'].items():
         path=release/name
         if path.is_symlink() or digest(path)!=value:raise ValueError('Response package digest mismatch')
@@ -89,7 +89,7 @@ def archive_logs(label):
 
 
 def ready(require_adapter=True):
-    from snort_engine import SnortControl
+    from deployment_support import SnortControl
     deadline=time.monotonic()+90
     while time.monotonic()<deadline:
         try:
@@ -105,8 +105,8 @@ def ready(require_adapter=True):
 def apply(release):
     release=Path(release);verified(release)
     sys.path.insert(0,str(PROGRAM))
-    from ips_control import Client
-    from snort_engine import configuration_lock
+    from deployment_support import Client
+    from deployment_support import configuration_lock
     client=Client(timeout=10)
     for path in (LIBRARY,OVERRIDE):
         if path.is_symlink():raise ValueError('Response installation target is a symlink')

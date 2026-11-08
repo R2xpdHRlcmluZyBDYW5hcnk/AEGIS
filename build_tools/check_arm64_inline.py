@@ -56,12 +56,12 @@ def prepare(test='native'):
     loader=root/'usr/lib/ld-linux-aarch64.so.1'
     if not loader.exists(): loader.symlink_to('aarch64-linux-gnu/ld-linux-aarch64.so.1')
     # Keep the project copy and runtime outside the source tree.
-    for name in ('snort.lua','ips-event-bridge','snort_engine.py','quic_observer.py','llm_assistant.py','snort_rules.py','rule_policy.py','parallel_cpu.py','parallel_sql.py','event_processing.py','native_rules.py','rule_sources.py','rule_identity.py','rule_inventory.py','log_storage.py','ips-web'):
+    for name in ('snort.lua','home-net.lua','suppress.lua','deployment_support.py','deploy-nft.py'):
         copy(ROOT/name,root/'project'/name)
+    from build_tools.go_backend import run as go
+    go([],root/'project/ips-supervisor')
     for name in ('check_snort_native.py','snort_pcap.py','check_nfq_nat.py'):
         copy(ROOT/'tests'/name,root/'project/tests'/name)
-    for name in ('deploy-nft.py','ips-supervisor'):
-        copy(ROOT/name,root/'project'/name)
     copy(os.environ.get('SNORT_ENGINE_PREFIX','/opt/ips-snort3/3.12.4.0'),root/'opt/ips-snort3/3.12.4.0')
     for name in ('sh','mount','modprobe','unshare','poweroff','mkdir'):
         path=root/'usr/bin'/name

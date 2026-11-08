@@ -10,8 +10,8 @@ Group=ips-quic
 Environment=IPS_LOG_STORAGE_ROOT=/var/lib/ips-snort-logs
 Environment=WIRESHARK_CONFIG_DIR=/etc/ips-quic-observer
 Environment=HOME=/etc/ips-quic-observer
-ExecStartPre=+/usr/bin/python3 -B /opt/ips-console/bin/quic_observer.py --prepare-output
-ExecStart=/usr/bin/python3 -B /opt/ips-console/bin/quic_observer.py --config /etc/ips-quic-observer.json
+ExecStartPre=+/opt/ips-console/bin/ips-quic-observer --prepare-output
+ExecStart=/opt/ips-console/bin/ips-quic-observer --config /etc/ips-quic-observer.json
 Restart=on-failure
 RestartSec=10
 KillMode=control-group

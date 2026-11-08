@@ -67,7 +67,7 @@ def ready_engine():
 
 def resume_manager():
     sys.path.insert(0,str(PROGRAM))
-    from ips_control import Client
+    from deployment_support import Client
     deadline=time.monotonic()+30
     while time.monotonic()<deadline:
         try:
@@ -143,9 +143,9 @@ def upgrade(release,engine,plugin=None):
     release=Path(release).resolve()
     if not LAYOUT.is_file(): raise ValueError('Complete initial Snort activation first')
     sys.path.insert(0,str(release))
-    from ips_control import Client
-    from snort_engine import configuration_lock
-    import session_logger
+    from deployment_support import Client
+    from deployment_support import configuration_lock
+    import deployment_support as session_logger
     active=load(release,'deploy-snort3')
     native=load(release,'deploy-native-backend')
     web=load(release,'deploy-backend')
@@ -190,6 +190,8 @@ def upgrade(release,engine,plugin=None):
                 updated=extension.extension_config(updated.encode()).decode()
                 extension_changes[SESSION_RECEIPT]=json.dumps({key:receipt[key] for key in ('sha256','engine_sha256')}).encode()+b'\n'
                 extension_changes[PROGRAM/'ips-supervisor']=(release/'ips-supervisor').read_bytes()
+                if (release/'supervisor-build.json').is_file():
+                    extension_changes[PROGRAM/'supervisor-build.json']=(release/'supervisor-build.json').read_bytes()
                 rotation=ROTATION.read_bytes() if ROTATION.exists() else None
                 updated_rotation=extension.extension_rotation(rotation)
                 if updated_rotation!=rotation:
@@ -207,6 +209,8 @@ def upgrade(release,engine,plugin=None):
             result=subprocess.run([str(prepared/'bin/snort'),*validation_args,'-T','-c',str(validation)],env=environment,capture_output=True,text=True)
             if result.returncode: raise RuntimeError('Session engine configuration failed validation\n'+result.stdout[-4000:]+result.stderr[-4000:])
             programs=(*native.PROGRAMS,*(['backend-build.json'] if (release/'backend-build.json').is_file() else []))
+            if (release/'maintenance-build.json').is_file():
+                programs=(*programs,*sorted(native.MAINTENANCE_PROGRAMS-set(programs)),'maintenance-build.json')
             for path in (CONFIG,WEB_CONFIG,LAYOUT,*[PROGRAM/name for name in programs],*extension_changes):
                 if path.exists():
                     name='saved-'+str(len(state['files']));shutil.copy2(path,backup/name)

@@ -245,12 +245,39 @@ func (m *RuleManager) Read(ctx context.Context, name string, args []any, params 
 func (m *RuleManager) governance(ctx context.Context) (Object, error) {
 	result := governance(m.drafts.paths)
 	policies := result["suppress_groups"].([]Object)
-	if len(policies) == 0 {
+	needNames := len(policies) > 0
+	for _, category := range []string{"disable", "drop", "action", "suppress"} {
+		needNames = needNames || len(result[category].([]Object)) > 0
+	}
+	if !needNames {
 		return result, nil
 	}
 	rows, _, err := m.catalog.Load(ctx)
 	if err != nil {
 		return nil, err
+	}
+	byID := map[RuleID]*Rule{}
+	for _, rule := range rows {
+		byID[rule.ID] = rule
+	}
+	for _, category := range []string{"disable", "drop", "action"} {
+		for _, entry := range result[category].([]Object) {
+			selector := text(present(entry["selector"], entry["value"]))
+			if id, err := identity(selector); err == nil {
+				if rule := byID[id]; rule != nil {
+					entry["name"] = rule.Message
+				}
+			} else if strings.HasPrefix(selector, "group:") || strings.HasPrefix(selector, "group-source:") {
+				if _, name, err := parseGroup(selector); err == nil {
+					entry["name"] = name
+				}
+			}
+		}
+	}
+	for _, entry := range result["suppress"].([]Object) {
+		if rule := byID[RuleID{integer(entry["gid"]), integer(entry["sid"])}]; rule != nil {
+			entry["name"] = rule.Message
+		}
 	}
 	for _, policy := range policies {
 		count := 0
@@ -1007,9 +1034,9 @@ func ServeManager(ctx context.Context, state, socket, root string) error {
 		go func(run func(context.Context)) { defer background.Done(); run(ctx) }(run)
 	}
 	defer func() { cancel(); background.Wait() }()
-	connections := make(chan *net.UnixConn, 8)
+	connections := make(chan *net.UnixConn, 2*WorkerCount())
 	var workers sync.WaitGroup
-	for range 4 {
+	for range WorkerCount() {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()

@@ -16,7 +16,7 @@ import sys
 import time
 import urllib.request
 
-from ips_control import Client
+from deployment_support import Client
 from deployment_layout import layout
 
 ROOT=Path('/var/lib/ips-snort-logs')
@@ -162,7 +162,7 @@ def drain_preserved_logs(release,backup,generation):
                 if source.is_file() and copied.is_file() and position.get('inode')==source.stat().st_ino:
                     position['inode']=copied.stat().st_ino
             private_json(CHECKPOINT,state)
-    run(sys.executable,'-B',str(release/'ips-event-bridge'),'--drain',
+    run(str(release/'ips-event-bridge'),'--drain',
         '--logs',str(preserved),
         '--output',str(ROOT/'events/events.json'),'--checkpoint',str(CHECKPOINT),
         '--instance',str(instance))
@@ -224,7 +224,7 @@ def apply(release):
         current=json.loads(MARKER.read_text())
         if current.get('root')!=str(ROOT):raise RuntimeError('Unexpected persistent log root')
         if current.get('direct_paths'):
-            from log_storage import validate_log_storage
+            from deployment_support import validate_log_storage
             validate_log_storage()
             print(json.dumps(dict(log_storage_unchanged=True)));return
         return apply_direct(release)
@@ -256,7 +256,7 @@ def apply(release):
     private_json(backup/'state.json',state)
     shutil.copy2(Path(__file__),backup/'deploy-log-storage.py')
     # Rollback's imports must survive removal of the deployment staging directory.
-    for name in ('ips_control.py','deployment_layout.py','deploy-backend.py','log_storage.py'):
+    for name in ('deployment_layout.py','deploy-backend.py','deployment_support.py'):
         shutil.copy2(release/name,backup/name)
     script=backup/'rollback.sh'
     script.write_text('#!/bin/sh\nset -eu\nexec python3 -B '+str(backup/'deploy-log-storage.py')+' --rollback '+str(backup)+'\n');script.chmod(0o700)
@@ -318,20 +318,7 @@ def repair_programs(release):
     return (*module.PROGRAMS,'ips-supervisor')
 
 
-def external_updater(program_dir):
-    """Keep an existing independent updater entry point without copying its code."""
-    source=Path(program_dir)/'snort_rules.py'
-    if not source.is_file():return None
-    for node in ast.parse(source.read_bytes()).body:
-        if not isinstance(node,ast.Assign) or not any(isinstance(t,ast.Name) and t.id=='PULLEDPORK' for t in node.targets):continue
-        value=node.value
-        if isinstance(value,ast.Call) and isinstance(value.func,ast.Name) and value.func.id=='Path' and value.args and isinstance(value.args[0],ast.Constant):
-            path=Path(value.args[0].value)
-            if path.is_absolute() and path.name=='pulledpork.py' and path.is_file():return path
-    return None
-
-
-def direct_overrides(updater=None):
+def direct_overrides():
     common='[Unit]\nRequiresMountsFor=\nRequiresMountsFor='+str(ROOT)+'\n[Service]\nEnvironment=IPS_LOG_STORAGE_ROOT='+str(ROOT)+'\n'
     result={
         'ips':common+'ReadWritePaths=\nReadWritePaths=/var/lib/snort/rules '+str(ROOT/'snort')+' /run/snort /etc/snort\n',
@@ -340,8 +327,6 @@ def direct_overrides(updater=None):
         'ips-rule-manager':common+'ReadWritePaths=\nReadWritePaths=/var/lib/snort /etc/snort '+str(ROOT/'snort')+'\n',
         'ips-log-maintenance':common,
     }
-    if updater is not None:
-        result['ips-rule-manager']+='Environment='+json.dumps('IPS_PULLEDPORK='+str(updater)).replace('%','%%')+'\n'
     return result
 
 
@@ -397,10 +382,12 @@ def apply_direct(release):
     required=sum(p.stat().st_size for base in LOGS for p in base.rglob('*') if p.is_file())*2+(256<<20)
     if shutil.disk_usage(ROOT).free<required:raise ValueError('Insufficient space for verified log preservation')
     programs=repair_programs(release)
-    for name in programs:compile((release/name).read_bytes(),name,'exec')
+    for name in programs:
+        if name.endswith('.py'):compile((release/name).read_bytes(),name,'exec')
+        elif (release/name).read_bytes()[:4]!=b'\x7fELF':raise ValueError('Expected a native Go program')
     layout_value=layout();program_dir=Path(layout_value['program_dir']);config_path=Path(layout_value['config'])
     config=json.loads(config_path.read_text())
-    overrides=direct_overrides(external_updater(program_dir))
+    overrides=direct_overrides()
     targets=[MARKER,ROTATION,config_path,CHECKPOINT,*[UNIT_ROOT/name for name in MOUNTS]]
     targets += [UNIT_ROOT/(name+'.service.d')/'65-direct-log-storage.conf' for name in overrides]
     token='direct-'+datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
@@ -417,7 +404,7 @@ def apply_direct(release):
         source=program_dir/name;saved='program-'+str(index) if source.exists() else None
         if saved:shutil.copy2(source,backup/saved)
         state['programs'][name]=saved
-    for name in ('deploy-log-storage.py','ips_control.py','deployment_layout.py','deploy-backend.py','log_storage.py'):
+    for name in ('deploy-log-storage.py','deployment_layout.py','deploy-backend.py','deployment_support.py'):
         shutil.copy2(release/name,backup/name)
     private_json(backup/'state.json',state)
     script=backup/'rollback.sh'

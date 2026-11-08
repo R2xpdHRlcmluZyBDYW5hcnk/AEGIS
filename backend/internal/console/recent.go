@@ -32,6 +32,7 @@ type RecentEvents struct {
 	lastSuccess  atomic.Int64
 	rebuilds     atomic.Uint64
 	Version      atomic.Uint64
+	image        *residentImage
 }
 
 var errRecentBusy = errors.New("recent refresh busy")
@@ -52,8 +53,7 @@ func newRecentDatabase(budget int64) (*sql.DB, *sql.Conn, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	// One lifetime connection owns the named memory database. The sole worker
-	// connection may be discarded by database/sql when a request is cancelled.
+	// Keep a lifetime owner when request cancellation discards the worker.
 	db.SetMaxOpenConns(2)
 	db.SetMaxIdleConns(1)
 	anchor, err := db.Conn(context.Background())
@@ -70,7 +70,16 @@ func newRecentDatabase(budget int64) (*sql.DB, *sql.Conn, error) {
 	}
 	return db, anchor, nil
 }
-func (r *RecentEvents) Close()        { r.anchor.Close(); r.db.Close() }
+func (r *RecentEvents) Close() {
+	r.mu.Lock()
+	if r.image != nil {
+		r.releaseImage(r.image)
+		r.image = nil
+	}
+	r.mu.Unlock()
+	r.anchor.Close()
+	r.db.Close()
+}
 func (r *RecentEvents) Ready() bool   { return r.ready.Load() }
 func (r *RecentEvents) Error() string { return text(r.lastError.Load()) }
 func (r *RecentEvents) Diagnostics() Object {
@@ -127,7 +136,7 @@ func (r *RecentEvents) Snapshot(ctx context.Context, low, high float64, overview
 		r.mu.Unlock()
 		return nil, nil, false
 	}
-	g := &Snapshot{main: tx, ctx: ctx, recent: true}
+	g := &Snapshot{main: tx, ctx: ctx, recent: true, bounds: [2]float64{lo, hi}, count: r.Count()}
 	return g, func() { g.Close(); r.mu.Unlock() }, true
 }
 func (r *RecentEvents) insert(ctx context.Context, rows []Object, evict bool) error {
@@ -187,6 +196,12 @@ func (r *RecentEvents) refresh(ctx context.Context) error {
 		r.beforeTS = 0
 		r.count.Store(0)
 		r.ready.Store(false)
+		r.bounds.Store([2]float64{})
+		r.Version.Add(1)
+		if r.image != nil {
+			r.releaseImage(r.image)
+			r.image = nil
+		}
 	}
 	if !r.initialized {
 		if err := r.app.Store.Readers.QueryRowContext(ctx, "SELECT COALESCE(MAX(id),0) FROM events").Scan(&r.cursor); err != nil {

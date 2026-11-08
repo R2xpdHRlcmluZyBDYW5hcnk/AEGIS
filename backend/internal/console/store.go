@@ -217,7 +217,7 @@ func NewStore(path, stream string, pool *Pool) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	r.SetMaxOpenConns(9)
+	r.SetMaxOpenConns(2*WorkerCount() + 1)
 	r.SetMaxIdleConns(9)
 	s.Readers = r
 	if err = r.Ping(); err != nil {

@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"syscall"
 
@@ -21,8 +20,8 @@ func run(ctx context.Context, args []string) error {
 		return json.NewEncoder(os.Stdout).Encode(console.BuildInfo())
 	}
 	name := filepath.Base(os.Args[0])
-	mode := map[string]string{"ips-web": "web", "ips-rule-manager": "manager", "ips-event-bridge": "bridge", "ips-snort-rules": "rules"}[name]
-	if len(args) > 0 && strings.Contains("|web|manager|bridge|rules|history-reset|", "|"+args[0]+"|") {
+	mode := map[string]string{"ips-web": "web", "ips-rule-manager": "manager", "ips-event-bridge": "bridge", "ips-snort-rules": "rules", "ips-supervisor": "supervisor", "snort-home-net": "home-net", "ips-quic-observer": "quic-observer", "recover-event-db": "recover-event-db"}[name]
+	if len(args) > 0 && strings.Contains("|web|manager|bridge|rules|history-reset|supervisor|home-net|quic-observer|recover-event-db|resources|", "|"+args[0]+"|") {
 		mode, args = args[0], args[1:]
 	}
 	if mode == "" {
@@ -33,6 +32,19 @@ func run(ctx context.Context, args []string) error {
 	}
 	flags := flag.NewFlagSet(mode, flag.ContinueOnError)
 	switch mode {
+	case "resources":
+		return console.RunResourceBudget(ctx, args)
+	case "recover-event-db":
+		return console.RunRecovery(ctx, args)
+	case "quic-observer":
+		return console.RunQuicObserver(ctx, args)
+	case "home-net":
+		if len(args) > 0 {
+			return errors.New("HOME_NET 不接受命令参数")
+		}
+		return console.RunHomeNet(ctx)
+	case "supervisor":
+		return console.RunSupervisor(ctx, args)
 	case "web":
 		config := flags.String("config", "/etc/ips-web.conf", "控制台配置")
 		gen := flags.Bool("gen-password", false, "生成登录密码和哈希")
@@ -120,7 +132,7 @@ func run(ctx context.Context, args []string) error {
 	return fmt.Errorf("未知服务 %q", mode)
 }
 func main() {
-	runtime.GOMAXPROCS(min(4, runtime.GOMAXPROCS(0)))
+	console.ConfigureResources()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	if err := run(ctx, os.Args[1:]); err != nil && !errors.Is(err, context.Canceled) {

@@ -9,10 +9,10 @@ import shutil
 import subprocess
 import sys
 
-from ips_control import Client
-from log_storage import log_paths
-from snort_engine import BINARY, configuration_lock, SnortControl
-import session_logger
+from deployment_support import Client
+from deployment_support import log_paths
+from deployment_support import BINARY, configuration_lock, SnortControl
+import deployment_support as session_logger
 
 CONFIG = Path('/etc/snort/snort.lua')
 PROGRAM = Path('/opt/ips-console/bin')
@@ -56,7 +56,7 @@ def extension_rotation(rotation):
 def deploy(release, plugin):
     release = Path(release)
     manifest, library = verified_plugin(release, plugin, BINARY)
-    for name in ('session_logger.py', 'runtime_status.py'):
+    for name in ('deployment_support.py',):
         if (PROGRAM/name).read_bytes() != (release/name).read_bytes():
             raise ValueError('Deploy the matching console backend first')
     candidate = session_logger.LIBRARY_ROOT / manifest['sha256'] / 'ndr_session.so'
@@ -68,7 +68,7 @@ def deploy(release, plugin):
             control = SnortControl('/run/snort/control.sock')
             pid = session_logger.process_key()
             config = extension_config(CONFIG.read_bytes())
-            paths = [CONFIG, session_logger.RECEIPT, PROGRAM/'ips-supervisor', ROTATION]
+            paths = [CONFIG, session_logger.RECEIPT, ROTATION]
             before = {path:path.read_bytes() if path.exists() else None for path in paths}
             token = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
             backup = BACKUPS/token; backup.mkdir(parents=True, mode=0o700)
@@ -86,7 +86,6 @@ def deploy(release, plugin):
             try:
                 install(config, CONFIG)
                 install(json.dumps(receipt).encode()+b'\n', session_logger.RECEIPT)
-                install((release/'ips-supervisor').read_bytes(), PROGRAM/'ips-supervisor', 0o755)
                 rotation = extension_rotation(before[ROTATION])
                 if rotation != before[ROTATION]:
                     install(rotation, ROTATION)

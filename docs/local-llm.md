@@ -30,7 +30,7 @@ Web 后端以流式 HTTP 连接本机 `127.0.0.1:18080/v1/chat/completions`，�
 
 ## 提示词与规则边界
 
-英文提示词在 `llm_assistant.py` 维护。总结和简明补写要求用简体中文描述观察到的通信、告警与处置，逐字引用签名，分别描述独立事件。阻断结果、规则动作和引擎记录的 TCP 重置动作各有含义。关联日志与 DNS 作为候选线索。狩猎计划使用结构化条件，优先选用相同规则编号、域名或结合具体行为的通信对端，核查目的用中文填写。规则建议返回候选编号、中文规则描述、依据和误报限制。TCP 报头候选还可选择同包附加条件。
+英文提示词在 `backend/internal/console/assistant_prompts.json` 维护。总结和简明补写要求用简体中文描述观察到的通信、告警与处置，逐字引用签名，分别描述独立事件。阻断结果、规则动作和引擎记录的 TCP 重置动作各有含义。关联日志与 DNS 作为候选线索。狩猎计划使用结构化条件，优先选用相同规则编号、域名或结合具体行为的通信对端，核查目的用中文填写。规则建议返回候选编号、中文规则描述、依据和误报限制。TCP 报头候选还可选择同包附加条件。
 
 ## 会话证据与狩猎
 
@@ -46,7 +46,7 @@ Web 后端以流式 HTTP 连接本机 `127.0.0.1:18080/v1/chat/completions`，�
 
 语法不合规、计划截断或执行失败会明确显示，不执行自然语言、不用固定模板替换模型条件、不把失败当作零命中。模型计划为空时直接总结当前证据。跨会话命中始终是候选线索，不并入当前会话，不触发封禁或规则写入。“查看命中日志”保留实际谓词、时间范围及排除条件。
 
-DNS 候选关联由 `dns_context.py` 独立执行，关联检索计划无效时仍检查。会话使用最早观察时间，缺少会话 ID 的单条事件使用事件时间。候选要求同一客户端、答案 IP 与通信对端一致、时间符合已采集的 TTL 或缺少 TTL 时的保守窗口。SNI / Host 一致的名称优先，最多保留两项。候选使用 DNS 记录自己的会话 ID 和记录标识，可查看原始日志或按真实会话 ID 打开狩猎。
+DNS 候选关联由 `backend/internal/console/investigation.go` 独立执行，关联检索计划无效时仍检查。会话使用最早观察时间，缺少会话 ID 的单条事件使用事件时间。候选要求同一客户端、答案 IP 与通信对端一致、时间符合已采集的 TTL 或缺少 TTL 时的保守窗口。SNI / Host 一致的名称优先，最多保留两项。候选使用 DNS 记录自己的会话 ID 和记录标识，可查看原始日志或按真实会话 ID 打开狩猎。
 
 支持的示例条件：
 
@@ -80,6 +80,6 @@ HTTP / TLS / DNS 名称本身不能证明恶意。HTTP Host 使用子串匹配�
 - [sid](https://docs.snort.org/rules/options/general/sid)：规则身份选项。
 - [Configuration](https://docs.snort.org/start/configuration)：Snort 3 使用 Lua 配置；最终配置由实际引擎验证。
 
-本地服务协议依据部署资料 README 与服务配置中的 stream、enable_thinking、单并发和无状态约定，以及取消实现中流式断开触发原生 abort 的逻辑。狩猎语法依据 Luqum 解析器、`hunt_query.py` 的 AST 校验、`hunt_sql_pushdown` 和字段目录；会话关联依据引擎会话身份与数据库索引。
+本地服务协议依据部署资料 README 与服务配置中的 stream、enable_thinking、单并发和无状态约定，以及取消实现中流式断开触发原生 abort 的逻辑。狩猎语法依据 Go 查询解析器、AST 校验、SQL 下推和字段目录；会话关联依据引擎会话身份与数据库索引。
 
 2026-11-05，MCP Search Service 补充核查 [flags](https://docs.snort.org/rules/options/non_payload/flags)、[ttl](https://docs.snort.org/rules/options/non_payload/ttl)、[window](https://docs.snort.org/rules/options/non_payload/window)。条件为异常 TCP 标志与同包整数报头约束；结果确认相应规则选项的写法。HTTP、TLS、DNS、TCP 报头和 AppID 候选及显式 block 动作另由匹配版本的实际 Snort 二进制执行配置验证；文档语法并不替代实际引擎校验。

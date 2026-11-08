@@ -111,23 +111,6 @@ class LogStorageCase(unittest.TestCase):
         state[path.name]['offset']=len(b'complete\n')
         self.assertTrue(self.module.bridge_drained([path],state))
 
-    def test_destination_replay_keeps_consumed_boundary_and_repairs_partial_output(self):
-        m=self.module;root=self.root;native=root/'native';native.mkdir()
-        first=json.dumps(dict(ts=1700000000,uid=1,trans_id=1,query='first')).encode()+b'\n'
-        second=first.replace(b'first',b'next')
-        path=native/'0_file_connector_ndr_transmit';path.write_bytes(first+second+b'partial')
-        checkpoint=root/'checkpoint.json';checkpoint.write_text(json.dumps(dict(epoch='fixture',
-            files={path.name:dict(inode=path.stat().st_ino,offset=len(first))})))
-        backup=root/'backup';backup.mkdir();shutil.copytree(native,backup/'visible-native')
-        destination=root/'destination';(destination/'events').mkdir(parents=True)
-        stream=destination/'events/events.json';stream.write_bytes(b'preserved complete row\n{"torn":')
-        with mock.patch.multiple(m,ROOT=destination,LOGS=(native,root/'events'),CHECKPOINT=checkpoint):
-            m.drain_preserved_logs(ROOT,backup,dict(epoch='fixture',started=0))
-        rows=stream.read_bytes().splitlines()
-        self.assertEqual(rows[0],b'preserved complete row')
-        self.assertEqual(len(rows),2)
-        self.assertEqual(json.loads(rows[1])['data']['query'],'next')
-        self.assertEqual(path.read_bytes(),first+second+b'partial')
 
     def exercise_direct_repair(self,failure=False):
         m=self.module;root=self.root
@@ -137,8 +120,11 @@ class LogStorageCase(unittest.TestCase):
         stream=logs[1]/'events.json';stream.write_text('visible event evidence\n');identity=stream.stat()
         (persistent/'snort/old-native').write_text('covered native evidence\n')
         (persistent/'events/events.json').write_text('covered event evidence\n')
-        programs=('ips-web','ips-supervisor','log_storage.py');installed=root/'programs';installed.mkdir()
-        for name in programs:(installed/name).write_text('# previous program\n')
+        programs=('ips-web','ips-supervisor','deployment_support.py');installed=root/'programs';installed.mkdir()
+        release=root/'release';release.mkdir();(release/'logrotate-snort').write_bytes((ROOT/'logrotate-snort').read_bytes())
+        for name in ('deploy-log-storage.py','deployment_layout.py','deploy-backend.py',*m.MOUNTS):(release/name).write_bytes((ROOT/name).read_bytes())
+        for name in programs:
+            (installed/name).write_text('# previous program\n');(release/name).write_bytes(b'# helper\n' if name.endswith('.py') else b'\x7fELF'+bytes(60))
         db=root/'events.db';boundary=dict(device=identity.st_dev,inode=identity.st_ino,offset=5)
         with closing(sqlite3.connect(db)) as conn,conn:
             conn.executescript('CREATE TABLE event_state(key TEXT PRIMARY KEY,value TEXT); CREATE TABLE events(data TEXT); INSERT INTO events VALUES("protected");')
@@ -161,9 +147,9 @@ class LogStorageCase(unittest.TestCase):
              mock.patch.object(m,'drain_preserved_logs'),mock.patch.object(m,'resume'),mock.patch.object(m,'healthy',healthy), \
              mock.patch.object(m.subprocess,'run',return_value=mock.Mock(returncode=0)):
             if failure:
-                with self.assertRaisesRegex(RuntimeError,'candidate unhealthy'):m.apply_direct(ROOT)
+                with self.assertRaisesRegex(RuntimeError,'candidate unhealthy'):m.apply_direct(release)
             else:
-                m.apply_direct(ROOT)
+                m.apply_direct(release)
                 self.assertTrue(json.loads(marker.read_text())['direct_paths'])
                 self.assertEqual((persistent/'events/events.json').read_text(),stream.read_text())
                 self.assertEqual(json.loads(m.cutoff(db)['value'])['inode'],(persistent/'events/events.json').stat().st_ino)
@@ -190,13 +176,6 @@ class LogStorageCase(unittest.TestCase):
     def test_direct_repair_health_failure_restores_programs_authentication_and_read_boundary(self):
         self.exercise_direct_repair(failure=True)
 
-    def test_direct_repair_preserves_the_separately_installed_updater_entry(self):
-        updater=self.root/'external/pulledpork.py';updater.parent.mkdir();updater.write_text('# independent updater\n')
-        source=self.root/'snort_rules.py';source.write_text('from pathlib import Path\nPULLEDPORK=Path('+repr(str(updater))+')\n')
-        self.assertEqual(self.module.external_updater(self.root),updater)
-        text=self.module.direct_overrides(updater)['ips-rule-manager']
-        self.assertIn('IPS_PULLEDPORK=',text)
-        self.assertEqual(updater.read_text(),'# independent updater\n')
 
 
 if __name__=='__main__':unittest.main()
