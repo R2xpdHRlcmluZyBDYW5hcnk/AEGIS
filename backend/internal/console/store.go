@@ -753,17 +753,23 @@ func (s *Store) Record(ctx context.Context, key string) (Object, error) {
 	}
 	return Object{"record": record, "raw": raw, "raw_text": rawText}, nil
 }
-func (s *Store) SetCapacity(ctx context.Context, mib int64) (Object, error) {
+func (s *Store) CapacitySettings() Object {
+	s.stateMu.RLock()
+	defer s.stateMu.RUnlock()
+	return Object{"cap": s.Cap, "min_cap_mib": 64, "max_cap_mib": 1048576}
+}
+
+func (s *Store) SetCapacity(mib int64) error {
 	if mib < 64 || mib > 1048576 {
-		return nil, errors.New("容量必须为 64 至 1048576 MiB 的整数")
-	}
-	if err := writeJSON(s.Path+".settings.json", Object{"cap_mib": mib}); err != nil {
-		return nil, err
+		return errors.New("容量必须为 64 至 1048576 MiB 的整数")
 	}
 	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	if err := writeJSON(s.Path+".settings.json", Object{"cap_mib": mib}); err != nil {
+		return err
+	}
 	s.Cap = mib << 20
-	s.stateMu.Unlock()
-	return s.Stats(ctx)
+	return nil
 }
 func sqliteVersion(ctx context.Context, db Querier) string {
 	var version string

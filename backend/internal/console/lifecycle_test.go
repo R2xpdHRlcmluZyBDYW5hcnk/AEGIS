@@ -253,6 +253,22 @@ func TestHTTPAuthenticationQueriesAndSources(t *testing.T) {
 	if res.StatusCode != 401 {
 		t.Fatal("unauthorized rule update accepted")
 	}
+	res, err = client.Post(server.URL+"/api/db/clear", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != 401 {
+		t.Fatal("unauthorized history reset accepted")
+	}
+	res, err = client.Get(server.URL + "/api/db/settings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != 401 {
+		t.Fatal("unauthenticated settings read accepted", res.StatusCode)
+	}
 	res, err = client.PostForm(server.URL+"/login", url.Values{"username": {"admin"}, "password": {"fixture-password"}})
 	if err != nil {
 		t.Fatal(err)
@@ -275,16 +291,16 @@ func TestHTTPAuthenticationQueriesAndSources(t *testing.T) {
 	if integer(file["total"]) != 1 || file["source"] != "file" {
 		t.Fatal("file search parity", file)
 	}
-	req, _ := http.NewRequest("POST", server.URL+"/api/db/settings", strings.NewReader(`{"cap_mib":64}`))
+	req, _ := http.NewRequest("POST", server.URL+"/api/db/clear", strings.NewReader(`{"scope":"all"}`))
 	res, err = client.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	res.Body.Close()
-	if res.StatusCode < 400 {
-		t.Fatal("missing CSRF header accepted")
+	if res.StatusCode != 400 {
+		t.Fatal("history reset without CSRF header accepted", res.StatusCode)
 	}
-	req, _ = http.NewRequest("POST", server.URL+"/api/db/settings", strings.NewReader(`{"cap_mib":64}`))
+	req, _ = http.NewRequest("POST", server.URL+"/api/db/clear", strings.NewReader(`{"scope":"all"}`))
 	req.Header.Set("X-Requested-With", "ips-web")
 	req.Header.Set("Origin", "https://untrusted.example")
 	res, err = client.Do(req)
@@ -294,6 +310,35 @@ func TestHTTPAuthenticationQueriesAndSources(t *testing.T) {
 	res.Body.Close()
 	if res.StatusCode != 403 {
 		t.Fatal("untrusted origin accepted")
+	}
+	capacityURL := server.URL + "/api/db/settings"
+	for _, tc := range []struct {
+		body, origin string
+		status       int
+	}{
+		{`{"cap_mib":63}`, "", 400},
+		{`{"cap_mib":128}`, "https://untrusted.example", 403},
+		{`{"cap_mib":128}`, "", 200},
+	} {
+		req, _ = http.NewRequest("POST", capacityURL, strings.NewReader(tc.body))
+		req.Header.Set("X-Requested-With", "ips-web")
+		req.Header.Set("Origin", tc.origin)
+		res, err = client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var value Object
+		err = json.NewDecoder(res.Body).Decode(&value)
+		res.Body.Close()
+		if err != nil || res.StatusCode != tc.status {
+			t.Fatal("unexpected capacity response", tc.status, res.StatusCode, err)
+		}
+		if tc.status == 200 && (integer(object(value["stats"])["cap"]) != 128<<20 || object(value["stats"])["rows"] == nil) {
+			t.Fatal("existing save response lost database statistics", value)
+		}
+	}
+	if settings := get("/api/db/settings"); integer(settings["cap"]) != 128<<20 {
+		t.Fatal("capacity read did not reflect saved settings", settings)
 	}
 	for _, origin := range []string{"", "https://untrusted.example"} {
 		req, _ := http.NewRequest("POST", server.URL+"/api/actions/update", strings.NewReader(`{}`))

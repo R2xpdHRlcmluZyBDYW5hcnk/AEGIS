@@ -9,7 +9,7 @@ const profile = await mkdtemp(path.join(tmpdir(), 'ndr-chrome-'));
 const chromePath = process.env.CHROME_PATH || 'C:/Program Files/Google/Chrome/Application/chrome.exe';
 const chrome = spawn(chromePath, ['--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--remote-debugging-port=0', '--remote-allow-origins=*', `--user-data-dir=${profile}`, 'about:blank'], { windowsHide: true, stdio: 'ignore' });
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
-let ws,holdOverview=false;
+let ws,holdOverview=false,heldDbStats,clearRequests=0;
 const heldOverview=[];
 try {
   let port;
@@ -26,10 +26,12 @@ try {
   ws.onmessage = ({ data }) => {
     const message = JSON.parse(data);
     if(message.method==='Fetch.requestPaused'){
-      if(holdOverview)heldOverview.push(message.params.requestId);
+      if(message.params.request.url.endsWith('/api/db/stats'))heldDbStats=message.params.requestId;
+      else if(holdOverview)heldOverview.push(message.params.requestId);
       else void cdp('Fetch.continueRequest',{requestId:message.params.requestId}).catch(()=>{});
       return;
     }
+    if(message.method==='Network.requestWillBeSent'&&message.params.request.url.endsWith('/api/db/clear')&&message.params.request.method==='POST')clearRequests++;
     if (message.method === 'Runtime.exceptionThrown') exceptions.push(message.params.exceptionDetails);
     if (message.id && pending.has(message.id)) {
       const { resolve, reject } = pending.get(message.id); pending.delete(message.id);
@@ -119,7 +121,51 @@ try {
   await until(`document.querySelector('[data-testid="alerts-total"]')?.textContent.trim()==='3'&&document.querySelectorAll('ndr-overview ndr-table#recent tbody tr[tabindex]').length===10`);
   await until(`!!document.querySelector('ndr-chart .echarts-surface svg')`);
   await shot('go-overview-desktop.png');
-  await nav('system');await until(`!!document.querySelector('.database-card')`);
+  await cdp('Fetch.enable',{patterns:[{urlPattern:'*/api/db/stats',requestStage:'Request'}]});
+  await nav('system');
+  await until(`document.querySelector('.database-card button')?.textContent.trim()==='清空历史事件' && !!document.querySelector('#db-capacity')`);
+  for(let i=0;!heldDbStats&&i<100;i++)await pause(50);
+  assert.ok(heldDbStats,'the clear action renders while the statistics request is still pending');
+  const databaseCard=`document.querySelector('.database-card')`;
+  const databaseValues=`[...${databaseCard}.querySelectorAll('dl dd')].map(node=>node.textContent.trim())`;
+  assert.deepEqual(await evaluate(`[...${databaseCard}.querySelectorAll('dl dt')].map(node=>node.textContent.trim())`),
+    ['文件','大小 / 上限','事件数','最早事件','最新事件'],'database fields are present during loading');
+  const loadingValues=await evaluate(databaseValues);
+  assert.match(loadingValues[1],/^读取中… \/ \d+(?:\.\d+)? [A-Za-z]+$/,'capacity is displayed before usage is available');
+  assert.deepEqual([loadingValues[0],...loadingValues.slice(2)],Array(4).fill('读取中…'));
+  await clickText('清空历史事件',databaseCard);
+  await until(`document.querySelector('dialog[open]')?.textContent.includes('尚未入库的原始日志')`);
+  await cdp('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
+  await cdp('Input.dispatchKeyEvent',{type:'keyUp',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
+  await until(`!document.querySelector('dialog[open]')`);
+  assert.equal(clearRequests,0,'dismissing the confirmation does not clear history');
+  const initialCapacity=(await api('/api/db/settings')).cap/1048576;
+  await set('.db-capacity select','MiB','change');
+  await until(`Number(document.querySelector('#db-capacity')?.value)===${initialCapacity}`);
+  await set('#db-capacity',initialCapacity-1);
+  await clickText('保存',databaseCard);
+  await until(`document.querySelector('dialog[open]')?.textContent.includes('当前占用暂不可用')`);
+  await clickText('取消',`document.querySelector('dialog[open]')`);
+  assert.equal((await api('/api/db/settings')).cap,initialCapacity*1048576,'cancelling a lower capacity preserves settings');
+  await cdp('Fetch.fulfillRequest',{
+    requestId:heldDbStats,responseCode:503,responseHeaders:[{name:'Content-Type',value:'application/json'}],
+    body:Buffer.from(JSON.stringify({error:'fixture statistics unavailable'})).toString('base64'),
+  });
+  await cdp('Fetch.disable');
+  await until(`document.querySelector('.database-card [role="alert"]')?.textContent.includes('无法读取事件库统计')`);
+  assert.deepEqual(await evaluate(databaseValues),loadingValues.map(value=>value.replace('读取中…','未读取')),
+    'failed statistics retain each field and replace its loading placeholder');
+  const savedCapacity=initialCapacity+1;
+  await set('#db-capacity',savedCapacity);
+  await clickText('保存',databaseCard);
+  await until(`document.querySelector('.toast')?.textContent.includes('容量上限已保存')`);
+  assert.equal((await api('/api/db/settings')).cap,savedCapacity*1048576,'capacity saves even when statistics fail');
+  await clickText('清空历史事件',databaseCard);
+  await clickText('确认',`document.querySelector('dialog[open]')`);
+  // The real manager refuses history maintenance outside the installed layout.
+  await until(`document.querySelector('.toast')?.textContent.includes('历史维护只支持独立服务布局')`);
+  assert.equal(clearRequests,1,'the confirmed action reaches the backend even after statistics fail');
+  await until(`!document.querySelector('.database-card button')?.disabled`);
   await holdOverviewRequests();await nav('overview');
   await until(`document.querySelector('[data-testid="alerts-total"]')?.textContent.trim()==='3'`);
   assert.equal(await evaluate(`!!document.querySelector('[data-testid="overview-loading"]')`),false,'returning overview retains its snapshot while requests are held');
@@ -207,7 +253,10 @@ try {
   await until(`!document.querySelector('.pending-rules')&&document.querySelector('ndr-rules .job-log')?.textContent.includes('规则已校验并完成热重载')`);
   await evaluate(`window.__jobLogObserver.disconnect()`);assert.deepEqual(await evaluate(`window.__jobLogWarnings`),[],'starting update and apply jobs does not flash a log-read error');
   await shot('go-rules-desktop.png');
-  await nav('system');await until(`!!document.querySelector('.database-card')`);await shot('go-system-desktop.png');
+  await nav('system');
+  await until(`Number(document.querySelector('#db-capacity')?.value)===${savedCapacity/1024}
+    && (${databaseValues}).length===5 && (${databaseValues}).every(value=>value&&!/读取中|未读取/.test(value))`);
+  await shot('go-system-desktop.png');
   const health=await api('/healthz');assert.equal(health.backend,'go');assert.equal(health.go_version,'go1.27.3');
   for(const [width,height] of [[1280,800],[1920,1080]]){
     await cdp('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false});

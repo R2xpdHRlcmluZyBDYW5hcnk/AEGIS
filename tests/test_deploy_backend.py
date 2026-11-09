@@ -18,6 +18,21 @@ with mock.patch.dict(sys.modules, {'fcntl': types.SimpleNamespace()} if sys.plat
 
 
 class BackendDeploymentCase(unittest.TestCase):
+    def test_console_only_reuses_configured_postgresql(self):
+        isolation = mock.Mock()
+        helper = mock.Mock()
+        config = mock.Mock()
+        config.read_bytes.return_value = b'{"database_url":"postgresql:///aegis"}'
+        with (mock.patch.object(deployer.Path, 'is_file', return_value=True),
+              mock.patch.object(deployer, 'CONFIG', config),
+              mock.patch.object(deployer.importlib.util, 'spec_from_file_location') as spec,
+              mock.patch.object(deployer.importlib.util, 'module_from_spec', return_value=isolation)):
+            release = ROOT
+            deployer.upgrade(release, helper, {}, console_only=True)
+        spec.assert_called_once_with('web_isolation', release / 'deploy-native-backend.py')
+        isolation.apply.assert_called_once_with(
+            release, deployer.wait_ready, {}, helper.snapshot, reset_event_data=False, console_only=True)
+
     def test_resource_validation_and_whitelist(self):
         self.assertEqual(deployer.resource_overrides({'cache_max_mib':128,'read_workers':4,'password_pbkdf2':'ignored'}),{'cache_max_mib':128})
         self.assertEqual(deployer.resource_overrides({'llm_summary_max_tokens':1024}),{'llm_summary_max_tokens':1024})

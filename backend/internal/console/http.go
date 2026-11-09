@@ -165,6 +165,8 @@ func (h *HTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		jsonReply(w, 200, schema.HuntSchema)
 	case "/api/cache/stats":
 		jsonReply(w, 200, h.App.CacheStats())
+	case "/api/db/settings":
+		jsonReply(w, 200, h.App.Store.CapacitySettings())
 	case "/api/db/stats":
 		result, err := h.App.Store.Stats(r.Context())
 		if err != nil {
@@ -361,7 +363,15 @@ func (h *HTTPHandler) mutate(w http.ResponseWriter, r *http.Request, owner strin
 			httpError(w, 400, "容量必须为整数")
 			return
 		}
-		value, err := h.App.Store.SetCapacity(r.Context(), integer(body["cap_mib"]))
+		if err := h.App.Store.SetCapacity(integer(body["cap_mib"])); err != nil {
+			h.fail(w, err)
+			return
+		}
+		if r.URL.Query().Get("stats") == "0" {
+			jsonReply(w, 200, Object{"ok": true, "settings": h.App.Store.CapacitySettings()})
+			return
+		}
+		value, err := h.App.Store.Stats(r.Context())
 		if err != nil {
 			h.fail(w, err)
 			return

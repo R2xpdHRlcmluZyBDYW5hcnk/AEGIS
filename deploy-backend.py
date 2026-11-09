@@ -92,7 +92,7 @@ def upgrade(release,helper,overrides,postgresql=False,reset_event_data=False,con
         if reset_event_data and not postgresql:raise ValueError('--reset-event-data requires --postgresql')
         if postgresql and not config.get('database_url') and not reset_event_data:
             raise ValueError('Switching SQLite to PostgreSQL requires explicit --reset-event-data')
-        if postgresql or config.get('database_url'):
+        if postgresql or (config.get('database_url') and not console_only):
             # Validate the complete release before installing runtime dependencies.
             isolation.validate_native_release(release)
             database_spec=importlib.util.spec_from_file_location('postgresql_dependency',release/'deploy-postgresql.py')
