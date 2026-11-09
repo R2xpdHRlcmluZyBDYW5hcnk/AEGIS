@@ -12,7 +12,7 @@ import { ModalComponent } from '../modal.component';
 import { RuleCollectionComponent, RuleSelection, groupSelection } from '../rule-collection.component';
 @Component({changeDetection:ChangeDetectionStrategy.Eager,selector:'ndr-rules',standalone:true,imports:[TabMotionDirective,CommonModule,FormsModule,TableComponent,PickerComponent,SourceEditorComponent,RuleEditorComponent,ModalComponent,RuleCollectionComponent],template:`
  <div class="rule-summary"><div class="stats-grid resource-summary rule-status-grid" role="group" aria-label="规则运行状态"><h2>规则概况</h2>
-  <div class="stat-card rule-status-card"><span>{{summary?.ruleset?.rules_loaded_source==='rule_files'?'配置文本规则':'已载入'}}</span><strong>{{!summary?'读取中':summary?.ruleset?.rules_loaded==null?'未提供':(summary.ruleset.rules_loaded | number)}}</strong></div>
+  <div class="stat-card rule-status-card"><span>{{summary?.ruleset?.rules_loaded_source==='rule_files'?'启用签名数':'已载入'}}</span><strong>{{!summary?'读取中':summary?.ruleset?.rules_loaded==null?'未提供':(summary.ruleset.rules_loaded | number)}}</strong></div>
   <div class="stat-card rule-status-card" [class.failed]="summary?.ruleset?.rules_failed>0"><span>失败</span><strong [attr.title]="summary&&summary?.ruleset?.rules_failed==null?'引擎未提供失败计数':null">{{!summary?'读取中':summary?.ruleset?.rules_failed==null?'未提供':(summary.ruleset.rules_failed | number)}}</strong></div>
   <div class="stat-card rule-status-card"><span>引擎状态</span><strong class="rule-engine-state" [class.is-ready]="summary&&!summary?.ruleset?.error&&!jobBusy&&summary?.reload?.state!=='running'&&summary?.reload?.ok!==false" [class.is-error]="summary?.ruleset?.error||summary?.reload?.ok===false">{{!summary?'读取中':summary?.ruleset?.error?'引擎状态不可用':(jobBusy||summary?.reload?.state==='running')?'规则校验与应用中':summary?.reload?.ok===false?'上次应用失败，请查看操作日志':'引擎就绪'}}</strong></div>
  </div></div>
@@ -208,13 +208,13 @@ export class RulesComponent implements OnInit,OnDestroy {
    const wasRunning=this.jobStatus?.state==='running';
    this.jobStatus=status;
    this.jobError=status.log_error||'';
-   if(this.tab==='jobs')await this.loadJobLogs(request.signal);
-   if(request.signal.aborted)return;
-   if(status.state==='running')this.pollTimer=setTimeout(()=>void this.pollJob(),2000);
-   else if(wasRunning){
+   if(status.state!=='running'&&wasRunning){
     this.state.toast(status.rc===0?'规则任务完成':'规则任务未完成，请查看操作日志');
     void this.refresh();
    }
+   if(this.tab==='jobs')await this.loadJobLogs(request.signal);
+   if(request.signal.aborted)return;
+   if(status.state==='running')this.pollTimer=setTimeout(()=>void this.pollJob(),2000);
   }catch{
    if(request.signal.aborted)return;
    this.jobError='操作日志更新失败，正在重试';

@@ -219,8 +219,12 @@ func extractAppID(data []byte, destination string) error {
 }
 func updateAppID(ctx context.Context, root string, log func(string)) (bool, error) {
 	previous, err := appIDSnapshot(root)
-	if err != nil || previous == nil {
+	if err != nil {
 		return false, err
+	}
+	if previous == nil {
+		log("未安装 OpenAppID 检测器，跳过更新")
+		return false, nil
 	}
 	log("检查 OpenAppID 官方检测器更新")
 	page, err := fetchDownload(ctx, "https://www.snort.org/downloads", 2<<20, "", true)
@@ -243,8 +247,13 @@ func updateAppID(ctx context.Context, root string, log func(string)) (bool, erro
 	old := object(previous["receipt"])
 	if old["md5"] == expected {
 		old["checked"] = time.Now().Unix()
-		return false, writeJSON(filepath.Join(root, "update.json"), old)
+		if err := writeJSON(filepath.Join(root, "update.json"), old); err != nil {
+			return false, err
+		}
+		log("OpenAppID 检测器已是最新，跳过下载")
+		return false, nil
 	}
+	log("发现新版 OpenAppID 检测器，开始下载")
 	data, err := fetchDownload(ctx, "https://www.snort.org"+string(link[1]), 64<<20, "", true)
 	if err != nil {
 		return false, err

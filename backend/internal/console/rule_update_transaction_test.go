@@ -129,7 +129,7 @@ func ruleTransactionFiles(m *RuleManager) (map[string]string, error) {
 // Exercise the real HTTPS downloader, archive compiler, draft transaction and
 // command validation. Only the download peer and Snort process are synthetic.
 func TestRuleUpdateAppliesDraftsAndRollsBackFailures(t *testing.T) {
-	for _, mode := range []string{"success", "download-failure", "validation-failure", "reload-failure", "rollback-failure", "appid-change", "appid-reload-failure", "scheduled"} {
+	for _, mode := range []string{"success", "download-failure", "validation-failure", "reload-failure", "rollback-failure", "appid-current", "appid-change", "appid-reload-failure", "scheduled"} {
 		t.Run(mode, func(t *testing.T) {
 			m := testManager(t)
 			prefix := t.TempDir()
@@ -162,16 +162,23 @@ func TestRuleUpdateAppliesDraftsAndRollsBackFailures(t *testing.T) {
 				t.Fatal(err)
 			}
 			appidChanged := mode == "appid-change" || mode == "appid-reload-failure"
+			appidCurrent := mode == "appid-current"
 			appRoot := filepath.Join(m.live.Data, "appid")
 			bundled := filepath.Join(prefix, "share/appid/odp")
-			if appidChanged {
+			if appidChanged || appidCurrent {
 				os.MkdirAll(bundled, 0700)
 				os.MkdirAll(appRoot, 0700)
 				if err := os.Symlink(bundled, filepath.Join(appRoot, "odp")); err != nil {
 					t.Fatal(err)
 				}
 			}
-			var oldRequests, newRequests atomic.Int32
+			if appidCurrent {
+				hash := md5.Sum(appid)
+				if err := writeJSON(filepath.Join(appRoot, "update.json"), Object{"md5": hex.EncodeToString(hash[:])}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var oldRequests, newRequests, appidDownloads atomic.Int32
 			fixtureRuleDownloads(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
 				case "/old.rules":
@@ -193,6 +200,7 @@ func TestRuleUpdateAppliesDraftsAndRollsBackFailures(t *testing.T) {
 					hash := md5.Sum(appid)
 					w.Write([]byte(hex.EncodeToString(hash[:]) + "  snort-openappid.tar.gz\n"))
 				case "/downloads/openappid/1":
+					appidDownloads.Add(1)
 					w.Write(appid)
 				default:
 					w.WriteHeader(http.StatusNotFound)
@@ -301,6 +309,24 @@ func TestRuleUpdateAppliesDraftsAndRollsBackFailures(t *testing.T) {
 				target, err := os.Readlink(filepath.Join(appRoot, "odp"))
 				if err != nil || (target != bundled) == failed {
 					t.Fatal("OpenAppID pointer did not follow transaction outcome", err)
+				}
+			}
+			if appidChanged || appidCurrent {
+				id := text(m.jobs.Status()["id"])
+				logPath, err := m.jobs.logPath(id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				log := readText(logPath)
+				var expectedDownloads int32
+				if appidChanged {
+					expectedDownloads = 1
+				}
+				if appidDownloads.Load() != expectedDownloads ||
+					strings.Contains(log, "OpenAppID 检测器已是最新，跳过下载") != appidCurrent ||
+					strings.Contains(log, "发现新版 OpenAppID 检测器，开始下载") != appidChanged ||
+					strings.Contains(log, "OpenAppID 检测器已热重载") != (appidChanged && !failed) {
+					t.Fatal("OpenAppID log does not describe the transaction outcome", log)
 				}
 			}
 			transactions, _ := filepath.Glob(filepath.Join(m.state, "transaction-*"))

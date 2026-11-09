@@ -466,7 +466,7 @@ func (j *RuleJobs) Start(kind, trigger, rule string) (Object, error) {
 func (j *RuleJobs) worker(record Object, backup *ruleBackup) {
 	m := j.manager
 	id, kind, trigger := text(record["id"]), text(record["kind"]), text(record["trigger"])
-	reloadAttempted, detectorsChanged, committed := false, false, false
+	reloadAttempted, appIDChanged, detectorsChanged, committed := false, false, false, false
 	var failure error
 	var err error
 	defer func() {
@@ -547,14 +547,12 @@ func (j *RuleJobs) worker(record Object, backup *ruleBackup) {
 			failure = err
 			return
 		}
-		changed, err := updateAppID(m.ctx, filepath.Join(m.live.Data, "appid"), func(message string) { j.append(id, message) })
-		if err != nil {
-			failure = err
+		appIDChanged, failure = updateAppID(m.ctx, filepath.Join(m.live.Data, "appid"), func(message string) { j.append(id, message) })
+		if failure != nil {
 			return
 		}
-		detectorsChanged = changed
 	}
-	detectorsChanged = detectorsChanged || beforeDetector != readText(m.live.controls["BAN_DETECTOR"])
+	detectorsChanged = appIDChanged || beforeDetector != readText(m.live.controls["BAN_DETECTOR"])
 	j.append(id, "开始 Snort 配置校验")
 	if failure = m.prepareThresholds(m.ctx); failure != nil {
 		return
@@ -605,7 +603,13 @@ func (j *RuleJobs) worker(record Object, backup *ruleBackup) {
 	if err := m.recordPolicyFingerprint(); err != nil {
 		j.append(id, "规则已生效，但自动同步状态记录失败")
 	}
+	if err := m.refreshRuleFileStats(m.ctx); err != nil {
+		j.append(id, "规则已生效，但启用签名数更新失败")
+	}
 	backup.Close(m.state)
+	if appIDChanged {
+		j.append(id, "OpenAppID 检测器已热重载")
+	}
 	j.append(id, "规则已校验并完成热重载")
 }
 func (m *RuleManager) pauseRecovery() {

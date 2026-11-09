@@ -88,14 +88,17 @@ class NativeBackendTests(unittest.TestCase):
             with mock.patch.multiple(module,CONFIG=config,BIN=installed,BACKUPS=root/'backups',PIDFILE=pid,RESOURCE_ROOT=root/'units'), \
                  mock.patch.object(module,'validate_native_release',return_value=manifest), \
                  mock.patch.object(module,'validate_go_manifest',return_value=manifest),mock.patch.object(module,'Client',return_value=client),mock.patch.object(module.subprocess,'run') as run:
-                with self.assertRaisesRegex(RuntimeError,'native Go backend'):module.apply(release,ready,{})
+                with self.assertRaisesRegex(RuntimeError,'native Go backend'):
+                    module.apply(release,ready,{},console_only=True,with_rule_manager=True)
             self.assertEqual(config.read_bytes(),original)
             for name in module.PROGRAMS:self.assertEqual((installed/name).read_text(),'# previous helper\n')
             self.assertFalse((installed/'backend-build.json').exists())
             self.assertEqual(pid.read_text(),'12345')
-            for call in run.call_args_list:
-                if call.args[0][1] in ('stop','start'):
-                    self.assertLessEqual(set(call.args[0][2:]),set(module.SERVICES))
+            service_calls=[call.args[0][1:] for call in run.call_args_list if call.args[0][1] in ('stop','start')]
+            self.assertEqual(service_calls,[
+                ['stop','ips-web','ips-rule-manager'], ['start','ips-rule-manager','ips-web'],
+                ['stop','ips-web','ips-rule-manager'], ['start','ips-rule-manager','ips-web'],
+            ])
 
 
 if __name__=='__main__':unittest.main()

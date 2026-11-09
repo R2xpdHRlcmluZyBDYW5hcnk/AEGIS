@@ -142,14 +142,34 @@ func (m *RuleManager) engineOperation(ctx context.Context, operation string, tim
 		if _, err := command("show_config_generation()"); err != nil {
 			return nil, err
 		}
-		rows, err := m.metadata.Load(ctx)
-		if err != nil {
-			return nil, err
-		}
-		return Object{"rules_loaded": len(rows), "rules_loaded_source": "rule_files", "rules_failed": nil, "rules_skipped": nil}, nil
+		return m.ruleFileStats(ctx)
 	}
 	return nil, errors.New("不支持的引擎操作")
 }
+
+func (m *RuleManager) ruleFileStats(ctx context.Context) (Object, error) {
+	rows, err := m.metadata.Load(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return Object{"rules_loaded": len(rows), "rules_loaded_source": "rule_files", "rules_failed": nil, "rules_skipped": nil}, nil
+}
+
+func (m *RuleManager) refreshRuleFileStats(ctx context.Context) error {
+	m.engineGate.Lock()
+	defer m.engineGate.Unlock()
+	stats, err := m.ruleFileStats(ctx)
+	if err != nil {
+		return err
+	}
+	m.runtimeMu.Lock()
+	defer m.runtimeMu.Unlock()
+	engine := clone(object(m.runtime["engine"]))
+	engine["ruleset-stats"] = stats
+	m.runtime["engine"] = engine
+	return nil
+}
+
 func engineCounters(data Object) Object {
 	groups := Object{}
 	for _, section := range array(data["sections"]) {
@@ -315,7 +335,10 @@ func (m *RuleManager) sampleRuntime(ctx context.Context) {
 		telemetry["error"] = pluginError.Error()
 	}
 	telemetry["updating"] = busy
+	sampled := false
 	if !busy && !paused && m.engineGate.TryLock() {
+		// Publish the sample before a rule job can reload and publish its count.
+		defer m.engineGate.Unlock()
 		sample := Object{}
 		var err error
 		for _, op := range []string{"dump-counters", "version", "ruleset-stats", "running-mode", "capture-mode", "uptime", "ruleset-reload-time"} {
@@ -324,9 +347,9 @@ func (m *RuleManager) sampleRuntime(ctx context.Context) {
 				break
 			}
 		}
-		m.engineGate.Unlock()
 		if err == nil && pluginError == nil {
 			engine = sample
+			sampled = true
 			telemetry["as_of"] = stamp
 			telemetry["error"] = ""
 		} else if err != nil {
@@ -349,6 +372,9 @@ func (m *RuleManager) sampleRuntime(ctx context.Context) {
 		}
 	}
 	m.runtimeMu.Lock()
+	if !sampled {
+		engine = object(m.runtime["engine"])
+	}
 	m.runtime = Object{"schema": 1, "published": stamp, "engine": engine, "service": service, "queue_table": table, "queue_listeners": queue, "rates": rates, "telemetry": telemetry}
 	m.runtimeMu.Unlock()
 }

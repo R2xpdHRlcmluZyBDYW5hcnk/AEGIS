@@ -63,6 +63,7 @@ def main():
     parser.add_argument('--postgresql',action='store_true')
     parser.add_argument('--reset-event-data',action='store_true')
     parser.add_argument('--console-only',action='store_true')
+    parser.add_argument('--with-rule-manager',action='store_true')
     for name in RESOURCE_LIMITS:
         parser.add_argument('--'+name.replace('_','-'),type=float if name in ('cache_memory_percent','stats_duty_percent') else int)
     args = parser.parse_args()
@@ -80,10 +81,12 @@ def main():
     spec = importlib.util.spec_from_file_location('static_deployer', release / 'deploy-angular.py')
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
-    return upgrade(release,helper,overrides,postgresql=args.postgresql,reset_event_data=args.reset_event_data,console_only=args.console_only)
+    return upgrade(release,helper,overrides,postgresql=args.postgresql,reset_event_data=args.reset_event_data,
+                   console_only=args.console_only,with_rule_manager=args.with_rule_manager)
 
 
-def upgrade(release,helper,overrides,postgresql=False,reset_event_data=False,console_only=False):
+def upgrade(release,helper,overrides,postgresql=False,reset_event_data=False,console_only=False,with_rule_manager=False):
+    if with_rule_manager and not console_only:raise ValueError('--with-rule-manager requires --console-only')
     if Path('/etc/systemd/system/ips-web.service.d/50-isolation.conf').is_file():
         spec = importlib.util.spec_from_file_location('web_isolation', release / 'deploy-native-backend.py')
         isolation = importlib.util.module_from_spec(spec)
@@ -99,7 +102,8 @@ def upgrade(release,helper,overrides,postgresql=False,reset_event_data=False,con
             dependency=importlib.util.module_from_spec(database_spec);database_spec.loader.exec_module(dependency)
             installed=dependency.install()
             overrides=dict(overrides,database_url=installed['database_url'])
-        return isolation.apply(release, wait_ready, overrides, helper.snapshot,reset_event_data=reset_event_data,console_only=console_only)
+        return isolation.apply(release, wait_ready, overrides, helper.snapshot,reset_event_data=reset_event_data,
+                               console_only=console_only,with_rule_manager=with_rule_manager)
     raise RuntimeError('Native Go backend requires the independent isolated service layout')
 
 

@@ -5,6 +5,7 @@ param(
     [switch]$PostgreSQL,
     [switch]$ResetEventData,
     [switch]$ConsoleOnly,
+    [switch]$WithRuleManager,
     [switch]$UpdateSnortConfig,
     [switch]$UpdateNftRules,
     [switch]$UpdateSupervisor,
@@ -37,6 +38,7 @@ if ($BuildOnly -and -not $OutputDirectory) { throw '-BuildOnly requires -OutputD
 if (($PostgreSQL -or $ResetEventData) -and (-not $UpdateBackend -or $BuildOnly -or $InstallSnort3 -or $UpdateEngine)) { throw '-PostgreSQL and -ResetEventData require a separate -UpdateBackend deployment' }
 if ($ResetEventData -and -not $PostgreSQL) { throw '-ResetEventData requires -PostgreSQL' }
 if ($ConsoleOnly -and (-not $UpdateBackend -or $BuildOnly -or $InstallSnort3 -or $UpdateEngine)) { throw '-ConsoleOnly requires a separate -UpdateBackend deployment' }
+if ($WithRuleManager -and -not $ConsoleOnly) { throw '-WithRuleManager requires -ConsoleOnly' }
 if ($InstallSnort3 -and (-not $UpdateBackend -or $BuildOnly -or -not $EnginePackage)) { throw '-InstallSnort3 requires -UpdateBackend and -EnginePackage and cannot be used with -BuildOnly' }
 if ($InstallSnort3 -and -not (Test-Path -LiteralPath $EnginePackage)) { throw 'Engine package is missing' }
 if ($UpdateEngine -and ($InstallSnort3 -or -not $UpdateBackend -or $BuildOnly -or -not (Test-Path -LiteralPath $EnginePackage))) { throw '-UpdateEngine requires -UpdateBackend and an existing -EnginePackage, and cannot be combined with initial activation or BuildOnly' }
@@ -198,6 +200,7 @@ try {
     if ($PostgreSQL) { $databaseArguments += '--postgresql' }
     if ($ResetEventData) { $databaseArguments += '--reset-event-data' }
     if ($ConsoleOnly) { $databaseArguments += '--console-only' }
+    if ($WithRuleManager) { $databaseArguments += '--with-rule-manager' }
     $backendStep = if ($UpdateBackend) { 'python3 snort-ndr/deploy-backend.py --release snort-ndr ' + (($resourceArguments + $databaseArguments) -join ' ') + ' && ' } else { '' }
     if ($InstallSnort3 -or $UpdateEngine) {
         $engineFileName = Split-Path -Leaf $EnginePackage

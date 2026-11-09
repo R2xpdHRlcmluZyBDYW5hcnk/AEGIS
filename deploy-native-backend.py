@@ -67,7 +67,7 @@ def validate_native_release(release, *, execute=True):
     return validate_go_manifest(release,'backend-build.json',NATIVE_PROGRAMS,execute=execute)
 
 
-def apply(release,wait_ready,overrides,snapshot=None,reset_event_data=False,console_only=False):
+def apply(release,wait_ready,overrides,snapshot=None,reset_event_data=False,console_only=False,with_rule_manager=False):
     release=Path(release)
     native=validate_native_release(release)
     maintenance=validate_go_manifest(release,'maintenance-build.json',MAINTENANCE_PROGRAMS)
@@ -110,7 +110,7 @@ def apply(release,wait_ready,overrides,snapshot=None,reset_event_data=False,cons
         observer_active=subprocess.run(['systemctl','is-active','--quiet','ips-quic-observer'],capture_output=True).returncode==0
     resource_before={path:path.read_bytes() if path.exists() else None for path in resources}
     resources_changed=any(resource_before[path]!=data for path,data in resources.items())
-    if not changed and not retired and updated==config and not resources_changed and not reset_event_data:
+    if not changed and not retired and updated==config and not resources_changed and not reset_event_data and not with_rule_manager:
         print(json.dumps({'backend_unchanged':True}));return
     changed_set = set(changed)
     if changed_set <= WEB_PROGRAMS | MANAGER_PROGRAMS | TOOL_PROGRAMS and not resources_changed:
@@ -121,7 +121,9 @@ def apply(release,wait_ready,overrides,snapshot=None,reset_event_data=False,cons
         services = SERVICES
     if observer_active and (resources.get(observer_unit)!=resource_before.get(observer_unit) or 'ips-quic-observer' in changed_set):
         services=(*services,'ips-quic-observer')
-    if reset_event_data or console_only:
+    if with_rule_manager:
+        services=('ips-web','ips-rule-manager')
+    elif reset_event_data or console_only:
         # This storage switch changes the console's persistence only. The
         # detector, bridge and manager keep their current processes alive.
         services=('ips-web',)

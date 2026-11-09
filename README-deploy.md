@@ -18,6 +18,8 @@
 
 仅更新控制台时使用 `-UpdateBackend -ConsoleOnly`，保留事件数据、读取游标以及其他运行进程。已有 PostgreSQL 配置直接复用，控制台就绪检查仍会验证数据库连接。显式指定 `-PostgreSQL` 时执行依赖安装。
 
+规则管理器也需要更新时，使用 `-UpdateBackend -ConsoleOnly -WithRuleManager`。部署先暂停规则任务，备份并校验程序，再更新规则管理器和 Web 服务，保留事件桥接、检测引擎及数据库进程。
+
 单独激活新规则管理器前，暂停规则任务并确认空闲，检查现场 systemd 依赖。如果 `ips-web.service` 通过 `Requires` 或 `BindsTo` 依赖管理器，停止管理器也会停止控制台；应先停止控制台，重启并确认管理器就绪，再启动控制台。使用 `Client.request('ping')` 时检查返回结果的 `ready` 字段，外层 RPC 的 `ok` 已由客户端解析。完成后解除维护状态，检查控制台、事件库和检测进程身份。
 
 部署器从 PGDG 安装已核定的 PostgreSQL 稳定大版本的最新稳定修订包，从 Timescale 官方仓库安装兼容的 Community 扩展。安装策略、来源及受信任签名指纹列表见 `build_tools/postgresql-sources.json`。源码和发布包不携带 GPG 公钥或 keyring；每次部署从官方 HTTPS 地址获取公钥并验证主密钥指纹，以独立 `Signed-By` 限制仓库信任。包版本更新不改变指纹要求；官方轮换签名密钥后，先核实并更新允许的指纹集合，未知密钥使安装停止，不自动放宽校验。
