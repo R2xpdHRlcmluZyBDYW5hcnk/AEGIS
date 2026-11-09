@@ -26,6 +26,8 @@
 
 事件通过有界 COPY 批次暂存，事件与读取游标同事务提交；唯一键包含事件摘要和分区时间。保留时间、ID、会话和去重所需的四个索引。按小时分块，一小时前的完整块由 TimescaleDB 后台转换为列存，30 天保留策略按块清理。容量超限时仅回收最老的完整历史块，活动块、WAL 和封存回滚数据可能暂时超过容量设置。Direct Compress 技术预览未启用。
 
+PostgreSQL 依赖安装为 `aegis` 数据库开启 TimescaleDB 2.31 的自适应整数压缩（AIC）。后续列存任务对支持的数据类型使用 AIC，已有列存块保留原编码。[Tiger Data 官方说明](https://www.tigerdata.com/blog/adaptive-integer-compression-aic-in-timescaledb#how-to-enable-aic)
+
 PostgreSQL 模式的部署校验检查集群、数据库和应用 schema 的身份，不依赖已退役的 SQLite 文件。清理旧主库和汇总库时保留 `.settings.json` 容量配置；普通升级不得重建或清空当前 PostgreSQL 数据。
 
 完整本地数据库回归使用 `python3 -B build_tools/test_postgresql.py`，自动下载并校验 APT 软件包，在系统临时目录解包、启动隔离集群并清理，不修改开发机的系统软件源或数据库。浏览器回归增加 `--postgresql` 可对同一隔离集群验证真实页面。

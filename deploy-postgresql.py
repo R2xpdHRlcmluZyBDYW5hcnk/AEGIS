@@ -172,6 +172,12 @@ log_min_error_statement = 'panic'
     psql(major,'CREATE EXTENSION IF NOT EXISTS timescaledb','aegis')
     psql(major,'REVOKE CREATE ON SCHEMA public FROM PUBLIC','aegis')
     psql(major,'ALTER DATABASE aegis SET search_path TO aegis,public')
+    aic_setting="SELECT setting FROM pg_settings WHERE name='timescaledb.enable_aic_compression'"
+    if not psql(major,aic_setting,'aegis'):
+        raise RuntimeError('The installed TimescaleDB extension does not expose adaptive integer compression')
+    psql(major,'ALTER DATABASE aegis SET timescaledb.enable_aic_compression TO on')
+    if psql(major,aic_setting,'aegis')!='on':
+        raise RuntimeError('Adaptive integer compression is not enabled in new AEGIS database sessions')
     return {'database_url':DATABASE_URL,'postgresql_major':int(major),'timescaledb_version':psql(major,"SELECT extversion FROM pg_extension WHERE extname='timescaledb'",'aegis')}
 
 
