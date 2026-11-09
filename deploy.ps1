@@ -11,13 +11,8 @@ param(
     [switch]$NativeResponse,
     [string]$NativeResponsePackage = '',
     [switch]$WslBuild,
-    [switch]$WithSqliteRuntime,
     [switch]$InstallSnort3,
     [switch]$UpdateEngine,
-    [switch]$MigrateLogs,
-    [switch]$RemoveLegacySuricata,
-    [switch]$ClearNativeLogs,
-    [switch]$ClearEventStream,
     [string]$QuicInterface = '',
     [string]$EnginePackage = '',
     [string]$SessionLoggerDirectory = '',
@@ -35,21 +30,16 @@ param(
 $ErrorActionPreference = 'Stop'
 if (-not $BuildOnly -and [string]::IsNullOrWhiteSpace($Target)) { throw 'Specify -Target user@host for deployment, or use -BuildOnly -OutputDirectory for a local build' }
 if ($Target -and ($Target.StartsWith('-') -or $Target -match '\s')) { throw 'Invalid SSH target' }
-if ($NativeResponse -and ($UpdateBackend -or $UpdateNftRules -or $UpdateSupervisor -or $InstallSnort3 -or $UpdateEngine -or $MigrateLogs -or $RemoveLegacySuricata -or $ClearNativeLogs -or $ReleasePackage -or $ReuseUiPackage)) { throw '-NativeResponse is a standalone adapter build or activation' }
+if ($NativeResponse -and ($UpdateBackend -or $UpdateNftRules -or $UpdateSupervisor -or $InstallSnort3 -or $UpdateEngine -or $ReleasePackage -or $ReuseUiPackage)) { throw '-NativeResponse is a standalone adapter build or activation' }
 if ($NativeResponsePackage -and -not $NativeResponse) { throw '-NativeResponsePackage requires -NativeResponse' }
 if ($NativeResponse -and -not $BuildOnly -and -not (Test-Path -LiteralPath $NativeResponsePackage)) { throw '-NativeResponse activation requires an existing -NativeResponsePackage' }
 if ($BuildOnly -and -not $OutputDirectory) { throw '-BuildOnly requires -OutputDirectory outside the source directory' }
 if (($PostgreSQL -or $ResetEventData) -and (-not $UpdateBackend -or $BuildOnly -or $InstallSnort3 -or $UpdateEngine)) { throw '-PostgreSQL and -ResetEventData require a separate -UpdateBackend deployment' }
 if ($ResetEventData -and -not $PostgreSQL) { throw '-ResetEventData requires -PostgreSQL' }
 if ($ConsoleOnly -and (-not $UpdateBackend -or $BuildOnly -or $InstallSnort3 -or $UpdateEngine)) { throw '-ConsoleOnly requires a separate -UpdateBackend deployment' }
-if ($WithSqliteRuntime -and (-not $WslBuild -or -not $BuildOnly -or $NativeResponse)) { throw '-WithSqliteRuntime requires -WslBuild -BuildOnly for a console release' }
 if ($InstallSnort3 -and (-not $UpdateBackend -or $BuildOnly -or -not $EnginePackage)) { throw '-InstallSnort3 requires -UpdateBackend and -EnginePackage and cannot be used with -BuildOnly' }
 if ($InstallSnort3 -and -not (Test-Path -LiteralPath $EnginePackage)) { throw 'Engine package is missing' }
 if ($UpdateEngine -and ($InstallSnort3 -or -not $UpdateBackend -or $BuildOnly -or -not (Test-Path -LiteralPath $EnginePackage))) { throw '-UpdateEngine requires -UpdateBackend and an existing -EnginePackage, and cannot be combined with initial activation or BuildOnly' }
-if ($MigrateLogs -and (-not $UpdateBackend -or $BuildOnly -or $UpdateEngine)) { throw '-MigrateLogs requires -UpdateBackend and cannot be combined with BuildOnly or UpdateEngine' }
-if ($RemoveLegacySuricata -and (-not $UpdateBackend -or $BuildOnly -or $UpdateEngine -or $InstallSnort3)) { throw '-RemoveLegacySuricata requires -UpdateBackend after native activation, without an engine upgrade' }
-if ($ClearNativeLogs -and (-not $UpdateBackend -or $BuildOnly -or $UpdateEngine -or $InstallSnort3)) { throw '-ClearNativeLogs requires -UpdateBackend after native activation, without an engine upgrade' }
-if ($ClearEventStream -and -not $ClearNativeLogs) { throw '-ClearEventStream requires -ClearNativeLogs and explicit authorization to clear the full raw stream' }
 if ($QuicInterface -and (-not $UpdateBackend -or $BuildOnly -or $QuicInterface -notmatch '^[a-zA-Z0-9_.:-]{1,15}$')) { throw '-QuicInterface requires -UpdateBackend and a valid capture interface name' }
 if ($SessionLoggerDirectory -and (-not $UpdateBackend -or $BuildOnly -or -not (Test-Path -LiteralPath $SessionLoggerDirectory -PathType Container))) { throw '-SessionLoggerDirectory requires -UpdateBackend and a compiled extension directory' }
 if ($ReleasePackage -and ($BuildOnly -or -not (Test-Path -LiteralPath $ReleasePackage))) { throw '-ReleasePackage requires an existing release and cannot be combined with -BuildOnly' }
@@ -161,8 +151,7 @@ try {
             if ($LASTEXITCODE -ne 0) { throw 'Reusable UI path conversion failed' }
             $reuseArguments = @('--reuse-ui-package',$linuxUiPackage)
         }
-        $sqliteArguments = @(if ($WithSqliteRuntime) { '--with-sqlite-runtime' })
-        $result = & wsl -d Debian --cd $PSScriptRoot -- python3 -B package.py --output $linuxDestination @reuseArguments @sqliteArguments
+        $result = & wsl -d Debian --cd $PSScriptRoot -- python3 -B package.py --output $linuxDestination @reuseArguments
         $buildExit = $LASTEXITCODE
         if ($buildExit -eq 0) { $result[0] = (& wsl -d Debian -- wslpath -w $result[0]).Trim() }
     } else {
@@ -221,9 +210,6 @@ try {
         $backendStep = "sha256sum -c '$engineFileName.sha256' && python3 snort-ndr/$engineDeployer --release snort-ndr --engine-package '$engineFileName'$engineExtension && "
     }
     $staticStep = if ($InstallSnort3 -or $UpdateEngine) { 'true' } else { 'bash snort-ndr/deploy.sh --web-only' }
-    if ($MigrateLogs) { $backendStep = 'python3 snort-ndr/deploy-log-storage.py --release snort-ndr && ' + $backendStep }
-    if ($RemoveLegacySuricata) { $staticStep += ' && python3 snort-ndr/cleanup-legacy-suricata.py --apply' }
-    if ($ClearNativeLogs) { $staticStep += ' && python3 snort-ndr/cleanup-native-logs.py --apply'; if ($ClearEventStream) { $staticStep += ' --event-stream' } }
     if ($QuicInterface) { $staticStep += " && python3 snort-ndr/deploy-quic-observer.py --release snort-ndr --interface '$QuicInterface'" }
     if ($SessionLoggerDirectory -and -not $UpdateEngine) { $staticStep += ' && python3 snort-ndr/deploy-session-logger.py --release snort-ndr --plugin session-logger' }
     if ($UpdateSnortConfig) { $staticStep += ' && python3 -B snort-ndr/deploy-snort-config.py --release snort-ndr' }

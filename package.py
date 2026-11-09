@@ -25,12 +25,8 @@ README.md
 THIRD_PARTY_NOTICES.md
 action-override.conf
 build_frontend.py
-cleanup-legacy-suricata.py
-cleanup-native-logs.py
-cleanup-workspace.ps1
 deploy-angular.py
 deploy-backend.py
-deploy-log-storage.py
 deploy-native-backend.py
 deploy-postgresql.py
 deploy-native-response.py
@@ -97,26 +93,7 @@ suppress.lua
 test_app.js
 tests/angular-chart-tooltip.mjs
 tests/angular-go-backend.mjs
-tests/angular-group-policy.mjs
-tests/angular-history-reset.mjs
-tests/angular-hunt-suggestions.mjs
-tests/angular-local-llm.mjs
-tests/angular-native-rules.mjs
-tests/angular-navigation.mjs
-tests/angular-overview-filters.mjs
-tests/angular-pagination.mjs
-tests/angular-pointer.mjs
-tests/angular-reset.mjs
 tests/angular-rule-manager.mjs
-tests/angular-rule-performance.mjs
-tests/angular-rule-styling.mjs
-tests/angular-runtime-status.mjs
-tests/angular-smoke.mjs
-tests/angular-source-filter.mjs
-tests/angular-suppression-groups.mjs
-tests/angular-system-capacity.mjs
-tests/angular-ux.mjs
-tests/browser-smoke.mjs
 tests/check_native_response.py
 tests/check_native_session_logger.py
 tests/check_ndr_metadata.py
@@ -149,10 +126,7 @@ tests/test_deploy_nft.py
 tests/test_go_backend.py
 tests/test_go_runtime.py
 tests/test_postgresql_deploy.py
-tests/test_legacy_cleanup.py
-tests/test_log_storage.py
 tests/test_native_deploy.py
-tests/test_native_log_cleanup.py
 tests/test_native_response_deploy.py
 tests/test_public_source.py
 tests/test_session_logger_deploy.py
@@ -163,7 +137,7 @@ var-log-snort.mount'''.split()
 EXECUTABLE = {'ips-event-bridge','ips-snort-rules','snort-home-net','ips-web','ips-supervisor','ips-log-maintenance','ips-rule-manager','ips-quic-observer','ips-maintenance','recover-event-db','deploy.sh'}
 
 
-def build(output,reuse_ui=None,with_sqlite_runtime=False):
+def build(output,reuse_ui=None):
     from build_frontend import build as build_ui, source_files
     output = Path(output).resolve()
     if output.is_relative_to(ROOT):
@@ -185,9 +159,6 @@ def build(output,reuse_ui=None,with_sqlite_runtime=False):
                 raise ValueError('Reusable UI source manifest differs; run a production frontend build')
         else:
             build_ui(Path(generated))
-        if with_sqlite_runtime:
-            from build_tools.build_sqlite_runtime import build as build_sqlite
-            build_sqlite(Path(generated))
         from build_tools.go_backend import release as build_backend
         build_backend(Path(generated))
         return archive_release(output, Path(generated), source_files())
@@ -215,8 +186,6 @@ def archive_release(output, generated, sources):
                 if Path(name).name!=name or hashlib.sha256((generated/name).read_bytes()).hexdigest()!=digest:
                     raise ValueError('Native runtime manifest differs')
     backend_sources=[p.relative_to(ROOT).as_posix() for p in (ROOT/'backend').rglob('*') if p.is_file() and p.suffix in ('.go','.json','.sql','.html','.mod','.sum')]
-    if (generated/'libsqlite3-ndr.so').is_file():
-        binary_files.append('libsqlite3-ndr.so')
     names=sorted(set(FILES+backend_sources+frontend+chunks+binary_files+['index.html','app.js','ui.js','app.css','frontend-build.json','frontend-licenses.txt']))
     payloads = {}
     generated_names = {'index.html', 'app.js', 'ui.js', 'app.css', 'frontend-build.json', 'frontend-licenses.txt', *chunks, *binary_files}
@@ -253,6 +222,5 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--reuse-ui-package',type=Path)
-    parser.add_argument('--with-sqlite-runtime',action='store_true')
     args=parser.parse_args()
-    build(args.output,args.reuse_ui_package,args.with_sqlite_runtime)
+    build(args.output,args.reuse_ui_package)

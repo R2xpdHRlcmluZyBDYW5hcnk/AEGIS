@@ -1,4 +1,4 @@
-// Desktop regression with synthetic transport responses. Start serve_preview.py first.
+// Rule management checks against the local Go preview started by preview.py.
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
 import {mkdtemp,readFile,rm} from 'node:fs/promises';
@@ -133,7 +133,7 @@ try {
  pendingSources=true;
  await ruleTab('规则源');await until(`!!document.querySelector('.schedule-form')`);
  assert.equal(await evaluate(`[...document.querySelectorAll('ndr-rules button')].find(b=>b.textContent.trim()==='更新规则集 ↗').disabled`),false,'pending source selection must remain downloadable');
- assert.ok(await evaluate(`document.querySelector('ndr-rules')?.textContent.includes('应用更改只处理本地规则')`));
+ await until(`document.querySelector('ndr-rules')?.textContent.includes('“应用更改”仅使用本地规则')`);
  await set('input[name="time"]','06:23');await click('保存计划');
  await until(`!document.querySelector('.schedule-form fieldset').disabled`);
  assert.equal((await api('/api/rules/schedule')).time,'06:23');

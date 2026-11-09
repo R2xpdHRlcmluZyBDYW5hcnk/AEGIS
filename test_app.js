@@ -1,5 +1,5 @@
 'use strict';
-// Release integrity checks. Functional component coverage: tests/angular-smoke.mjs.
+// Release integrity checks. Browser coverage runs through tests/run_browser_regression.py.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const crypto = require('node:crypto');

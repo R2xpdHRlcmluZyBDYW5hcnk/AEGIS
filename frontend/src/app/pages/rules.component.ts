@@ -117,7 +117,18 @@ export class RulesComponent implements OnInit,OnDestroy {
  refreshCurrent(background=false,reuse=false):void{void this.refresh(background,this.offset,undefined,reuse);if(this.tab==='jobs')void this.pollJob();}
  tabKey(event:KeyboardEvent,index:number):void{let i=index;if(event.key==='ArrowRight')i=(i+1)%this.tabs.length;else if(event.key==='ArrowLeft')i=(i+this.tabs.length-1)%this.tabs.length;else if(event.key==='Home')i=0;else if(event.key==='End')i=this.tabs.length-1;else return;event.preventDefault();this.change(this.tabs[i].id);const buttons=(event.currentTarget as HTMLElement).parentElement?.querySelectorAll<HTMLButtonElement>('button');buttons?.[i].focus();}
  async refresh(background=false,offset=this.offset,query=this.tab==='catalog'?this.appliedQuery:this.membershipSearch&&ruleSignature(this.query)?this.query.trim().toLowerCase():'',reuse=false):Promise<void>{if(!this.alive||background&&this.refreshing)return;const revision=++this.revision,tab=this.tab,key=JSON.stringify([tab,offset,query]);this.pageRequest?.abort();const request=this.pageRequest=new AbortController();this.busy=!background;this.refreshing=true;if(!background&&!reuse)this.pageCache.clear();const cached=reuse?this.pageCache.get(key):undefined;if(cached&&Date.now()-cached.at<30000){this.applyPage(cached.page,tab,offset,query);this.busy=false;this.state.viewReady('rules');}try{
-  const page=await this.api.get('/api/rules/page',{tab:tab==='jobs'?'sources':tab,...(query?{q:query}:{}),...(tab==='catalog'?{limit:50,offset}:{})},request.signal);if(revision!==this.revision)return;this.applyPage(page,tab,offset,query);if(revision!==this.revision)return;if(this.pageCache.size>=12)this.pageCache.delete(this.pageCache.keys().next().value!);this.pageCache.set(key,{page,at:Date.now()});
+  const page=await this.api.get('/api/rules/page',{
+   tab:tab==='jobs'?'sources':tab,
+   ...(query?{q:query}:{}),
+   ...(tab==='catalog'?{limit:50,offset}:{}),
+  },request.signal);
+  if(revision!==this.revision)return;
+  this.applyPage(page,tab,offset,query);
+  if(revision!==this.revision)return;
+  // The editable form needs the current schedule even when cached rows render first.
+  if(tab==='sources'&&!this.schedule)this.schedule=page.schedule;
+  if(this.pageCache.size>=12)this.pageCache.delete(this.pageCache.keys().next().value!);
+  this.pageCache.set(key,{page,at:Date.now()});
  }catch(e:any){if(revision===this.revision&&e.name!=='AbortError')this.error='刷新失败，保留最近数据：'+e.message;}finally{if(revision===this.revision){this.pageRequest=undefined;this.busy=false;this.refreshing=false;this.state.viewReady('rules');}}}
  private applyPage(page:any,tab:string,offset:number,query:string):void{const {summary,governance:gov,data}=page;this.summary=summary;this.gov=gov;this.error='';
   if(page.schedule){this.scheduledJob=page.schedule.last_run;this.lastScheduledStart=page.schedule.last_started_local;}
@@ -131,7 +142,7 @@ export class RulesComponent implements OnInit,OnDestroy {
   if(tab==='disable')rows=(gov.disable||[]).map((r:any)=>this.governanceRow(r,r.value));
   if(tab==='suppress')rows=[...(gov.suppress_groups||[]).map((r:any)=>({...this.governanceRow(r,r.selector),group_policy:true,status:'整组策略',memberCount:r.total})),...(gov.suppress||[]).map((r:any)=>({...this.governanceRow(r,'sid:'+(r.gid&&r.gid!==1?r.gid+':':'')+r.sid),_key:(r.gid&&r.gid!==1?r.gid+':':'')+r.sid,memberCount:1,status:r.pending?'待规则启用':summary?.rule_manager&&summary?.reload?.state==='running'?'待应用确认':summary?.reload?.ok===false?'应用失败':'已配置'}))];
   if(tab==='action'){const seen=new Set<string>();for(const r of gov.drop||[]){seen.add(canonical(r.value));rows.push({...this.governanceRow(r,r.value),source:'drop',action:r.reject?'reject':'drop'});}for(const r of gov.action||[]){if(!seen.has(canonical(r.selector)))rows.push({...this.governanceRow(r,r.selector),source:'action'});}}
-  this.rows=rows;this.appliedQuery=query;this.matching=new Set(data.matching||[]);if(tab==='sources'&&!this.schedule)this.schedule=page.schedule;
+  this.rows=rows;this.appliedQuery=query;this.matching=new Set(data.matching||[]);
  }
  governanceRow(row:any,value:string):any{const token=canonical(value),[type,...parts]=token.split(':'),id=ruleSignature(token);return {...row,_key:token,value:token,signature:id?id.gid+':'+id.sid:'',typeLabel:({sid:'SID',group:'规则分组','group-source':'规则分组',msg:'消息',re:'正则'} as any)[type]||type,target:type==='group-source'?groupTarget(token):parts.join(':'),targetName:type==='group-source'?decodeURIComponent(parts.slice(1).join(':')):parts.join(':'),targetSource:type==='group-source'?decodeURIComponent(parts[0]):''};}
  selectionSeeds():any[]{if(this.tab==='catalog')return [...this.selected].map(k=>({value:k,label:this.catalogRows.get(k)?.msg||k,source:this.catalogRows.get(k)?.source||''}));return this.rows.filter(r=>this.selected.has(r._key)).map(r=>({value:r.selector||groupSelector(r.name,r.source),label:r.name,source:r.source}));}

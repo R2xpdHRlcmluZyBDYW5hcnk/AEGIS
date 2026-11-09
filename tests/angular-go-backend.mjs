@@ -1,5 +1,5 @@
 import {testOutput} from './test-output.mjs';
-// Dependency-free Chrome DevTools smoke test. Start serve_preview.py first.
+// Browser workflow checks launched by tests/run_browser_regression.py.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { mkdtemp, readFile, writeFile, mkdir, rm } from 'node:fs/promises';

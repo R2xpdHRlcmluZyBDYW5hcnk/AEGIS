@@ -141,8 +141,8 @@ SSH 用户需能执行目标端管理操作；每次部署显式指定目标：
 
 已有包可通过 `-ReleasePackage <归档>` 部署。资源覆盖与迁移选项均需满足对应脚本的前置条件。上传暂存使用磁盘 `/var/lib/ips-deploy`，备份位于 `/var/backups/ips-*`，不使用运行机内存盘保存大型文件。回滚入口以该次部署输出为准，确认新版本健康后再管理备份。
 
-## 可选 ARM64 工具与历史迁移
+## 可选引擎工具
 
-`build_tools/build-snort3-arm64.sh`、`setup_wsl.py` 与引擎打包器只覆盖清单声明的 Debian ARM64 ABI，见 [引擎说明](docs/snort3-engine.md)。它们不要求面板用户使用 WSL，也不证明其他平台兼容。
+引擎构建和打包入口见 [引擎说明](docs/snort3-engine.md)。
 
-`-InstallSnort3`、`-UpdateEngine`、日志迁移和旧引擎清理脚本服务于符合前置检查的历史布局，可能重启检测或移动文件，不属于通用首次安装或日常静态更新步骤。
+`-InstallSnort3` 和 `-UpdateEngine` 用于激活和更新检测引擎，可能重启检测。旧布局的日志迁移和 Suricata 清理入口已从当前发布包移除。已有迁移的回滚使用原备份内的入口。

@@ -23,7 +23,7 @@
 
 ## 控制台运行库与写入保护
 
-ARM64 发布包可使用 `deploy.ps1 -WslBuild -BuildOnly -WithSqliteRuntime -OutputDirectory <源码外目录>`，复用 `README-deploy.md` 中的 Debian ARM64 交叉构建环境，自动获取并核对固定 SQLite 源码。`deploy.ps1 -UpdateBackend -ReleasePackage <发布包> -Target <SSH 目标>` 在独立服务布局安装专用 SQLite 动态库。发布前校验库能由 Python 载入，启动后从 `/healthz` 核对版本。控制台单独加载此库，其他服务和系统 SQLite 继续使用系统包。源码树只保留构建逻辑。SQLite 交付代码采用公共领域授权，见[上游声明](https://www.sqlite.org/copyright.html)。
+当前控制台和离线恢复工具将核定的 SQLite 编译进 Go 程序。部署通过 `/healthz` 核对运行版本。以下写入保护说明适用于仍使用 SQLite 的事件库。
 
 原始事件库采用 WAL 和 `synchronous=FULL`，提交时同步 WAL。写入失败先保留待提交批次，回滚失败时停止继续写入。容量回收按已用页计算，空闲页和 WAL 暂时占用不作为删除现有记录的依据。回收使用有界增量清理与 PASSIVE 检查点。新空库在建表前启用增量回收。
 

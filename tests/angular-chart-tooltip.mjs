@@ -1,4 +1,4 @@
-// Dependency-free Chrome DevTools smoke test. Start serve_preview.py first.
+// Chart interaction checks against the local Go preview started by preview.py.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { mkdtemp, readFile, writeFile, mkdir, rm } from 'node:fs/promises';
@@ -53,7 +53,7 @@ try {
   }
   await cdp('Runtime.enable');await cdp('Page.enable');
   await cdp('Emulation.setDeviceMetricsOverride',{width:1440,height:1100,deviceScaleFactor:1,mobile:false});
-  await cdp('Page.navigate',{url:(process.env.NDR_PREVIEW_URL||'http://127.0.0.1:19094')+'/login'});await until(`!!document.querySelector('#password')`);
+  await cdp('Page.navigate',{url:(process.env.NDR_PREVIEW_URL||'http://127.0.0.1:19090')+'/login'});await until(`!!document.querySelector('#password')`);
   await evaluate(`document.querySelector('#password').value='preview-only';document.querySelector('form').submit()`);await until(`!!document.querySelector('ndr-chart')`);
   async function pointerClick(selector){
     await pause(350);const point=await evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(selector)});if(!e)throw new Error('Missing '+${JSON.stringify(selector)});e.scrollIntoView({block:'center',inline:'center'});const r=e.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}})()`);
