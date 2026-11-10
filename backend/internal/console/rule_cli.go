@@ -14,7 +14,7 @@ import (
 
 func PrepareRuleCLI(ctx context.Context, test bool, candidate string) error {
 	if os.Geteuid() != 0 {
-		return errors.New("规则维护需要 root 权限")
+		return errors.New("签名维护需要 root 权限")
 	}
 	pool := NewPool(WorkerCount())
 	defer pool.Close()
@@ -56,12 +56,12 @@ func RunRuleCLI(ctx context.Context, args []string) error {
 		}
 	}
 	flags := flag.NewFlagSet("rules", flag.ContinueOnError)
-	data := flags.String("data-dir", "/var/lib/snort", "规则目录")
+	data := flags.String("data-dir", "/var/lib/snort", "签名目录")
 	config := flags.String("config", "/etc/snort/rule-update.conf", "更新配置")
 	offline := flags.Bool("offline", false, "使用已校验缓存")
-	sources := flags.String("sources-dir", "", "规则来源目录")
-	downloadOnly := flags.Bool("download-only", false, "仅下载规则来源")
-	flags.Bool("no-reload", false, "兼容参数，由规则管理器执行校验与重载")
+	sources := flags.String("sources-dir", "", "签名来源目录")
+	downloadOnly := flags.Bool("download-only", false, "仅下载签名来源")
+	flags.Bool("no-reload", false, "兼容参数，由签名管理器执行校验与重载")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -113,7 +113,7 @@ func RunRuleCLI(ctx context.Context, args []string) error {
 		return setSourceEnabled(p.Sources, source, command == "enable-source", readSettings(*config))
 	case "update":
 		if os.Geteuid() != 0 {
-			return errors.New("规则更新需要 root 权限")
+			return errors.New("签名更新需要 root 权限")
 		}
 		guard, err := lockConfiguration(ctx, p.Config)
 		if err != nil {
@@ -124,6 +124,6 @@ func RunRuleCLI(ctx context.Context, args []string) error {
 		defer pool.Close()
 		return UpdateRules(ctx, p, *offline, *sources, *downloadOnly, pool, func(s string) { fmt.Println(s) })
 	default:
-		return errors.New("不支持的规则更新命令")
+		return errors.New("不支持的签名更新命令")
 	}
 }

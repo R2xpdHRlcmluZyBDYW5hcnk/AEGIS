@@ -28,9 +28,9 @@ Go 1.27.3 工具链与标准库使用 BSD-3-Clause；`github.com/mattn/go-sqlite
 
 构建器从 `build_tools/attack-sources.json` 固定提交获取并验证数据。完整数据集和生成目录不提交；对应版权与许可原文附入 `frontend-licenses.txt`。数据许可独立于面板 MIT，见 [固定提交 LICENSE](https://github.com/mitre-attack/attack-stix-data/blob/c2494b29dd268c46a5d0ea0990553e4327cd2253/LICENSE.txt)。
 
-## 外部更新器与规则
+## 外部更新器与签名
 
-PulledPork3 的外部安装与仓库保持独立。本仓库的 Go 规则更新器依据 Snort 归档、策略和下载接口独立实现兼容功能，不包含或执行 PulledPork3 源码、补丁或二进制。第三方规则按来源许可及账户权限获取，不随仓库分发。Snort、Cisco、Talos、MITRE 等名称仅用于说明来源和兼容性，不表示官方关联或认可。
+PulledPork3 的外部安装与仓库保持独立。本仓库的 Go 签名更新器依据 Snort 归档、策略和下载接口独立实现兼容功能，不包含或执行 PulledPork3 源码、补丁或二进制。第三方签名按来源许可及账户权限获取，不随仓库分发。Snort、Cisco、Talos、MITRE 等名称仅用于说明来源和兼容性，不表示官方关联或认可。
 
 
 ## PostgreSQL 事件存储

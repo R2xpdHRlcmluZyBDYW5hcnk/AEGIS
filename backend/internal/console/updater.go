@@ -63,13 +63,13 @@ func rulesArchive(files map[string][]byte) ([]byte, error) {
 func validCustomText(data []byte) ([]byte, error) {
 	data = bytes.TrimPrefix(data, []byte{0xef, 0xbb, 0xbf})
 	if !utf8.Valid(data) {
-		return nil, errors.New("规则文本必须是 UTF-8")
+		return nil, errors.New("签名文本必须是 UTF-8")
 	}
 	s := strings.ReplaceAll(strings.ReplaceAll(string(data), "\\\r\n", ""), "\\\n", "")
 	for _, line := range strings.Split(s, "\n") {
 		v := strings.TrimSpace(line)
 		if v != "" && !strings.HasPrefix(v, "#") && !ruleAction.MatchString(v) {
-			return nil, errors.New("自定义源只接受 Snort 文本规则，不支持配置指令")
+			return nil, errors.New("自定义源只接受 Snort 文本签名，不支持配置指令")
 		}
 	}
 	return data, nil
@@ -103,16 +103,16 @@ func customRuleFiles(filename string) (map[string][]byte, error) {
 			unsafe = unsafe || p == ".."
 		}
 		if unsafe || (entry.Typeflag != tar.TypeReg && entry.Typeflag != tar.TypeDir) || entry.Size < 0 {
-			return nil, errors.New("自定义规则归档包含不安全成员")
+			return nil, errors.New("自定义签名归档包含不安全成员")
 		}
 		total += entry.Size
 		if count > 10000 || total > 64<<20 {
-			return nil, errors.New("自定义规则归档超过限制")
+			return nil, errors.New("自定义签名归档超过限制")
 		}
 		if entry.Typeflag == tar.TypeReg && strings.HasSuffix(entry.Name, ".rules") {
 			name := path.Clean(entry.Name)
 			if _, ok := files[name]; ok {
-				return nil, errors.New("归档包含重复规则文件")
+				return nil, errors.New("归档包含重复签名文件")
 			}
 			data, e := io.ReadAll(io.LimitReader(reader, entry.Size+1))
 			if e != nil {
@@ -126,7 +126,7 @@ func customRuleFiles(filename string) (map[string][]byte, error) {
 		}
 	}
 	if len(files) == 0 {
-		return nil, errors.New("自定义归档中没有规则文件")
+		return nil, errors.New("自定义归档中没有签名文件")
 	}
 	return files, nil
 }
@@ -219,7 +219,7 @@ func applyRulePolicy(ctx context.Context, raw string, p rulePaths, groups map[st
 			continue
 		}
 		if action != "drop" && action != "block" && action != "reject" {
-			return "", errors.New("规则动作配置无效")
+			return "", errors.New("签名动作配置无效")
 		}
 		overrides = append(overrides, Object{"action": action, "selector": selector})
 	}
@@ -287,7 +287,7 @@ func applyRulePolicy(ctx context.Context, raw string, p rulePaths, groups map[st
 	return strings.Join(out, "\n"), nil
 }
 func updateRuleSource(ctx context.Context, p rulePaths, source string, settings Object, offline bool, custom Object, pool *Pool, log func(string)) (string, error) {
-	log("处理规则来源 " + source)
+	log("处理签名来源 " + source)
 	key := sourceKey(source)
 	archive, receipt := filepath.Join(p.Cache, key+"-rules.tar.gz"), filepath.Join(p.Cache, key+"-receipt.json")
 	base := filepath.Join(p.Cache, "derived", key+".rules")
@@ -309,15 +309,15 @@ func updateRuleSource(ctx context.Context, p rulePaths, source string, settings 
 	if offline || custom != nil {
 		var saved Object
 		if err := readJSON(receipt, &saved); err != nil {
-			return "", errors.New("规则源没有本地规则，请先更新规则集")
+			return "", errors.New("签名来源没有本地签名，请先更新签名集")
 		}
 		var err error
 		archiveDigest, err = digestFile(archive)
 		if err != nil || archiveDigest != saved["sha256"] {
-			return "", errors.New("缓存规则摘要不匹配")
+			return "", errors.New("缓存签名摘要不匹配")
 		}
 		if custom != nil && saved["definition"] != definition {
-			return "", errors.New("自定义源配置已变化，请在线更新规则")
+			return "", errors.New("自定义源配置已变化，请在线更新签名")
 		}
 		if offline {
 			var derived Object
@@ -347,7 +347,7 @@ func updateRuleSource(ctx context.Context, p rulePaths, source string, settings 
 	defer os.RemoveAll(work)
 	original := archive
 	if !offline && custom == nil {
-		log("下载并校验官方规则 " + source)
+		log("下载并校验官方签名 " + source)
 		data, err := downloadOfficialRules(ctx, source, settings, func(ctx context.Context, address string, limit int64) ([]byte, error) {
 			return fetchDownload(ctx, address, limit, "", true)
 		})
@@ -379,7 +379,7 @@ func updateRuleSource(ctx context.Context, p rulePaths, source string, settings 
 		active = active || ruleAction.MatchString(line)
 	}
 	if !active {
-		return "", errors.New("规则候选没有可用的文本规则")
+		return "", errors.New("候选集中没有可用的文本签名")
 	}
 	rendered, err := applyRulePolicy(ctx, string(raw), p, groups, source, pool)
 	if err != nil {
@@ -410,7 +410,7 @@ func updateRuleSource(ctx context.Context, p rulePaths, source string, settings 
 	if err = writeJSON(metadata, Object{"recipe": recipe, "archive": archiveDigest, "candidate": hex.EncodeToString(hash[:]), "groups": groups}); err != nil {
 		return "", err
 	}
-	log("规则候选已生成 " + source)
+	log("候选签名已生成 " + source)
 	return rendered, nil
 }
 func UpdateRules(ctx context.Context, p rulePaths, offline bool, sources string, downloadOnly bool, pool *Pool, log func(string)) error {
@@ -505,13 +505,13 @@ func UpdateRules(ctx context.Context, p rulePaths, offline bool, sources string,
 			}
 			r := parseRule(line, "", source, true)
 			if r == nil {
-				return errors.New("规则缺少有效签名")
+				return errors.New("签名缺少有效的 GID:SID")
 			}
 			old, exists := lines[r.ID]
 			if exists && old != line {
 				previous := owners[r.ID]
 				if priority[source] == 0 || priority[previous] == 0 {
-					return fmt.Errorf("规则源包含冲突签名 %d:%d", r.ID.GID, r.ID.SID)
+					return fmt.Errorf("签名来源包含冲突签名 %d:%d", r.ID.GID, r.ID.SID)
 				}
 				if rev(line) < rev(old) || (rev(line) == rev(old) && priority[source] <= priority[previous]) {
 					continue

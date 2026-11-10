@@ -1,6 +1,6 @@
 # Angular 前端
 
-源码在 `src/`，依赖由 `package.json` 和 `package-lock.json` 固定。Angular 管理页面、图表、表格、规则编辑和详情交互；ECharts 按需打包为本地分包。
+源码在 `src/`，依赖由 `package.json` 和 `package-lock.json` 固定。Angular 管理页面、图表、表格、签名编辑和详情交互；ECharts 按需打包为本地分包。
 
 在项目根目录运行 `python -B preview.py` 可构建临时资源并启动回环地址的合成数据预览。构建使用 `python -B build_frontend.py --output <源码树外目录>`，完整发布包通过 `deploy.ps1 -BuildOnly -OutputDirectory <源码树外目录>` 导出。部署与访问说明见 [部署文档](../README-deploy.md)。
 

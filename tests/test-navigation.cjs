@@ -23,7 +23,7 @@ const {RulesComponent}=load('frontend/src/app/pages/rules.component.ts',{'../cor
 const opened=[],rules=new RulesComponent({},state,{rule:row=>opened.push(row)});
 rules.tab='manual';rules.openRow({sid:9900200,line:'custom'});assert.equal(opened[0].line,'custom');
 rules.tab='action';rules.openRow({value:'msg:Custom*',name:'Custom',action:'reject'});assert.equal(rules.selection.selector,'msg:Custom*');
-rules.tab='suppress';rules.openRow({sid:9900200,status:'待规则启用'});assert.equal(rules.selection.selector,'sid:9900200');
+rules.tab='suppress';rules.openRow({sid:9900200,status:'待签名启用'});assert.equal(rules.selection.selector,'sid:9900200');
 rules.tab='groups';rules.openRow({name:'custom',source:'local'});assert.equal(rules.selection.selector,groupSelector('custom','local'));assert.equal(rules.selection.source,'local');
 rules.tab='bans';rules.openRow({type:'domain',value:'example.org',ips:['2001:db8::1']});
 assert.equal(rules.selection.selector,'ban:example.org');assert.ok(rules.selection.query.includes('dns: "example.org"')&&rules.selection.query.includes('src: "2001:db8::1"'));

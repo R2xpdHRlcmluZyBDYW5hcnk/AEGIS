@@ -16,7 +16,7 @@ import (
 	"unicode/utf16"
 )
 
-var officialSources = map[string][3]string{"snort/community": {"Community", "Snort Community text rules", "GPLv2"}, "snort/registered": {"Registered 免费注册", "免费注册规则集，需 Snort Oinkcode", "Snort rules license"}, "snort/lightspd": {"LightSPD", "Talos LightSPD text rules", "Snort rules license"}}
+var officialSources = map[string][3]string{"snort/community": {"Community", "Snort Community 文本签名", "GPLv2"}, "snort/registered": {"Registered 免费注册", "免费注册签名集，需 Snort Oinkcode", "Snort rules license"}, "snort/lightspd": {"LightSPD", "Talos LightSPD 文本签名", "Snort rules license"}}
 var customNamePattern = regexp.MustCompile(`^custom/[a-z0-9][a-z0-9_-]{0,63}$`)
 var oinkPattern = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
 var sourceVersion = regexp.MustCompile(`^(?:auto|3\.[0-9]+\.[0-9]+\.[0-9]+)$`)
@@ -102,7 +102,7 @@ func sourceCredentials(directory string, fallback Object) (Object, error) {
 		err = nil
 	}
 	if err != nil {
-		return nil, errors.New("规则源凭据配置无效")
+		return nil, errors.New("签名来源凭据配置无效")
 	}
 	return value, nil
 }
@@ -144,7 +144,7 @@ func publicSources(directory string, fallback Object) (Object, error) {
 		if err != nil {
 			return nil, errors.New("自定义源地址无效")
 		}
-		rows = append(rows, Object{"name": name, "vendor": item["label"], "summary": "自定义 Snort 3 文本规则", "license": "由规则提供方授权", "custom": true, "enabled": item["enabled"], "format": item["format"], "download_host": parsed.Host, "credential_configured": text(item["token"]) != "", "requires_code": false})
+		rows = append(rows, Object{"name": name, "vendor": item["label"], "summary": "自定义 Snort 3 文本签名", "license": "由签名提供方授权", "custom": true, "enabled": item["enabled"], "format": item["format"], "download_host": parsed.Host, "credential_configured": text(item["token"]) != "", "requires_code": false})
 	}
 	return Object{"sources": rows, "error": ""}, nil
 }
@@ -176,7 +176,7 @@ func configureSource(directory string, value, fallback Object) error {
 		}
 		version := text(get(value, "registered_version", get(current, "registered_version", "auto")))
 		if !sourceVersion.MatchString(version) {
-			return errors.New("Registered 规则快照版本无效")
+			return errors.New("Registered 签名快照版本无效")
 		}
 		current["registered_version"] = version
 		policy := text(get(value, "ips_policy", get(current, "ips_policy", get(fallback, "ips_policy", "balanced"))))
@@ -202,7 +202,7 @@ func configureSource(directory string, value, fallback Object) error {
 	}
 	label := strings.TrimSpace(text(get(value, "label", get(current, "label", name))))
 	if len([]rune(label)) < 1 || len([]rune(label)) > 100 {
-		return errors.New("规则源名称需要 1 至 100 字")
+		return errors.New("签名来源名称需要 1 至 100 字")
 	}
 	address := text(present(value["url"], current["url"]))
 	parsed, err := url.Parse(address)

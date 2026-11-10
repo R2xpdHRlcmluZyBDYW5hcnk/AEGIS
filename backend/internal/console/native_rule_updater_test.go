@@ -189,7 +189,7 @@ func TestNativeLightSPDRebuildsLegacyDerivedCacheOffline(t *testing.T) {
 	built := 0
 	for range 2 {
 		output, err := updateRuleSource(t.Context(), m.live, source, Object{}, true, nil, m.pool, func(line string) {
-			if strings.HasPrefix(line, "规则候选已生成") {
+			if strings.HasPrefix(line, "候选签名已生成") {
 				built++
 			}
 		})

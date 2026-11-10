@@ -18,7 +18,7 @@ const rpcResponseLimit = 16 << 20
 
 func (a *App) Manager(ctx context.Context, operation string, params Object) (any, error) {
 	if a.Config.ManagerSocket == "" {
-		return nil, errors.New("独立规则管理器未配置")
+		return nil, errors.New("独立签名管理器未配置")
 	}
 	return managerRequest(ctx, a.Config.ManagerSocket, operation, params)
 }
@@ -30,12 +30,12 @@ func managerRequest(ctx context.Context, path, operation string, params Object) 
 		return nil, err
 	}
 	if len(data)+1 > rpcRequestLimit {
-		return nil, errors.New("规则管理请求过大")
+		return nil, errors.New("签名管理请求过大")
 	}
 	dialer := net.Dialer{Timeout: 3 * time.Second}
 	conn, err := dialer.DialContext(ctx, "unix", path)
 	if err != nil {
-		return nil, errors.New("规则管理器暂不可用")
+		return nil, errors.New("签名管理器暂不可用")
 	}
 	defer conn.Close()
 	done := make(chan struct{})
@@ -49,19 +49,19 @@ func managerRequest(ctx context.Context, path, operation string, params Object) 
 	}()
 	conn.SetDeadline(time.Now().Add(70 * time.Second))
 	if _, err = conn.Write(append(data, '\n')); err != nil {
-		return nil, errors.New("规则管理连接中断")
+		return nil, errors.New("签名管理连接中断")
 	}
 	reader := bufio.NewReader(io.LimitReader(conn, rpcResponseLimit+1))
 	line, err := reader.ReadBytes('\n')
 	if err != nil || len(line) > rpcResponseLimit {
-		return nil, errors.New("规则管理响应无效")
+		return nil, errors.New("签名管理响应无效")
 	}
 	var reply Object
 	if err = decode(line, &reply); err != nil {
-		return nil, errors.New("规则管理响应无效")
+		return nil, errors.New("签名管理响应无效")
 	}
 	if reply["ok"] != true {
-		return nil, errors.New(text(get(reply, "error", "规则操作失败")))
+		return nil, errors.New(text(get(reply, "error", "签名操作失败")))
 	}
 	return reply["result"], nil
 }

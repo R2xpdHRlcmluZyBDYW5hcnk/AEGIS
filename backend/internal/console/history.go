@@ -26,7 +26,7 @@ func (m *RuleManager) StartHistoryReset(scope string) (Object, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.paused || m.jobs.Busy() {
-		return nil, errors.New("规则或维护任务正在执行")
+		return nil, errors.New("签名或维护任务正在执行")
 	}
 	if m.state != resetState {
 		return nil, errors.New("历史维护只支持独立服务布局")

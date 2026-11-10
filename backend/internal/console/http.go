@@ -596,7 +596,7 @@ func (h *HTTPHandler) metrics(w http.ResponseWriter, r *http.Request) {
 	values := []struct {
 		name, kind, help string
 		value            any
-	}{{"snort_up", "gauge", "Snort service active", active}, {"snort_rules_loaded", "gauge", "Loaded signatures", object(engine["ruleset-stats"])["rules_loaded"]}, {"snort_ips_accepted_total", "counter", "Packets accepted by Snort", ips["accepted"]}, {"snort_ips_blocked_total", "counter", "Packets blocked by Snort", ips["blocked"]}, {"snort_block_actions_total", "counter", "Rule block actions", object(ips["drop_reason"])["rules"]}, {"snort_queue_packets_total", "counter", "Packets sent to NFQUEUE", object(snapshot["queue_listeners"])["packets"]}, {"snort_throughput_pps", "gauge", "Current packet rate", object(snapshot["rates"])["pps"]}, {"snort_throughput_mbps", "gauge", "Current throughput", object(snapshot["rates"])["mbps"]}}
+	}{{"snort_up", "gauge", "Snort service active", active}, {"snort_rules_loaded", "gauge", "Loaded signatures", object(engine["ruleset-stats"])["rules_loaded"]}, {"snort_ips_accepted_total", "counter", "Packets accepted by Snort", ips["accepted"]}, {"snort_ips_blocked_total", "counter", "Packets blocked by Snort", ips["blocked"]}, {"snort_block_actions_total", "counter", "Signature-triggered block actions", object(ips["drop_reason"])["rules"]}, {"snort_queue_packets_total", "counter", "Packets sent to NFQUEUE", object(snapshot["queue_listeners"])["packets"]}, {"snort_throughput_pps", "gauge", "Current packet rate", object(snapshot["rates"])["pps"]}, {"snort_throughput_mbps", "gauge", "Current throughput", object(snapshot["rates"])["mbps"]}}
 	for _, v := range values {
 		fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s %s\n%s %g\n", v.name, v.help, v.name, v.kind, v.name, number(v.value))
 	}

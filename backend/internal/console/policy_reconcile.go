@@ -60,7 +60,7 @@ func (m *RuleManager) maybeRefreshPolicies() error {
 	signature, err := m.policyFingerprint()
 	if err != nil {
 		m.policyAfter = time.Now().Add(5 * time.Minute)
-		return errors.New("无法核对内置规则策略")
+		return errors.New("无法核对内置签名策略")
 	}
 	if signature == m.policyStamp {
 		return nil

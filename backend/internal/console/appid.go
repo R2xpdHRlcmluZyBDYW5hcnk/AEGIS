@@ -58,15 +58,15 @@ func fetchDownload(ctx context.Context, address string, maximum int64, token str
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, errors.New("规则下载失败，请检查网络和授权")
+		return nil, errors.New("下载失败，请检查网络和授权")
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 || resp.ContentLength > maximum {
-		return nil, errors.New("规则下载失败或响应超过限制")
+		return nil, errors.New("下载失败或响应超过限制")
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maximum+1))
 	if err != nil || int64(len(data)) > maximum {
-		return nil, errors.New("规则下载失败或响应超过限制")
+		return nil, errors.New("下载失败或响应超过限制")
 	}
 	return data, nil
 }

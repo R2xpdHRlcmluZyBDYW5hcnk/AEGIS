@@ -30,17 +30,17 @@ func officialRuleURL(source string, settings Object) (string, error) {
 	case "snort/registered":
 		version := registeredSnapshot(text(settings["registered_version"]))
 		if !sourceVersion.MatchString(version) || version == "auto" {
-			return "", errors.New("Registered 规则快照无效")
+			return "", errors.New("Registered 签名快照无效")
 		}
 		address = "https://snort.org/rules/snortrules-snapshot-" + strings.ReplaceAll(version, ".", "") + ".tar.gz"
 	case "snort/lightspd":
 		address = "https://snort.org/rules/Talos_LightSPD.tar.gz"
 	default:
-		return "", errors.New("未知官方规则源")
+		return "", errors.New("未知官方签名来源")
 	}
 	if source != "snort/community" {
 		if !oinkPattern.MatchString(text(settings["oinkcode"])) {
-			return "", errors.New("此规则源需要有效 Oinkcode")
+			return "", errors.New("此签名来源需要有效 Oinkcode")
 		}
 		u, _ := url.Parse(address)
 		q := u.Query()
@@ -76,11 +76,11 @@ func downloadOfficialRules(ctx context.Context, source string, settings Object, 
 			}
 		}
 		if e1 != nil || e2 != nil {
-			return nil, errors.New("官方规则下载失败，请检查网络和授权")
+			return nil, errors.New("官方签名下载失败，请检查网络和授权")
 		}
 		expected := regexp.MustCompile(`\b[0-9a-fA-F]{32}\b`).Find(digest)
 		if len(expected) != 32 {
-			return nil, errors.New("官方规则摘要响应无效")
+			return nil, errors.New("官方签名摘要响应无效")
 		}
 		hash := md5.Sum(archive)
 		if strings.EqualFold(hex.EncodeToString(hash[:]), string(expected)) {
@@ -90,7 +90,7 @@ func downloadOfficialRules(ctx context.Context, source string, settings Object, 
 			return nil, ctx.Err()
 		}
 	}
-	return nil, errors.New("官方规则摘要与归档不一致，活动规则已保留")
+	return nil, errors.New("官方签名摘要与归档不一致，活动签名已保留")
 }
 
 func readRuleBundle(filename string) (map[string][]byte, error) {
@@ -121,21 +121,21 @@ func readRuleBundle(filename string) (map[string][]byte, error) {
 		total += entry.Size
 		name := path.Clean(entry.Name)
 		if entry.Size < 0 || entry.Size > 256<<20 || total > 512<<20 || count > 100000 || strings.HasPrefix(name, "/") || name == ".." || strings.HasPrefix(name, "../") || strings.Contains(entry.Name, "\\") || (entry.Typeflag != tar.TypeDir && entry.Typeflag != tar.TypeReg) {
-			return nil, errors.New("规则归档包含不安全成员或超过限制")
+			return nil, errors.New("签名归档包含不安全成员或超过限制")
 		}
 		if seen[name] {
-			return nil, errors.New("规则归档包含重复成员")
+			return nil, errors.New("签名归档包含重复成员")
 		}
 		seen[name] = true
 		if entry.Typeflag != tar.TypeReg || !(strings.HasSuffix(name, ".rules") || strings.HasSuffix(name, ".states") || path.Base(name) == "manifest.json") {
 			continue
 		}
 		if retained+entry.Size > 256<<20 {
-			return nil, errors.New("规则文本超过内存预算")
+			return nil, errors.New("签名文本超过内存预算")
 		}
 		data, err := io.ReadAll(io.LimitReader(reader, entry.Size+1))
 		if err != nil || int64(len(data)) != entry.Size {
-			return nil, errors.New("规则归档不完整")
+			return nil, errors.New("签名归档不完整")
 		}
 		files[name] = data
 		retained += entry.Size
@@ -256,13 +256,13 @@ func ruleBundleSelection(files map[string][]byte, source, engine, policy string)
 			root := "lightspd/" + kind
 			for _, v := range compatibleBundleVersions(files, root, engine) {
 				if _, ok := files[root+"/"+v+"/rulestates-"+policy+"-ips.states"]; !ok {
-					return nil, nil, fmt.Errorf("规则归档缺少所选 IPS 策略 (%s/%s)", root, v)
+					return nil, nil, fmt.Errorf("签名归档缺少所选 IPS 策略 (%s/%s)", root, v)
 				}
 				roots = append(roots, root+"/"+v+"/")
 			}
 		}
 		if len(roots) == 0 {
-			return nil, nil, errors.New("LightSPD 没有兼容当前引擎的文本规则")
+			return nil, nil, errors.New("LightSPD 没有兼容当前引擎的文本签名")
 		}
 		if data, ok := files["lightspd/manifest.json"]; ok {
 			var manifest Object
@@ -315,7 +315,7 @@ func ruleBundleSelection(files map[string][]byte, source, engine, policy string)
 		}
 	}
 	if len(states) == 0 {
-		return nil, nil, errors.New("规则归档缺少所选 IPS 策略")
+		return nil, nil, errors.New("签名归档缺少所选 IPS 策略")
 	}
 	return rules, states, nil
 }
@@ -364,7 +364,7 @@ func compileRuleBundle(ctx context.Context, files map[string][]byte, source, eng
 			}
 			id, state, ok := parseRulePolicyState(s)
 			if !ok {
-				return nil, nil, fmt.Errorf("规则策略行无法解析 (%s:%d)", name, lineNumber+1)
+				return nil, nil, fmt.Errorf("签名策略行无法解析 (%s:%d)", name, lineNumber+1)
 			}
 			policyIDs[id] = state
 		}
@@ -483,7 +483,7 @@ func compileRuleBundle(ctx context.Context, files map[string][]byte, source, eng
 		output.WriteByte('\n')
 	}
 	if len(rows) == 0 {
-		return nil, nil, errors.New("规则候选没有可用的文本规则")
+		return nil, nil, errors.New("候选集中没有可用的文本签名")
 	}
 	return []byte(output.String()), groupTokens(selected), nil
 }

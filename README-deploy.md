@@ -2,7 +2,7 @@
 
 ## 运行前提
 
-控制台面向 ARM64 Linux 与 systemd。HTTP、事件入库、规则管理、事件桥接、检测守护、QUIC 观察、HOME_NET 刷新、数据库恢复和本地模型接口由 Go 1.27.3 可执行文件提供。运行服务及生产维护入口不调用 Python；构建、部署和兼容性测试工具继续使用 Python。目标机不需要 Go 工具链或 Node.js；Snort 3、LibDAQ 和 Wireshark 解码器保持独立系统组件。规则更新由 AEGIS 内置 Go 实现处理，不再运行外部 PulledPork3。完整入口及资源分配见 [Go 运行服务](docs/go-runtime.md)。
+控制台面向 ARM64 Linux 与 systemd。HTTP、事件入库、签名管理、事件桥接、检测守护、QUIC 观察、HOME_NET 刷新、数据库恢复和本地模型接口由 Go 1.27.3 可执行文件提供。运行服务及生产维护入口不调用 Python；构建、部署和兼容性测试工具继续使用 Python。目标机不需要 Go 工具链或 Node.js；Snort 3、LibDAQ 和 Wireshark 解码器保持独立系统组件。签名更新由 AEGIS 内置 Go 实现处理，不再运行外部 PulledPork3。完整入口及资源分配见 [Go 运行服务](docs/go-runtime.md)。
 
 部署者需确定采集位置、检测模式、HOME_NET、日志存储和访问方式。服务模板不固定 CPU 编号，也不预设具体网卡。先完成 Snort 自身配置校验，再接入面板。
 
@@ -14,13 +14,13 @@
 .\deploy.ps1 -UpdateBackend -PostgreSQL -ResetEventData -Target root@sensor.example
 ```
 
-`-ResetEventData` 明确授权从当前事件流边界开始采集。配置、认证、规则、设备设置和容量设置保留；旧 SQLite 文件保持封存用途，不再读写或回灌。切换只重启控制台，检测、桥接和规则管理器继续运行。后续普通 `-UpdateBackend` 从已保存的数据库配置自动安装和核查数据库依赖，无需再次指定清空参数。
+`-ResetEventData` 明确授权从当前事件流边界开始采集。配置、认证、签名、设备设置和容量设置保留；旧 SQLite 文件保持封存用途，不再读写或回灌。切换只重启控制台，检测、桥接和签名管理器继续运行。后续普通 `-UpdateBackend` 从已保存的数据库配置自动安装和核查数据库依赖，无需再次指定清空参数。
 
 仅更新控制台时使用 `-UpdateBackend -ConsoleOnly`，保留事件数据、读取游标以及其他运行进程。已有 PostgreSQL 配置直接复用，控制台就绪检查仍会验证数据库连接。显式指定 `-PostgreSQL` 时执行依赖安装。
 
-规则管理器也需要更新时，使用 `-UpdateBackend -ConsoleOnly -WithRuleManager`。部署先暂停规则任务，备份并校验程序，再更新规则管理器和 Web 服务，保留事件桥接、检测引擎及数据库进程。
+签名管理器也需要更新时，使用 `-UpdateBackend -ConsoleOnly -WithRuleManager`。部署先暂停签名任务，备份并校验程序，再更新签名管理器和 Web 服务，保留事件桥接、检测引擎及数据库进程。
 
-单独激活新规则管理器前，暂停规则任务并确认空闲，检查现场 systemd 依赖。如果 `ips-web.service` 通过 `Requires` 或 `BindsTo` 依赖管理器，停止管理器也会停止控制台；应先停止控制台，重启并确认管理器就绪，再启动控制台。使用 `Client.request('ping')` 时检查返回结果的 `ready` 字段，外层 RPC 的 `ok` 已由客户端解析。完成后解除维护状态，检查控制台、事件库和检测进程身份。
+单独激活新签名管理器前，暂停签名任务并确认空闲，检查现场 systemd 依赖。如果 `ips-web.service` 通过 `Requires` 或 `BindsTo` 依赖管理器，停止管理器也会停止控制台；应先停止控制台，重启并确认管理器就绪，再启动控制台。使用 `Client.request('ping')` 时检查返回结果的 `ready` 字段，外层 RPC 的 `ok` 已由客户端解析。完成后解除维护状态，检查控制台、事件库和检测进程身份。
 
 部署器从 PGDG 安装已核定的 PostgreSQL 稳定大版本的最新稳定修订包，从 Timescale 官方仓库安装兼容的 Community 扩展。安装策略、来源及受信任签名指纹列表见 `build_tools/postgresql-sources.json`。源码和发布包不携带 GPG 公钥或 keyring；每次部署从官方 HTTPS 地址获取公钥并验证主密钥指纹，以独立 `Signed-By` 限制仓库信任。包版本更新不改变指纹要求；官方轮换签名密钥后，先核实并更新允许的指纹集合，未知密钥使安装停止，不自动放宽校验。
 
@@ -46,19 +46,19 @@ PostgreSQL 模式的部署校验检查集群、数据库和应用 schema 的身�
 
 Windows 构建的 Go 部分自动进入 WSL Debian；Linux 构建可直接运行。复用本文引擎构建环境中的 GCC 与 `aarch64-linux-gnu-gcc`，缺失的核定 Go 工具链由构建器自动下载并校验。`backend-build.json` 记录架构、Go / SQLite 版本与四个服务入口的摘要；四个入口使用同一个程序，按服务名选择职责。构建器先运行本机 Go 回归，再生成 ARM64 CGO 产物。SQLite 编译进 Go 程序，不需要额外替换目标机的系统 SQLite。
 
-已有独立布局使用 `deploy.ps1 -UpdateBackend` 切换。部署器核对 ELF 架构、摘要与运行版本，暂停规则任务，备份程序和配置，只停止并重启控制台相关服务，检查 HTTP、管理器和检测进程标识；失败恢复旧程序。既有数据库、认证、规则、设备配置与回滚备份保留。旧 Python 组件已删除，升级后备份并退役安装目录内对应模块；本地合成对照位于 `backend/internal/console/testdata`。
+已有独立布局使用 `deploy.ps1 -UpdateBackend` 切换。部署器核对 ELF 架构、摘要与运行版本，暂停签名任务，备份程序和配置，只停止并重启控制台相关服务，检查 HTTP、管理器和检测进程标识；失败恢复旧程序。既有数据库、认证、签名、设备配置与回滚备份保留。旧 Python 组件已删除，升级后备份并退役安装目录内对应模块；本地合成对照位于 `backend/internal/console/testdata`。
 
 传输后核对归档 SHA-256；解包后在包目录执行 `sha256sum --strict -c SHA256SUMS`。仅需要静态资源时可运行 `python3 -B build_frontend.py --output /var/tmp/ndr-console-static`。
 
 ## 首次接入现有 Snort
 
-以下步骤需要目标主机管理权限。路径为项目默认约定；已有安装先核对冲突并备份，不直接覆盖其配置、规则与运行数据。
+以下步骤需要目标主机管理权限。路径为项目默认约定；已有安装先核对冲突并备份，不直接覆盖其配置、签名与运行数据。
 
-1. 配置并验证 Snort 3。`snort.lua` 提供 extractor、alert_json 和本地控制接口配置模板。调整引擎 include、日志及规则路径，将 `home-net.lua` 中 HOME_NET 改为实际监控范围。也可只合并日志配置，保留已有采集服务。
+1. 配置并验证 Snort 3。`snort.lua` 提供 extractor、alert_json 和本地控制接口配置模板。调整引擎 include、日志及签名路径，将 `home-net.lua` 中 HOME_NET 改为实际监控范围。也可只合并日志配置，保留已有采集服务。
 2. 将发布包中经清单验证的九个 Go 入口安装到 `/opt/ips-console/bin`，权限为 0755；部署辅助模块 `deployment_support.py` 与 `deployment_layout.py` 权限为 0644。入口及更新顺序见 [Go 运行服务](docs/go-runtime.md)。
 3. 将生成的 `index.html`、`app.js`、`ui.js`、`app.css`、全部 `chunk-*.js`、`frontend-build.json`、`frontend-licenses.txt`，以及源码中的 `favicon.svg` 安装到 `/usr/local/share/ips-snort-web`。程序与静态目录由管理员所有，Web 用户只读。
 4. 以 root 所有、0600 权限将模板安装为 `/etc/ips-snort-web.conf`。将配置中的 static_dir 改为 `/usr/local/share/ips-snort-web`。默认监听 `127.0.0.1:9000`，没有生产密码。执行 `/opt/ips-console/bin/ips-web --gen-password`，将输出的 `password_pbkdf2` 填入配置，私下保存密码。不要提交本机配置或凭据。
-5. 创建系统组 `ips-console`，准备 `/etc/snort`、`/var/lib/snort/rules`、`/var/lib/snort/update`、`/var/log/snort`、`/var/log/ips` 与 `/run/snort`。规则模板仅用于新安装，已有规则保留。规则管理器需要配置与规则目录的写权限，事件桥接器读取 Snort 日志并写入 `/var/log/ips/events.json`。隔离 Web 只读该事件流，数据库由 systemd StateDirectory 管理。
+5. 创建系统组 `ips-console`，准备 `/etc/snort`、`/var/lib/snort/rules`、`/var/lib/snort/update`、`/var/log/snort`、`/var/log/ips` 与 `/run/snort`。签名模板仅用于新安装，已有签名保留。签名管理器需要配置与签名目录的写权限，事件桥接器读取 Snort 日志并写入 `/var/log/ips/events.json`。隔离 Web 只读该事件流，数据库由 systemd StateDirectory 管理。
 6. 生成独立布局的 systemd 单元与布局标记。下面代码在已解包的发布目录以 root 执行，只用于尚未安装控制台的主机；已有安装使用更新流程。它仅安装控制台单元，不启动或替换检测引擎。
 
 ```sh
@@ -92,7 +92,7 @@ PY
 Environment=SNORT_ENGINE_PREFIX=/opt/snort
 ```
 
-规则更新使用 AEGIS 内置 Go 实现，无需外部 PulledPork3 路径。账户源凭据继续保存在目标主机受保护的规则源配置中，不写入进程参数、源码或公共日志；已有外部更新器安装不删除、不修改。
+签名更新使用 AEGIS 内置 Go 实现，无需外部 PulledPork3 路径。账户源凭据继续保存在目标主机受保护的签名来源配置中，不写入进程参数、源码或公共日志；已有外部更新器安装不删除、不修改。
 
 连接关联采用可选的 Snort `session_id` 扩展；缺少该字段时不会推测合并不同事件。来源和边界见 [引擎说明](docs/snort3-engine.md)。
 
@@ -114,7 +114,7 @@ ssh -N -L 19000:127.0.0.1:9000 root@sensor.example
 
 打开 http://127.0.0.1:19000。共享访问需由部署者配置 TLS 反向代理、访问控制和相应 cookie 设置，再调整监听方式。预览账户只用于本地合成数据夹具。
 
-验收包括登录、事件流新记录、事件查询和服务状态；有规则管理权限时再验证草稿、候选校验及失败恢复。生产主机只做轻量健康检查，完整回归、索引和性能测试在开发机完成。
+验收包括登录、事件流新记录、事件查询和服务状态；有签名管理权限时再验证草稿、候选校验及失败恢复。生产主机只做轻量健康检查，完整回归、索引和性能测试在开发机完成。
 
 ## 长查询与缓存
 
@@ -139,9 +139,9 @@ SSH 用户需能执行目标端管理操作；每次部署显式指定目标：
 .\deploy.ps1 -Target root@sensor.example -IdentityFile "$env:USERPROFILE\.ssh\sensor_key"
 ```
 
-这些入口要求目标已按本项目布局运行，不替代首次安装。更新不改变外部更新器。部署检查已知的引擎 PID 文件；外部采集服务应使用自己的健康与进程监控。静态更新校验后原子替换；后端更新先备份和暂停规则任务，再替换程序与验证，失败恢复，保留检测进程、数据库、规则和认证。
+这些入口要求目标已按本项目布局运行，不替代首次安装。更新不改变外部更新器。部署检查已知的引擎 PID 文件；外部采集服务应使用自己的健康与进程监控。静态更新校验后原子替换；后端更新先备份和暂停签名任务，再替换程序与验证，失败恢复，保留检测进程、数据库、签名和认证。
 
-`-UpdateSnortConfig` 显式替换 `/etc/snort/snort.lua`，保留其引用的现场网段、抑制配置和规则文件。部署前应比较包装配置中的本地定制；普通更新不启用此选项。配置先备份到 `/var/backups/ips-snort-config`，用当前引擎与已安装会话扩展执行 `-T` 校验，再原子替换并热重载。确认配置代数推进和引擎进程身份不变；失败恢复旧配置并重新热重载。校验输出仅保存在受限备份目录，不输出现场配置。前后端部署与配置部署各自保留备份，配置失败不撤销已健康的控制台版本。
+`-UpdateSnortConfig` 显式替换 `/etc/snort/snort.lua`，保留其引用的现场网段、抑制配置和签名文件。部署前应比较包装配置中的本地定制；普通更新不启用此选项。配置先备份到 `/var/backups/ips-snort-config`，用当前引擎与已安装会话扩展执行 `-T` 校验，再原子替换并热重载。确认配置代数推进和引擎进程身份不变；失败恢复旧配置并重新热重载。校验输出仅保存在受限备份目录，不输出现场配置。前后端部署与配置部署各自保留备份，配置失败不撤销已健康的控制台版本。
 
 已有包可通过 `-ReleasePackage <归档>` 部署。资源覆盖与迁移选项均需满足对应脚本的前置条件。上传暂存使用磁盘 `/var/lib/ips-deploy`，备份位于 `/var/backups/ips-*`，不使用运行机内存盘保存大型文件。回滚入口以该次部署输出为准，确认新版本健康后再管理备份。
 
