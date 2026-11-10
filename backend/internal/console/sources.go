@@ -1,7 +1,6 @@
 package console
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -16,7 +15,6 @@ import (
 	"unicode/utf16"
 )
 
-var officialSources = map[string][3]string{"snort/community": {"Community", "Snort Community 文本签名", "GPLv2"}, "snort/registered": {"Registered 免费注册", "免费注册签名集，需 Snort Oinkcode", "Snort rules license"}, "snort/lightspd": {"LightSPD", "Talos LightSPD 文本签名", "Snort rules license"}}
 var customNamePattern = regexp.MustCompile(`^custom/[a-z0-9][a-z0-9_-]{0,63}$`)
 var oinkPattern = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
 var sourceVersion = regexp.MustCompile(`^(?:auto|3\.[0-9]+\.[0-9]+\.[0-9]+)$`)
@@ -29,15 +27,6 @@ func validIPSPolicy(value string) bool {
 	return false
 }
 
-func registeredSnapshot(version string) string {
-	switch version {
-	case "auto", "", "3.13.2.0":
-		return "3.13.0.0"
-	case "3.12.4.0":
-		return "3.12.0.0"
-	}
-	return version
-}
 func customPath(directory, name string) (string, error) {
 	if !customNamePattern.MatchString(name) {
 		return "", errors.New("自定义源标识只能包含小写字母、数字、下划线和短横线")
@@ -106,7 +95,12 @@ func sourceCredentials(directory string, fallback Object) (Object, error) {
 	}
 	return value, nil
 }
-func publicSources(directory string, fallback Object) (Object, error) {
+func publicSources(p rulePaths, fallback Object) (Object, error) {
+	catalog, err := p.officialSources()
+	if err != nil {
+		return nil, err
+	}
+	directory := p.Sources
 	credentials, err := sourceCredentials(directory, fallback)
 	if err != nil {
 		return nil, err
@@ -116,13 +110,13 @@ func publicSources(directory string, fallback Object) (Object, error) {
 		return nil, err
 	}
 	names := []string{}
-	for name := range officialSources {
+	for name := range catalog.sources {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	rows := []Object{}
 	for _, name := range names {
-		spec := officialSources[name]
+		spec := catalog.sources[name]
 		policy := text(get(credentials, "ips_policy", get(fallback, "ips_policy", "balanced")))
 		if !validIPSPolicy(policy) {
 			return nil, errors.New("已保存 IPS 策略无效")
@@ -131,7 +125,7 @@ func publicSources(directory string, fallback Object) (Object, error) {
 		if version == "3.12.4.0" {
 			version = "auto"
 		}
-		rows = append(rows, Object{"name": name, "vendor": spec[0], "summary": spec[1], "license": spec[2], "enabled": sourceEnabled(directory, name, custom), "custom": false, "requires_code": name != "snort/community", "credential_configured": text(credentials["oinkcode"]) != "", "registered_version": version, "effective_version": registeredSnapshot(version), "ips_policy": policy})
+		rows = append(rows, Object{"name": name, "vendor": spec.Vendor, "summary": spec.Summary, "license": spec.License, "enabled": sourceEnabled(directory, name, custom), "custom": false, "requires_code": spec.RequiresOinkcode, "credential_configured": text(credentials["oinkcode"]) != "", "registered_version": version, "effective_version": catalog.snapshot(version), "ips_policy": policy})
 	}
 	names = nil
 	for name := range custom {
@@ -148,11 +142,16 @@ func publicSources(directory string, fallback Object) (Object, error) {
 	}
 	return Object{"sources": rows, "error": ""}, nil
 }
-func configureSource(directory string, value, fallback Object) error {
+func configureSource(p rulePaths, value, fallback Object) error {
+	catalog, err := p.officialSources()
+	if err != nil {
+		return err
+	}
+	directory := p.Sources
 	name := strings.ToLower(strings.TrimSpace(text(value["name"])))
-	if _, ok := officialSources[name]; ok {
-		if name == "snort/community" {
-			return errors.New("Community 不需要注册码")
+	if spec, ok := catalog.sources[name]; ok {
+		if !spec.RequiresOinkcode {
+			return errors.New("此签名来源不需要 Oinkcode")
 		}
 		current, err := sourceCredentials(directory, fallback)
 		if err != nil {
@@ -226,15 +225,20 @@ func configureSource(directory string, value, fallback Object) error {
 	}
 	return writeJSON(path, current)
 }
-func setSourceEnabled(directory, name string, enabled bool, fallback Object) error {
-	if _, ok := officialSources[name]; ok {
+func setSourceEnabled(p rulePaths, name string, enabled bool, fallback Object) error {
+	catalog, err := p.officialSources()
+	if err != nil {
+		return err
+	}
+	directory := p.Sources
+	if spec, ok := catalog.sources[name]; ok {
 		path := filepath.Join(directory, strings.ReplaceAll(name, "/", "-")+".yaml")
 		if enabled {
 			credentials, err := sourceCredentials(directory, fallback)
 			if err != nil {
 				return err
 			}
-			if name != "snort/community" && text(credentials["oinkcode"]) == "" {
+			if spec.RequiresOinkcode && text(credentials["oinkcode"]) == "" {
 				return errors.New("请先配置 Oinkcode")
 			}
 			if err = atomicWrite(path, []byte("source: "+name+"\n"), 0600); err != nil {
@@ -285,7 +289,4 @@ func definitionDigest(item Object) string {
 	input := fmt.Sprintf(`{"format": %s, "token": %s, "url": %s}`, pythonJSONString(item["format"]), pythonJSONString(item["token"]), pythonJSONString(item["url"]))
 	digest := sha256.Sum256([]byte(input))
 	return hex.EncodeToString(digest[:])
-}
-func (a *RuleCatalog) sourceRead(ctx context.Context, params Object) (Object, error) {
-	return publicSources(a.draft.Sources, readSettings(filepath.Join(filepath.Dir(a.live.Config), "rule-update.conf")))
 }

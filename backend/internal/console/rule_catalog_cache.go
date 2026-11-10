@@ -10,7 +10,7 @@ import (
 // The compiler has already selected compatible text rules and recorded every
 // source group, including groups of disabled signatures. Reuse that bounded
 // candidate instead of decompressing LightSPD's unrelated modules for browsing.
-func cachedCatalogRules(cache, key, source string) ([]byte, map[RuleID][]string, bool) {
+func cachedCatalogRules(cache, key, source string, format ruleArchiveFormat) ([]byte, map[RuleID][]string, bool) {
 	if sourceKey(source) != key {
 		return nil, nil, false
 	}
@@ -24,7 +24,7 @@ func cachedCatalogRules(cache, key, source string) ([]byte, map[RuleID][]string,
 		return nil, nil, false
 	}
 	recipe := object(saved["recipe"])
-	if recipe["source"] != source || recipe["parser"] != nativeRuleParserVersion || receipt["source"] != source || saved["archive"] != receipt["sha256"] || len(text(saved["archive"])) != 64 {
+	if recipe["source"] != source || recipe["format"] != string(format) || recipe["parser"] != nativeRuleParserVersion || receipt["source"] != source || saved["archive"] != receipt["sha256"] || len(text(saved["archive"])) != 64 {
 		return nil, nil, false
 	}
 	raw, err := regularRead(base+".rules", 256<<20)
@@ -55,7 +55,7 @@ func cachedCatalogRules(cache, key, source string) ([]byte, map[RuleID][]string,
 	return raw, groups, len(groups) > 0
 }
 
-func catalogArchiveRules(filename, source string, paths rulePaths) (map[string][]byte, error) {
+func catalogArchiveRules(filename string, format ruleArchiveFormat, paths rulePaths) (map[string][]byte, error) {
 	files, err := readRuleBundle(filename)
 	if err != nil {
 		return nil, err
@@ -72,6 +72,6 @@ func catalogArchiveRules(filename, source string, paths rulePaths) (map[string][
 			version = value
 		}
 	}
-	rules, _, err := ruleBundleSelection(files, source, version, text(get(credentials, "ips_policy", get(settings, "ips_policy", "balanced"))))
+	rules, _, err := ruleBundleSelection(files, format, version, text(get(credentials, "ips_policy", get(settings, "ips_policy", "balanced"))))
 	return rules, err
 }

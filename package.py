@@ -86,6 +86,7 @@ package-session-engine.py
 package.py
 preview.py
 rule-update.conf
+signature-sources.json
 snort-home-net.service
 snort-home-net.timer
 snort.lua

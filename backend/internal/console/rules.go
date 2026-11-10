@@ -578,7 +578,7 @@ func (c *RuleCatalog) Load(ctx context.Context) ([]*Rule, []Object, error) {
 	}
 	sort.Strings(paths)
 	hash := sha256.New()
-	for _, path := range []string{c.live.Config, c.live.controls["DISABLE_CONF"], filepath.Join(enginePrefix(), "bin/snort")} {
+	for _, path := range []string{c.live.Config, c.live.officialSourcePath(), c.live.controls["DISABLE_CONF"], filepath.Join(enginePrefix(), "bin/snort")} {
 		if info, err := os.Stat(path); err == nil {
 			dev, ino := fileIdentity(info)
 			fmt.Fprintf(hash, "policy:%s:%d:%d:%d:%d\n", path, dev, ino, info.Size(), info.ModTime().UnixNano())
@@ -608,6 +608,7 @@ func (c *RuleCatalog) Load(ctx context.Context) ([]*Rule, []Object, error) {
 		members          map[RuleID][]string
 	}
 	jobs := []batch{}
+	var official officialCatalog
 	var identities map[string]Object
 	readJSON(filepath.Join(c.live.Cache, "sources.json"), &identities)
 	sources, _ := sourceDefinitions(c.draft.Sources)
@@ -648,15 +649,23 @@ func (c *RuleCatalog) Load(ctx context.Context) ([]*Rule, []Object, error) {
 		files := map[string][]byte{}
 		var members map[RuleID][]string
 		if archive {
+			if official.sources == nil {
+				var err error
+				official, err = c.live.officialSources()
+				if err != nil {
+					return nil, nil, err
+				}
+			}
+			format := official.archiveFormat(source)
 			key := strings.TrimSuffix(filepath.Base(path), "-rules.tar.gz")
-			if raw, groups, ok := cachedCatalogRules(c.live.Cache, key, source); ok {
+			if raw, groups, ok := cachedCatalogRules(c.live.Cache, key, source, format); ok {
 				files[filepath.Base(path)] = raw
 				members = groups
 			} else {
 				paths := c.draft
 				paths.Config = c.live.Config
 				var err error
-				files, err = catalogArchiveRules(path, source, paths)
+				files, err = catalogArchiveRules(path, format, paths)
 				if err != nil {
 					return nil, nil, err
 				}

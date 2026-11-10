@@ -286,15 +286,17 @@ func applyRulePolicy(ctx context.Context, raw string, p rulePaths, groups map[st
 	}
 	return strings.Join(out, "\n"), nil
 }
-func updateRuleSource(ctx context.Context, p rulePaths, source string, settings Object, offline bool, custom Object, pool *Pool, log func(string)) (string, error) {
+func (catalog officialCatalog) updateRuleSource(ctx context.Context, p rulePaths, source string, settings Object, offline bool, custom Object, pool *Pool, log func(string)) (string, error) {
 	log("处理签名来源 " + source)
 	key := sourceKey(source)
 	archive, receipt := filepath.Join(p.Cache, key+"-rules.tar.gz"), filepath.Join(p.Cache, key+"-receipt.json")
 	base := filepath.Join(p.Cache, "derived", key+".rules")
 	metadata := strings.TrimSuffix(base, ".rules") + ".json"
 	snapshot, definition := "", ""
-	if source == "snort/registered" {
-		snapshot = registeredSnapshot(text(settings["registered_version"]))
+	spec := catalog.sources[source]
+	format := catalog.archiveFormat(source)
+	if format == registeredArchive {
+		snapshot = catalog.snapshot(text(settings["registered_version"]))
 	}
 	if custom != nil {
 		definition = definitionDigest(custom)
@@ -304,7 +306,7 @@ func updateRuleSource(ctx context.Context, p rulePaths, source string, settings 
 			}
 		}
 	}
-	recipe := Object{"source": source, "policy": get(settings, "ips_policy", "balanced"), "snapshot": snapshot, "definition": definition, "parser": nativeRuleParserVersion}
+	recipe := Object{"source": source, "policy": get(settings, "ips_policy", "balanced"), "snapshot": snapshot, "definition": definition, "format": string(format), "parser": nativeRuleParserVersion}
 	var archiveDigest string
 	if offline || custom != nil {
 		var saved Object
@@ -348,7 +350,7 @@ func updateRuleSource(ctx context.Context, p rulePaths, source string, settings 
 	original := archive
 	if !offline && custom == nil {
 		log("下载并校验官方签名 " + source)
-		data, err := downloadOfficialRules(ctx, source, settings, func(ctx context.Context, address string, limit int64) ([]byte, error) {
+		data, err := downloadOfficialRules(ctx, spec, snapshot, text(settings["oinkcode"]), func(ctx context.Context, address string, limit int64) ([]byte, error) {
 			return fetchDownload(ctx, address, limit, "", true)
 		})
 		if err != nil {
@@ -370,7 +372,7 @@ func updateRuleSource(ctx context.Context, p rulePaths, source string, settings 
 			version = value
 		}
 	}
-	raw, groups, err := compileRuleBundle(ctx, files, source, version, text(get(settings, "ips_policy", "balanced")), pool)
+	raw, groups, err := compileRuleBundle(ctx, files, format, version, text(get(settings, "ips_policy", "balanced")), pool)
 	if err != nil {
 		return "", err
 	}
@@ -420,6 +422,10 @@ func UpdateRules(ctx context.Context, p rulePaths, offline bool, sources string,
 	if sources == "" {
 		sources = p.Sources
 	}
+	catalog, err := p.officialSources()
+	if err != nil {
+		return err
+	}
 	custom, err := sourceDefinitions(sources)
 	if err != nil {
 		return err
@@ -434,7 +440,7 @@ func UpdateRules(ctx context.Context, p rulePaths, offline bool, sources string,
 		settings[key] = value
 	}
 	selected := []string{}
-	for name := range officialSources {
+	for name := range catalog.sources {
 		if sourceEnabled(sources, name, custom) {
 			selected = append(selected, name)
 		}
@@ -466,7 +472,7 @@ func UpdateRules(ctx context.Context, p rulePaths, offline bool, sources string,
 			defer wg.Done()
 			for index := range queue {
 				source := selected[index]
-				results[index].text, results[index].err = updateRuleSource(ctx, p, source, settings, offline, custom[source], pool, log)
+				results[index].text, results[index].err = catalog.updateRuleSource(ctx, p, source, settings, offline, custom[source], pool, log)
 				if results[index].err != nil {
 					cancel()
 				}
@@ -487,7 +493,6 @@ func UpdateRules(ctx context.Context, p rulePaths, offline bool, sources string,
 	owners := map[RuleID]string{}
 	order := []RuleID{}
 	comments := []string{}
-	priority := map[string]int{"snort/community": 1, "snort/registered": 2, "snort/lightspd": 3}
 	revision := regexp.MustCompile(`\brev\s*:\s*([0-9]+)`)
 	rev := func(s string) int64 {
 		m := revision.FindStringSubmatch(s)
@@ -510,10 +515,11 @@ func UpdateRules(ctx context.Context, p rulePaths, offline bool, sources string,
 			old, exists := lines[r.ID]
 			if exists && old != line {
 				previous := owners[r.ID]
-				if priority[source] == 0 || priority[previous] == 0 {
+				priority, previousPriority := catalog.sources[source].Priority, catalog.sources[previous].Priority
+				if priority == 0 || previousPriority == 0 {
 					return fmt.Errorf("签名来源包含冲突签名 %d:%d", r.ID.GID, r.ID.SID)
 				}
-				if rev(line) < rev(old) || (rev(line) == rev(old) && priority[source] <= priority[previous]) {
+				if rev(line) < rev(old) || (rev(line) == rev(old) && priority <= previousPriority) {
 					continue
 				}
 			}

@@ -20,6 +20,8 @@
 
 签名管理器也需要更新时，使用 `-UpdateBackend -ConsoleOnly -WithRuleManager`。部署先暂停签名任务，备份并校验程序，再更新签名管理器和 Web 服务，保留事件桥接、检测引擎及数据库进程。
 
+首次安装或升级到外置签名来源配置时，部署会补齐 `/etc/snort/signature-sources.json`。已存在的文件由管理员维护，升级时保留。配置字段和校验入口见 [内置签名更新器](docs/go-runtime.md#内置签名更新器)。
+
 单独激活新签名管理器前，暂停签名任务并确认空闲，检查现场 systemd 依赖。如果 `ips-web.service` 通过 `Requires` 或 `BindsTo` 依赖管理器，停止管理器也会停止控制台；应先停止控制台，重启并确认管理器就绪，再启动控制台。使用 `Client.request('ping')` 时检查返回结果的 `ready` 字段，外层 RPC 的 `ok` 已由客户端解析。完成后解除维护状态，检查控制台、事件库和检测进程身份。
 
 部署器从 PGDG 安装已核定的 PostgreSQL 稳定大版本的最新稳定修订包，从 Timescale 官方仓库安装兼容的 Community 扩展。安装策略、来源及受信任签名指纹列表见 `build_tools/postgresql-sources.json`。源码和发布包不携带 GPG 公钥或 keyring；每次部署从官方 HTTPS 地址获取公钥并验证主密钥指纹，以独立 `Signed-By` 限制仓库信任。包版本更新不改变指纹要求；官方轮换签名密钥后，先核实并更新允许的指纹集合，未知密钥使安装停止，不自动放宽校验。

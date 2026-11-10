@@ -60,7 +60,7 @@ class PostgreSQLDeploymentTests(unittest.TestCase):
                 client=mock.Mock();client.request.return_value={'ok':True,'ready':True}
                 health=dict(backend='go',go_version='go1.27.3',sqlite_version='3.54.1',event_database='postgresql',event_db_ready=True,wal_compression='zstd',timescaledb_version='2.31.0')
                 ready=mock.Mock(side_effect=[RuntimeError('fixture activation failure'),{}] if failure else [health])
-                with mock.patch.multiple(native,CONFIG=config,BIN=installed,BACKUPS=root/'backups',PIDFILE=root/'pid',RESOURCE_ROOT=root/'units'),mock.patch.object(native,'validate_go_manifest',return_value=manifest),mock.patch.object(native,'Client',return_value=client),mock.patch.object(native.subprocess,'run',return_value=mock.Mock(returncode=0)) as run,mock.patch.object(native.subprocess,'check_output',return_value='{"archive":"aegis_history_aaaaaaaaaaaaaaaa"}') as command,mock.patch('builtins.print'):
+                with mock.patch.multiple(native,CONFIG=config,BIN=installed,BACKUPS=root/'backups',SIGNATURE_SOURCES=root/'signature-sources.json',PIDFILE=root/'pid',RESOURCE_ROOT=root/'units'),mock.patch.object(native,'validate_go_manifest',return_value=manifest),mock.patch.object(native,'Client',return_value=client),mock.patch.object(native.subprocess,'run',return_value=mock.Mock(returncode=0)) as run,mock.patch.object(native.subprocess,'check_output',return_value='{"archive":"aegis_history_aaaaaaaaaaaaaaaa"}') as command,mock.patch('builtins.print'):
                     if failure:
                         with self.assertRaisesRegex(RuntimeError,'fixture activation failure'):
                             native.apply(release,ready,{'database_url':module.DATABASE_URL},reset_event_data=True)

@@ -262,7 +262,7 @@ func TestOfficialIPSPolicyConfigurationIsSharedValidatedAndStaged(t *testing.T) 
 	m := testManager(t)
 	for _, policy := range []string{"balanced", "connectivity", "security", "max-detect"} {
 		editManager(t, m, "/api/rules/source/config", Object{"name": "snort/lightspd", "ips_policy": policy})
-		public, err := publicSources(m.drafts.paths.Sources, Object{})
+		public, err := publicSources(m.drafts.paths, Object{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -283,7 +283,7 @@ func TestOfficialIPSPolicyConfigurationIsSharedValidatedAndStaged(t *testing.T) 
 		}
 	}
 	editManager(t, m, "/api/rules/pending/discard", Object{})
-	public, err := publicSources(m.drafts.paths.Sources, Object{"ips_policy": "connectivity"})
+	public, err := publicSources(m.drafts.paths, Object{"ips_policy": "connectivity"})
 	if err != nil || m.drafts.Dirty {
 		t.Fatal("discarding policy edit failed", err)
 	}

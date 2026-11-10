@@ -34,7 +34,7 @@ func seedCatalogCandidate(t *testing.T, m *RuleManager, source string, raw []byt
 		t.Fatal(err)
 	}
 	hash := sha256.Sum256(raw)
-	if err := writeJSON(base+".json", Object{"recipe": Object{"source": source, "parser": nativeRuleParserVersion}, "archive": digest, "candidate": hex.EncodeToString(hash[:]), "groups": groups}); err != nil {
+	if err := writeJSON(base+".json", Object{"recipe": Object{"source": source, "format": string(testOfficialSources(t, m.live).archiveFormat(source)), "parser": nativeRuleParserVersion}, "archive": digest, "candidate": hex.EncodeToString(hash[:]), "groups": groups}); err != nil {
 		t.Fatal(err)
 	}
 	if err := writeJSON(filepath.Join(m.live.Cache, "sources.json"), Object{key: Object{"source": source, "enabled": true}}); err != nil {

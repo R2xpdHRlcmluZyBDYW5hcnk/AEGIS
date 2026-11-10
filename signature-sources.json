@@ -1,0 +1,39 @@
+{
+  "snapshot_aliases": {
+    "auto": "3.13.0.0",
+    "3.13.2.0": "3.13.0.0",
+    "3.12.4.0": "3.12.0.0"
+  },
+  "sources": [
+    {
+      "name": "snort/community",
+      "vendor": "Community",
+      "summary": "Snort Community 文本签名",
+      "license": "GPLv2",
+      "archive_url": "https://snort.org/downloads/community/snort3-community-rules.tar.gz",
+      "format": "text",
+      "requires_oinkcode": false,
+      "priority": 1
+    },
+    {
+      "name": "snort/registered",
+      "vendor": "Registered 免费注册",
+      "summary": "免费注册签名集，需 Snort Oinkcode",
+      "license": "Snort 签名许可",
+      "archive_url": "https://snort.org/rules/snortrules-snapshot-{snapshot}.tar.gz",
+      "format": "registered",
+      "requires_oinkcode": true,
+      "priority": 2
+    },
+    {
+      "name": "snort/lightspd",
+      "vendor": "LightSPD",
+      "summary": "Talos LightSPD 文本签名",
+      "license": "Snort 签名许可",
+      "archive_url": "https://snort.org/rules/Talos_LightSPD.tar.gz",
+      "format": "lightspd",
+      "requires_oinkcode": true,
+      "priority": 3
+    }
+  ]
+}

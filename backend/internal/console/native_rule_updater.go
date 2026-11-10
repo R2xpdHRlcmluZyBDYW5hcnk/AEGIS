@@ -18,33 +18,25 @@ import (
 	"strings"
 )
 
-const nativeRuleParserVersion = "native-go-3"
+const nativeRuleParserVersion = "native-go-4"
 
 // The native updater belongs to AEGIS. It reads published Snort archive formats
 // directly and never installs, executes or changes an external PulledPork tree.
-func officialRuleURL(source string, settings Object) (string, error) {
-	address := ""
-	switch source {
-	case "snort/community":
-		address = "https://snort.org/downloads/community/snort3-community-rules.tar.gz"
-	case "snort/registered":
-		version := registeredSnapshot(text(settings["registered_version"]))
-		if !sourceVersion.MatchString(version) || version == "auto" {
+func (s officialSource) downloadURL(snapshot, oinkcode string) (string, error) {
+	address := s.ArchiveURL
+	if s.Format == registeredArchive {
+		if !sourceVersion.MatchString(snapshot) || snapshot == "auto" {
 			return "", errors.New("Registered 签名快照无效")
 		}
-		address = "https://snort.org/rules/snortrules-snapshot-" + strings.ReplaceAll(version, ".", "") + ".tar.gz"
-	case "snort/lightspd":
-		address = "https://snort.org/rules/Talos_LightSPD.tar.gz"
-	default:
-		return "", errors.New("未知官方签名来源")
+		address = strings.Replace(address, "{snapshot}", strings.ReplaceAll(snapshot, ".", ""), 1)
 	}
-	if source != "snort/community" {
-		if !oinkPattern.MatchString(text(settings["oinkcode"])) {
+	if s.RequiresOinkcode {
+		if !oinkPattern.MatchString(oinkcode) {
 			return "", errors.New("此签名来源需要有效 Oinkcode")
 		}
 		u, _ := url.Parse(address)
 		q := u.Query()
-		q.Set("oinkcode", text(settings["oinkcode"]))
+		q.Set("oinkcode", oinkcode)
 		u.RawQuery = q.Encode()
 		address = u.String()
 	}
@@ -53,8 +45,8 @@ func officialRuleURL(source string, settings Object) (string, error) {
 
 type ruleFetcher func(context.Context, string, int64) ([]byte, error)
 
-func downloadOfficialRules(ctx context.Context, source string, settings Object, fetch ruleFetcher) ([]byte, error) {
-	address, err := officialRuleURL(source, settings)
+func downloadOfficialRules(ctx context.Context, source officialSource, snapshot, oinkcode string, fetch ruleFetcher) ([]byte, error) {
+	address, err := source.downloadURL(snapshot, oinkcode)
 	if err != nil {
 		return nil, err
 	}
@@ -242,16 +234,16 @@ func sortBundleNames(names []string) {
 	})
 }
 
-func ruleBundleSelection(files map[string][]byte, source, engine, policy string) (map[string][]byte, map[string][]byte, error) {
+func ruleBundleSelection(files map[string][]byte, format ruleArchiveFormat, engine, policy string) (map[string][]byte, map[string][]byte, error) {
 	rules, states := map[string][]byte{}, map[string][]byte{}
 	if !validIPSPolicy(policy) {
 		return nil, nil, errors.New("IPS 策略无效")
 	}
 	roots := []string{}
-	switch source {
-	case "snort/registered":
+	switch format {
+	case registeredArchive:
 		roots = []string{"rules/", "builtins/"}
-	case "snort/lightspd":
+	case lightSPDArchive:
 		for _, kind := range []string{"rules", "builtins"} {
 			root := "lightspd/" + kind
 			for _, v := range compatibleBundleVersions(files, root, engine) {
@@ -345,8 +337,8 @@ func parseRulePolicyState(line string) (RuleID, rulePolicyState, bool) {
 var ruleRevision = regexp.MustCompile(`\brev\s*:\s*([0-9]+)`)
 var flowbitOption = regexp.MustCompile(`\bflowbits\s*:\s*(set|setx|toggle|isset|isnotset)\s*,\s*([^;]+);`)
 
-func compileRuleBundle(ctx context.Context, files map[string][]byte, source, engine, policy string, pool *Pool) ([]byte, map[string][]string, error) {
-	selected, states, err := ruleBundleSelection(files, source, engine, policy)
+func compileRuleBundle(ctx context.Context, files map[string][]byte, format ruleArchiveFormat, engine, policy string, pool *Pool) ([]byte, map[string][]string, error) {
+	selected, states, err := ruleBundleSelection(files, format, engine, policy)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -387,7 +379,7 @@ func compileRuleBundle(ctx context.Context, files map[string][]byte, source, eng
 		out := []*Rule{}
 		for _, line := range strings.Split(item.text, "\n") {
 			line = strings.TrimSpace(line)
-			r := parseRule(line, strings.TrimSuffix(path.Base(item.name), ".rules"), source, true)
+			r := parseRule(line, strings.TrimSuffix(path.Base(item.name), ".rules"), "", true)
 			if r != nil {
 				out = append(out, r)
 			}

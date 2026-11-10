@@ -22,6 +22,7 @@ func testManager(t *testing.T) *RuleManager {
 	t.Helper()
 	root := t.TempDir()
 	live := liveRulePaths(root)
+	copyOfficialSources(t, live)
 	for _, p := range append([]string{live.Config, filepath.Join(live.Data, "rules/snort.rules")}, func() []string {
 		a := []string{}
 		for _, p := range live.controls {

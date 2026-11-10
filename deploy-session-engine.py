@@ -219,7 +219,9 @@ def upgrade(release,engine,plugin=None):
             programs=(*native.PROGRAMS,*(['backend-build.json'] if (release/'backend-build.json').is_file() else []))
             if (release/'maintenance-build.json').is_file():
                 programs=(*programs,*sorted(native.MAINTENANCE_PROGRAMS-set(programs)),'maintenance-build.json')
-            for path in (CONFIG,WEB_CONFIG,LAYOUT,*[PROGRAM/name for name in programs],*extension_changes):
+            source_config=CONFIG.with_name('signature-sources.json')
+            new_config_files=(source_config,) if not source_config.exists() and not source_config.is_symlink() else ()
+            for path in (CONFIG,WEB_CONFIG,LAYOUT,*[PROGRAM/name for name in programs],*extension_changes,*new_config_files):
                 if path.exists():
                     name='saved-'+str(len(state['files']));shutil.copy2(path,backup/name)
                     state['files'][str(path)]=name

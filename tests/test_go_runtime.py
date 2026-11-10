@@ -81,12 +81,13 @@ class NativeRuntimeTests(unittest.TestCase):
             manifest=native_fixture(release,module)
             for name in (*module.PROGRAMS,'backend-build.json','maintenance-build.json'):(installed/name).write_bytes((release/name).read_bytes())
             config=root/'config';config.write_text('{}')
+            source_config=root/'signature-sources.json';source_config.write_bytes((release/source_config.name).read_bytes())
             resources=[]
             for unit in module.RESOURCE_OVERRIDES:
                 path=root/'units'/(unit+'.d')/'50-ips-parallel.conf';path.parent.mkdir(parents=True);path.write_bytes(b'[Service]\nCPUQuota=250%\nCPUAffinity=2-3\n');resources.append((path,path.stat().st_mtime_ns))
             runtime=root/'units/ips-web.service.d/70-overview-snapshot.conf';runtime.write_bytes(b'[Service]\nRuntimeDirectory=ips-web-overview\nRuntimeDirectoryMode=0700\n')
             client=mock.Mock();client.request.return_value={'ok':True,'ready':True}
-            with mock.patch.multiple(module,CONFIG=config,BIN=installed,BACKUPS=root/'backups',PIDFILE=root/'pid',RESOURCE_ROOT=root/'units'),mock.patch.object(module,'validate_go_manifest',return_value=manifest),mock.patch.object(module,'Client',return_value=client),mock.patch.object(module.subprocess,'run') as run,mock.patch('builtins.print'):
+            with mock.patch.multiple(module,CONFIG=config,BIN=installed,BACKUPS=root/'backups',SIGNATURE_SOURCES=root/'signature-sources.json',PIDFILE=root/'pid',RESOURCE_ROOT=root/'units'),mock.patch.object(module,'validate_go_manifest',return_value=manifest),mock.patch.object(module,'Client',return_value=client),mock.patch.object(module.subprocess,'run') as run,mock.patch('builtins.print'):
                 module.apply(release,mock.Mock(),{})
             for path,mtime in resources:self.assertEqual(path.stat().st_mtime_ns,mtime)
             run.assert_not_called()
@@ -104,7 +105,7 @@ class NativeRuntimeTests(unittest.TestCase):
                 client=mock.Mock();client.request.return_value={'ok':True,'ready':True}
                 ready=mock.Mock(side_effect=[RuntimeError('fixture startup failure'),{}] if failure else [dict(sqlite_version='3.54.1',backend='go',go_version='go1.27.3')])
                 result=mock.Mock(returncode=0)
-                with mock.patch.multiple(module,CONFIG=config,BIN=installed,BACKUPS=root/'backups',PIDFILE=root/'pid',RESOURCE_ROOT=root/'units'),mock.patch.object(module,'Client',return_value=client),mock.patch.object(module,'validate_go_manifest',return_value=manifest),mock.patch.object(module.subprocess,'run',return_value=result) as run,mock.patch('builtins.print'):
+                with mock.patch.multiple(module,CONFIG=config,BIN=installed,BACKUPS=root/'backups',SIGNATURE_SOURCES=root/'signature-sources.json',PIDFILE=root/'pid',RESOURCE_ROOT=root/'units'),mock.patch.object(module,'Client',return_value=client),mock.patch.object(module,'validate_go_manifest',return_value=manifest),mock.patch.object(module.subprocess,'run',return_value=result) as run,mock.patch('builtins.print'):
                     if failure:
                         with self.assertRaisesRegex(RuntimeError,'fixture startup failure'):module.apply(release,ready,{})
                     else:module.apply(release,ready,{})

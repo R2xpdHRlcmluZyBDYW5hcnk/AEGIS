@@ -78,23 +78,31 @@ func RunRuleCLI(ctx context.Context, args []string) error {
 	}
 	switch command {
 	case "list-sources":
+		catalog, err := p.officialSources()
+		if err != nil {
+			return err
+		}
 		names := []string{}
-		for name := range officialSources {
+		for name := range catalog.sources {
 			names = append(names, name)
 		}
 		sort.Strings(names)
 		for _, name := range names {
-			s := officialSources[name]
-			fmt.Printf("Name: %s\nVendor: %s\nSummary: %s\nLicense: %s\n", name, s[0], s[1], s[2])
+			s := catalog.sources[name]
+			fmt.Printf("Name: %s\nVendor: %s\nSummary: %s\nLicense: %s\n", name, s.Vendor, s.Summary, s.License)
 		}
 		return nil
 	case "list-enabled-sources":
+		catalog, err := p.officialSources()
+		if err != nil {
+			return err
+		}
 		custom, err := sourceDefinitions(p.Sources)
 		if err != nil {
 			return err
 		}
 		names := []string{}
-		for name := range officialSources {
+		for name := range catalog.sources {
 			if sourceEnabled(p.Sources, name, custom) {
 				names = append(names, name)
 			}
@@ -110,7 +118,7 @@ func RunRuleCLI(ctx context.Context, args []string) error {
 		}
 		return nil
 	case "enable-source", "disable-source":
-		return setSourceEnabled(p.Sources, source, command == "enable-source", readSettings(*config))
+		return setSourceEnabled(p, source, command == "enable-source", readSettings(*config))
 	case "update":
 		if os.Geteuid() != 0 {
 			return errors.New("签名更新需要 root 权限")

@@ -35,6 +35,7 @@ func TestBrowserFixture(t *testing.T) {
 	t.Setenv("SNORT_ENGINE_PREFIX", engine)
 	fixtureBuiltinEngine(t, engine, false)
 	live := liveRulePaths(root)
+	copyOfficialSources(t, live)
 	for key, p := range live.controls {
 		data := []byte{}
 		if key == "BAN_STORE" {

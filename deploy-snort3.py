@@ -188,7 +188,7 @@ def activate(release,engine_archive):
     if LAYOUT.exists():
         raise ValueError('Native console is already installed; use a backend/static update')
     release=Path(release).resolve()
-    for name in (*PROGRAMS,*UNITS,'snort.lua','home-net.lua','suppress.lua','rule-update.conf',
+    for name in (*PROGRAMS,*UNITS,'snort.lua','home-net.lua','suppress.lua','rule-update.conf','signature-sources.json',
                  'ips-web-isolated.conf','ips-restore.conf','logrotate-snort','frontend-build.json'):
         if not (release/name).is_file(): raise ValueError('Incomplete release: '+name)
     original=json.loads(CONFIG.read_text())
@@ -284,6 +284,9 @@ def activate(release,engine_archive):
                 if link.exists() or link.is_symlink(): raise ValueError('Native AppID link differs')
                 link.symlink_to(target,target_is_directory=target.is_dir())
             entry=PROGRAM_DIR/'ips-snort-rules'
+            sources=Path('/etc/snort/signature-sources.json')
+            if not sources.exists() and not sources.is_symlink():
+                install_file(release/sources.name,sources,0o644)
             prefix=[str(entry)]
             run(*prefix,'enable-source','snort/community')
             run(*prefix,'--no-reload')

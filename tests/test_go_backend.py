@@ -28,6 +28,7 @@ def native_fixture(directory,module):
     maintenance=dict(manifest,files={name:manifest['files'][name] for name in module.MAINTENANCE_PROGRAMS})
     (directory/'backend-build.json').write_text(json.dumps(base))
     (directory/'maintenance-build.json').write_text(json.dumps(maintenance))
+    (directory/'signature-sources.json').write_bytes((ROOT/'signature-sources.json').read_bytes())
     return base
 
 
@@ -50,12 +51,15 @@ class NativeBackendTests(unittest.TestCase):
                     if failure:raise RuntimeError('unhealthy fixture')
                     return dict(sqlite_version='3.54.1',backend='go',go_version='go1.27.3')
                 ready=mock.Mock(side_effect=[RuntimeError('unhealthy fixture'),{}]) if failure else health
-                with mock.patch.multiple(module,CONFIG=config,BIN=installed,BACKUPS=root/'backups',PIDFILE=pid,RESOURCE_ROOT=root/'units'),mock.patch.object(module,'validate_go_manifest',return_value=manifest),mock.patch.object(module,'Client',return_value=client),mock.patch.object(module.subprocess,'run'),mock.patch('builtins.print'):
+                with mock.patch.multiple(module,CONFIG=config,BIN=installed,BACKUPS=root/'backups',SIGNATURE_SOURCES=root/'signature-sources.json',PIDFILE=pid,RESOURCE_ROOT=root/'units'),mock.patch.object(module,'validate_go_manifest',return_value=manifest),mock.patch.object(module,'Client',return_value=client),mock.patch.object(module.subprocess,'run'),mock.patch('builtins.print'):
                     if failure:
                         with self.assertRaisesRegex(RuntimeError,'unhealthy fixture'):module.apply(release,ready,{})
                     else:module.apply(release,ready,{})
                 self.assertEqual(retired.exists(),failure)
                 self.assertEqual(cached.exists(),failure)
+                sources=root/'signature-sources.json'
+                if failure:self.assertFalse(sources.exists())
+                else:self.assertEqual(sources.read_bytes(),(release/sources.name).read_bytes())
                 backup=next((root/'backups').iterdir())
                 self.assertEqual((backup/retired.name).read_bytes(),b'# obsolete installation fixture\n')
                 self.assertEqual((backup/'__pycache__'/cached.name).read_bytes(),b'obsolete bytecode fixture')
@@ -81,16 +85,18 @@ class NativeBackendTests(unittest.TestCase):
             for name in module.PROGRAMS:
                 (release/name).write_text('# candidate helper\n');(installed/name).write_text('# previous helper\n')
             manifest=native_fixture(release,module)
+            sources=root/'signature-sources.json';sources.write_bytes(b'{"administrator":"fixture"}')
             config=root/'config';original=b'{"password_pbkdf2":"fixture"}\n';config.write_bytes(original)
             pid=root/'pid';pid.write_text('12345')
             client=mock.Mock();client.request.return_value={'ok':True,'ready':True}
             ready=mock.Mock(side_effect=[dict(sqlite_version='3.54.1',backend='python'),dict(ok=True)])
-            with mock.patch.multiple(module,CONFIG=config,BIN=installed,BACKUPS=root/'backups',PIDFILE=pid,RESOURCE_ROOT=root/'units'), \
+            with mock.patch.multiple(module,CONFIG=config,BIN=installed,BACKUPS=root/'backups',SIGNATURE_SOURCES=root/'signature-sources.json',PIDFILE=pid,RESOURCE_ROOT=root/'units'), \
                  mock.patch.object(module,'validate_native_release',return_value=manifest), \
                  mock.patch.object(module,'validate_go_manifest',return_value=manifest),mock.patch.object(module,'Client',return_value=client),mock.patch.object(module.subprocess,'run') as run:
                 with self.assertRaisesRegex(RuntimeError,'native Go backend'):
                     module.apply(release,ready,{},console_only=True,with_rule_manager=True)
             self.assertEqual(config.read_bytes(),original)
+            self.assertEqual(sources.read_bytes(),b'{"administrator":"fixture"}')
             for name in module.PROGRAMS:self.assertEqual((installed/name).read_text(),'# previous helper\n')
             self.assertFalse((installed/'backend-build.json').exists())
             self.assertEqual(pid.read_text(),'12345')

@@ -116,7 +116,7 @@ func (m *RuleManager) Read(ctx context.Context, name string, args []any, params 
 	case "hunt_rules_list":
 		return manualRules(p), nil
 	case "app.sources_catalog":
-		return publicSources(p.Sources, readSettings(filepath.Join(filepath.Dir(m.live.Config), "rule-update.conf")))
+		return publicSources(p, readSettings(filepath.Join(filepath.Dir(m.live.Config), "rule-update.conf")))
 	case "app.rules_payload":
 		return m.rulesPayload(ctx)
 	case "rule_group_catalog", "suppression_group_catalog", "rule_groups_search":
@@ -225,7 +225,7 @@ func (m *RuleManager) Read(ctx context.Context, name string, args []any, params 
 			data = Object{"rules": manualRules(p)}
 			summary["local_rules"] = readLines(p.controls["LOCAL_RULES"])
 		case "sources":
-			data, err = publicSources(p.Sources, readSettings(filepath.Join(filepath.Dir(m.live.Config), "rule-update.conf")))
+			data, err = publicSources(p, readSettings(filepath.Join(filepath.Dir(m.live.Config), "rule-update.conf")))
 			schedule = m.scheduleStatus()
 		case "bans":
 			data = Object{"bans": loadBans(p)}
@@ -295,7 +295,7 @@ func (m *RuleManager) rulesPayload(ctx context.Context) (Object, error) {
 	if err != nil {
 		return nil, err
 	}
-	public, err := publicSources(m.drafts.paths.Sources, readSettings(filepath.Join(filepath.Dir(m.live.Config), "rule-update.conf")))
+	public, err := publicSources(m.drafts.paths, readSettings(filepath.Join(filepath.Dir(m.live.Config), "rule-update.conf")))
 	if err != nil {
 		return nil, err
 	}
@@ -606,14 +606,14 @@ func (m *RuleManager) edit(ctx context.Context, method, path string, body Object
 		return ok(), nil
 	}
 	if path == "/api/rules/source/config" {
-		return ok(), configureSource(p.Sources, body, readSettings(filepath.Join(filepath.Dir(m.live.Config), "rule-update.conf")))
+		return ok(), configureSource(p, body, readSettings(filepath.Join(filepath.Dir(m.live.Config), "rule-update.conf")))
 	}
 	if path == "/api/rules/source" {
 		enabled, valid := body["enable"].(bool)
 		if !valid {
 			return nil, errors.New("启用状态无效")
 		}
-		return ok(), setSourceEnabled(p.Sources, text(body["name"]), enabled, readSettings(filepath.Join(filepath.Dir(m.live.Config), "rule-update.conf")))
+		return ok(), setSourceEnabled(p, text(body["name"]), enabled, readSettings(filepath.Join(filepath.Dir(m.live.Config), "rule-update.conf")))
 	}
 	if path == "/api/hunt/rules" && method == "POST" {
 		line := text(body["rule"])

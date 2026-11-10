@@ -16,6 +16,9 @@ import (
 )
 
 func TestNativeOfficialDownloadVerifiesDigestRetriesAndHidesCredentials(t *testing.T) {
+	paths := liveRulePaths(t.TempDir())
+	copyOfficialSources(t, paths)
+	catalog := testOfficialSources(t, paths)
 	var calls atomic.Int32
 	fetch := func(ctx context.Context, address string, limit int64) ([]byte, error) {
 		if strings.Contains(address, ".md5") {
@@ -27,15 +30,15 @@ func TestNativeOfficialDownloadVerifiesDigestRetriesAndHidesCredentials(t *testi
 		}
 		return []byte("good"), nil
 	}
-	data, err := downloadOfficialRules(t.Context(), "snort/registered", Object{"oinkcode": strings.Repeat("a", 40), "registered_version": "auto"}, fetch)
+	data, err := downloadOfficialRules(t.Context(), catalog.sources["snort/registered"], catalog.snapshot("auto"), strings.Repeat("a", 40), fetch)
 	if err != nil || string(data) != "good" || calls.Load() != 2 {
 		t.Fatal(string(data), err, calls.Load())
 	}
-	_, err = downloadOfficialRules(t.Context(), "snort/lightspd", Object{"oinkcode": "bad"}, fetch)
+	_, err = downloadOfficialRules(t.Context(), catalog.sources["snort/lightspd"], "", "bad", fetch)
 	if err == nil || strings.Contains(err.Error(), "bad") {
 		t.Fatal("credential validation or sanitization failed", err)
 	}
-	address, err := officialRuleURL("snort/registered", Object{"oinkcode": strings.Repeat("a", 40), "registered_version": "auto"})
+	address, err := catalog.sources["snort/registered"].downloadURL(catalog.snapshot("auto"), strings.Repeat("a", 40))
 	if err != nil || !strings.Contains(address, "snapshot-31300.tar.gz?") {
 		t.Fatal(address, err)
 	}
@@ -65,7 +68,7 @@ alert tcp any any -> any any (msg:"new equal revision"; sid:14; rev:1;)
 		"lightspd/rules/3.14.0.0/new.rules":                          []byte(`alert tcp any any -> any any (msg:"future"; sid:99; rev:1;)`),
 		"lightspd/manifest.json":                                     []byte(`{"snort versions":{"3.13.0.0-0":{"policies_path":"policies/3.1.0.0-0/"}}}`),
 	}
-	raw, groups, err := compileRuleBundle(t.Context(), files, "snort/lightspd", "3.13.2.0", "balanced", pool)
+	raw, groups, err := compileRuleBundle(t.Context(), files, lightSPDArchive, "3.13.2.0", "balanced", pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +103,7 @@ alert tcp any any -> any any (msg:"new equal revision"; sid:14; rev:1;)
 		t.Fatal("user disable and action policies lost priority", err)
 	}
 	delete(files, "lightspd/rules/3.1.7.0/rulestates-balanced-ips.states")
-	if _, _, err = compileRuleBundle(t.Context(), files, "snort/lightspd", "3.13.2.0", "balanced", pool); err == nil {
+	if _, _, err = compileRuleBundle(t.Context(), files, lightSPDArchive, "3.13.2.0", "balanced", pool); err == nil {
 		t.Fatal("missing policy accepted")
 	}
 }
@@ -140,7 +143,7 @@ func TestNativePolicyErrorIdentifiesLocationWithoutPayload(t *testing.T) {
 	_, _, err := compileRuleBundle(t.Context(), map[string][]byte{
 		"rules/fixture.rules":                  []byte(`alert tcp any any -> any any (sid:1;)`),
 		"rules/rulestates-balanced-ips.states": []byte("# policy\nprivate invalid payload\n"),
-	}, "snort/registered", "3.13.2.0", "balanced", pool)
+	}, registeredArchive, "3.13.2.0", "balanced", pool)
 	if err == nil || !strings.Contains(err.Error(), "rules/rulestates-balanced-ips.states:2") || strings.Contains(err.Error(), "private") {
 		t.Fatal("missing sanitized file and line diagnostic", err)
 	}
@@ -188,7 +191,7 @@ func TestNativeLightSPDRebuildsLegacyDerivedCacheOffline(t *testing.T) {
 	}
 	built := 0
 	for range 2 {
-		output, err := updateRuleSource(t.Context(), m.live, source, Object{}, true, nil, m.pool, func(line string) {
+		output, err := testOfficialSources(t, m.live).updateRuleSource(t.Context(), m.live, source, Object{}, true, nil, m.pool, func(line string) {
 			if strings.HasPrefix(line, "候选签名已生成") {
 				built++
 			}
@@ -243,7 +246,7 @@ func TestNativeCommunityArchiveReplay(t *testing.T) {
 	}
 	pool := NewPool(WorkerCount())
 	defer pool.Close()
-	raw, groups, err := compileRuleBundle(t.Context(), files, "snort/community", "3.13.2.0", "balanced", pool)
+	raw, groups, err := compileRuleBundle(t.Context(), files, textArchive, "3.13.2.0", "balanced", pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,11 +277,11 @@ func TestNativeLightSPDArchiveReplay(t *testing.T) {
 	defer pool.Close()
 	for _, policy := range []string{"balanced", "connectivity", "security", "max-detect"} {
 		t.Run(policy, func(t *testing.T) {
-			selected, states, err := ruleBundleSelection(files, "snort/lightspd", "3.13.2.0", policy)
+			selected, states, err := ruleBundleSelection(files, lightSPDArchive, "3.13.2.0", policy)
 			if err != nil {
 				t.Fatal(err)
 			}
-			raw, groups, err := compileRuleBundle(t.Context(), files, "snort/lightspd", "3.13.2.0", policy, pool)
+			raw, groups, err := compileRuleBundle(t.Context(), files, lightSPDArchive, "3.13.2.0", policy, pool)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -361,12 +364,12 @@ func TestNativeUpdaterOfflineNeedsNoPythonAndKeepsFailedCandidateIsolated(t *tes
 	}
 	hash, _ := digestFile(file)
 	writeJSON(filepath.Join(m.live.Cache, key+"-receipt.json"), Object{"source": source, "sha256": hash, "definition": definitionDigest(item)})
-	output, err := updateRuleSource(t.Context(), m.live, source, Object{}, true, item, m.pool, func(string) {})
+	output, err := testOfficialSources(t, m.live).updateRuleSource(t.Context(), m.live, source, Object{}, true, item, m.pool, func(string) {})
 	if err != nil || strings.Contains(output, "first") || !strings.Contains(output, "newer") {
 		t.Fatal(output, err)
 	}
 	os.WriteFile(file, []byte("corrupt"), 0600)
-	if _, err = updateRuleSource(t.Context(), m.live, source, Object{}, true, item, m.pool, func(string) {}); err == nil {
+	if _, err = testOfficialSources(t, m.live).updateRuleSource(t.Context(), m.live, source, Object{}, true, item, m.pool, func(string) {}); err == nil {
 		t.Fatal("corrupt cache accepted")
 	}
 }

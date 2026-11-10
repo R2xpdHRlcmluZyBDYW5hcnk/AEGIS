@@ -24,6 +24,7 @@ WEB_PROGRAMS=frozenset(('ips-web',))
 MANAGER_PROGRAMS=frozenset(('ips-rule-manager',))
 TOOL_PROGRAMS=frozenset(('deployment_support.py','deployment_layout.py','ips-snort-rules','snort-home-net','ips-maintenance','recover-event-db','backend-build.json','maintenance-build.json'))
 PIDFILE=Path('/run/snort/snort.pid')
+SIGNATURE_SOURCES=Path('/etc/snort/signature-sources.json')
 RESOURCE_ROOT=Path('/etc/systemd/system')
 RESOURCE_OVERRIDES={
     'ips-web.service':b'[Service]\nCPUQuota=400%\n',
@@ -110,8 +111,14 @@ def apply(release,wait_ready,overrides,snapshot=None,reset_event_data=False,cons
         observer_active=subprocess.run(['systemctl','is-active','--quiet','ips-quic-observer'],capture_output=True).returncode==0
     resource_before={path:path.read_bytes() if path.exists() else None for path in resources}
     resources_changed=any(resource_before[path]!=data for path,data in resources.items())
-    if not changed and not retired and updated==config and not resources_changed and not reset_event_data and not with_rule_manager:
+    if SIGNATURE_SOURCES.is_symlink():
+        raise ValueError('Signature source configuration must be a regular file')
+    new_sources=not SIGNATURE_SOURCES.exists()
+    if not changed and not retired and updated==config and not resources_changed and not reset_event_data and not with_rule_manager and not new_sources:
         print(json.dumps({'backend_unchanged':True}));return
+    sources_dir=release if new_sources else SIGNATURE_SOURCES.parent
+    subprocess.run([str(release/'ips-snort-rules'),'list-sources','--config',str(sources_dir/'rule-update.conf')],
+                   stdout=subprocess.DEVNULL,check=True,timeout=10)
     changed_set = set(changed)
     if changed_set <= WEB_PROGRAMS | MANAGER_PROGRAMS | TOOL_PROGRAMS and not resources_changed:
         services = tuple(name for name,needed in (
@@ -150,12 +157,15 @@ def apply(release,wait_ready,overrides,snapshot=None,reset_event_data=False,cons
             if data is not None:(backup/('resource-before-'+str(index))).write_bytes(data)
         (backup/'resources.json').write_text(json.dumps({str(path):'resource-before-'+str(index) if data is not None else None
             for index,(path,data) in enumerate(resource_before.items())},indent=2)+'\n')
-        def install(source,target,mode):
+        def install(source,target,mode,*,create=False):
             temporary=target.with_name(target.name+'.ips-new')
             try:
-                shutil.copy2(source,temporary);os.chmod(temporary,mode);temporary.replace(target)
+                shutil.copy2(source,temporary);os.chmod(temporary,mode)
+                if create:os.link(temporary,target)
+                else:temporary.replace(target)
             finally:
                 temporary.unlink(missing_ok=True)
+        sources_installed=False
         try:
             if services:subprocess.run(['systemctl','stop',*services],check=True)
             if CONFIG.read_bytes()!=original:
@@ -168,6 +178,9 @@ def apply(release,wait_ready,overrides,snapshot=None,reset_event_data=False,cons
                 output=subprocess.check_output([str(release/'ips-maintenance'),'postgresql-reset',
                     '--database-url',updated['database_url'],'--stream',stream],text=True)
                 database_archive=json.loads(output)['archive']
+            if new_sources:
+                install(release/SIGNATURE_SOURCES.name,SIGNATURE_SOURCES,0o644,create=True)
+                sources_installed=True
             for name in changed:
                 install(release/name,BIN/name,0o644 if name.endswith(('.py','.zip','.so','.json')) else 0o755)
             if resources_changed:
@@ -224,6 +237,7 @@ def apply(release,wait_ready,overrides,snapshot=None,reset_event_data=False,cons
             for name in changed:
                 if (backup/name).exists(): install(backup/name,BIN/name,0o644 if name.endswith(('.py','.zip','.so','.json')) else 0o755)
                 elif (BIN/name).exists(): (BIN/name).unlink()
+            if sources_installed:SIGNATURE_SOURCES.unlink(missing_ok=True)
             if updated!=config:install(backup/'ips-web.conf',CONFIG,0o600)
             if resources_changed:
                 for index,(path,data) in enumerate(resource_before.items()):
