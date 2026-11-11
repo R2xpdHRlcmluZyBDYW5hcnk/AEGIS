@@ -40,7 +40,7 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
  await page.pollJob();assert.equal(page.jobText(page.latestJob),'live first\n');
  files.set(running,'live first\nlive second\n');current.log_bytes=Buffer.byteLength(files.get(running));
  await page.pollJob();assert.equal(page.jobText(page.latestJob),files.get(running),'incremental output appends without losing or duplicating its beginning');
- current.state='done';await page.pollJob();await flush();assert.ok(notices.includes('签名任务完成'));
+ current.state='done';await page.pollJob();await flush();assert.ok(notices.includes('特征任务完成'));
  block=true;current={...status(cancelled,'apply','manual','running'),recent_scheduled:savedScheduled};
  const pending=page.pollJob();await flush();page.ngOnDestroy();await pending;
  assert.equal(timers.size,0,'leaving clears polling and aborts outstanding log pages');

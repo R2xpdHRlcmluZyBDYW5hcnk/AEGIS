@@ -52,7 +52,7 @@ func (a *Assistant) Add(ctx context.Context, owner, key string) (Object, error) 
 	defer a.mu.Unlock()
 	p := a.proposals[key]
 	if p == nil || p.owner != owner || time.Since(p.created) > 10*time.Minute {
-		return nil, errors.New("签名建议已过期，请重新生成")
+		return nil, errors.New("特征建议已过期，请重新生成")
 	}
 	if p.accepted != nil {
 		return clone(p.accepted), nil
@@ -524,7 +524,7 @@ func (a *Assistant) Generate(ctx context.Context, owner string, body Object, sen
 	}
 	action := text(get(body, "action", "alert"))
 	if action != "alert" && action != "block" {
-		return errors.New("签名动作无效")
+		return errors.New("特征动作无效")
 	}
 	if object(a.app.Config.Raw["local_llm"])["enabled"] == false {
 		return errors.New("本地模型未启用")
@@ -558,14 +558,14 @@ func (a *Assistant) Generate(ctx context.Context, owner string, body Object, sen
 		}
 		choices := ruleCandidates(rows)
 		if len(choices) == 0 {
-			send(Object{"result": Object{"unavailable": true, "reason": "缺少可用于检测的协议、应用或异常报头特征，未生成签名"}})
+			send(Object{"result": Object{"unavailable": true, "reason": "缺少可用于匹配的协议、应用或异常报头信息，未生成检测特征"}})
 			return nil
 		}
 		messages, choices, err := boundedPrompt(text(assistantPrompts["RULE_PROMPT"]), evidence, choices)
 		if err != nil {
 			return err
 		}
-		progress("rule", "深度分析签名条件与误报限制", "running")
+		progress("rule", "深度分析特征条件与误报限制", "running")
 		output, finish, err := a.infer(ctx, messages, object(assistantPrompts["THINKING_OPTIONS"]), 1024, false, false, send)
 		if err != nil {
 			return err
@@ -603,7 +603,7 @@ func (a *Assistant) Generate(ctx context.Context, owner string, body Object, sen
 			a.mu.Unlock()
 			result["proposal"] = key
 		}
-		progress("rule", "签名建议整理完成", "done")
+		progress("rule", "特征建议整理完成", "done")
 		send(Object{"analysis_done": true})
 		send(Object{"result": result})
 		return nil
@@ -837,11 +837,11 @@ func hexContent(data []byte) string {
 }
 func ruleFromChoice(value Object, choices []Object, action string) (Object, error) {
 	if value["candidate"] == nil {
-		return Object{"unavailable": true, "reason": trim(text(get(value, "reason", "证据不足，未生成签名")), 500)}, nil
+		return Object{"unavailable": true, "reason": trim(text(get(value, "reason", "证据不足，未生成特征")), 500)}, nil
 	}
 	n := integer(value["candidate"])
 	if !strictInt(value["candidate"], 0, int64(len(choices)-1)) {
-		return nil, errors.New("模型返回了证据范围外的签名条件")
+		return nil, errors.New("模型返回了证据范围外的特征条件")
 	}
 	c := choices[n]
 	message := regexp.MustCompile(`["\\;:\x00-\x1f\x7f]`).ReplaceAllString(text(get(value, "message", "NDR observed indicator")), " ")
@@ -894,14 +894,14 @@ func ruleFromChoice(value Object, choices []Object, action string) (Object, erro
 		options += "flags:" + letters + "; "
 		extra := array(value["extra"])
 		if len(extra) > 4 {
-			return nil, errors.New("签名附加条件超出证据")
+			return nil, errors.New("特征附加条件超出证据")
 		}
 		keys := []string{}
 		metadata := object(c["metadata"])
 		for _, v := range extra {
 			k := text(v)
 			if _, ok := metadata[k]; !ok {
-				return nil, errors.New("签名附加条件超出证据")
+				return nil, errors.New("特征附加条件超出证据")
 			}
 			keys = append(keys, k)
 		}
@@ -916,11 +916,11 @@ func ruleFromChoice(value Object, choices []Object, action string) (Object, erro
 		scope = "OpenAppID 应用特征检测"
 		caveat = "应用识别不等于恶意行为"
 	default:
-		return nil, errors.New("无效候选签名")
+		return nil, errors.New("无效候选特征")
 	}
 	line := action + " " + text(c["proto"]) + " any any -> any " + text(c["dport"]) + " (" + options + "rev:1;)"
 	if len(line) > 4096 {
-		return nil, errors.New("签名超过长度限制")
+		return nil, errors.New("特征超过长度限制")
 	}
 	return Object{"rule": line, "reason": trim(text(value["reason"]), 500), "scope": scope, "limitations": strings.TrimSpace(trim(text(value["limitations"]), 300) + " " + caveat), "notice": action + " 将按这些内容特征检测；请核查误报后添加并应用"}, nil
 }

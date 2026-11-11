@@ -35,7 +35,7 @@ func builtinRules(ctx context.Context, config string) ([]*Rule, error) {
 	if builtinCache.signature != signature {
 		output, err := commandOutput(ctx, 20*time.Second, binary, "--list-builtin")
 		if err != nil {
-			return nil, errors.New("无法读取引擎内置签名目录")
+			return nil, errors.New("无法读取引擎内置特征目录")
 		}
 		expression := regexp.MustCompile(`^([0-9]+):([0-9]+) \(([^)]+)\) (.+)$`)
 		rows := []*Rule{}
@@ -52,7 +52,7 @@ func builtinRules(ctx context.Context, config string) ([]*Rule, error) {
 			rows = append(rows, &Rule{ID: id, Message: "(" + match[3] + ") " + match[4], Module: match[3], Group: group, Source: "Snort 内置", Action: "alert", Builtin: true, Enabled: true, PolicyManaged: false, SourceEnabled: true, Origins: []Object{{"group": group, "source": "Snort 内置"}}})
 		}
 		if len(rows) == 0 {
-			return nil, errors.New("引擎内置签名目录为空")
+			return nil, errors.New("引擎内置特征目录为空")
 		}
 		builtinCache.signature, builtinCache.rows = signature, rows
 	}

@@ -77,9 +77,9 @@ Hyperscan 构建 fat runtime，保留 SSSE3 / SSE4.2 / AVX2 分派，关闭上�
 
 核定 Go 1.27.3、`github.com/mattn/go-sqlite3` v1.14.53，内置 SQLite 3.54.1。版本、归档摘要与来源固定于 `build_tools/go-sources.json`，模块校验值固定于 `backend/go.sum`；构建设置 `GOTOOLCHAIN=local` 和 `-mod=readonly`，运行时不下载依赖。Go 没有单独 LTS 发行线，本次选择官方当前稳定版。
 
-`build_tools/go_backend.py` 自动获取缺失的核定 Go 工具链，所有模块、缓存及下载置于系统临时目录并随构建清理。ARM64 CGO 编译复用项目已有 Debian 交叉编译环境：GCC 14.2.0、binutils 2.44、ARM64 glibc 2.41；准备方式沿用 `README-deploy.md` 的引擎编译环境。Go 服务默认最多四个调度核心，SQLite 连接、前台查询、后台历史与签名来源任务均有独立并发边界。
+`build_tools/go_backend.py` 自动获取缺失的核定 Go 工具链，所有模块、缓存及下载置于系统临时目录并随构建清理。ARM64 CGO 编译复用项目已有 Debian 交叉编译环境：GCC 14.2.0、binutils 2.44、ARM64 glibc 2.41；准备方式沿用 `README-deploy.md` 的引擎编译环境。Go 服务默认最多四个调度核心，SQLite 连接、前台查询、后台历史与特征来源任务均有独立并发边界。
 
-Go 控制台不加载 Luqum/PLY 或旧 Python Web 模块。发布包仍包含维护脚本、检测进程守护及上游 PulledPork3 使用的 Python 环境；这些与 Go HTTP、签名管理、事件采集和本地模型接口分开维护。
+Go 控制台不加载 Luqum/PLY 或旧 Python Web 模块。发布包仍包含维护脚本、检测进程守护及上游 PulledPork3 使用的 Python 环境；这些与 Go HTTP、特征管理、事件采集和本地模型接口分开维护。
 
 ## 研判 Markdown 依赖（2026-11-05）
 

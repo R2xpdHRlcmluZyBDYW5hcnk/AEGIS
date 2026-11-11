@@ -67,7 +67,7 @@ try {
    writes.push({path:u.pathname,body:JSON.parse(p.request.postData||'{}')});
    dirty=true;
    if(u.pathname==='/api/rules/batch-delete')return fulfill(p,{ok:true,pending:true});
-   job={state:'running',rc:null,kind:'apply',started:Date.now()/1000,lines:['正在校验候选签名']};
+   job={state:'running',rc:null,kind:'apply',started:Date.now()/1000,lines:['正在校验候选特征']};
    return fulfill(p,{ok:true});
   }
   return cdp('Fetch.continueRequest',{requestId:p.requestId});
@@ -83,7 +83,7 @@ try {
  assert.equal(await evaluate(`!!document.querySelector('ndr-rules ndr-table')`),false);
  await ruleTab('阻断动作');await click('＋ 新建');
  await until(`!!document.querySelector('ndr-picker [aria-label="目标动作"]')`);
- const controls=await evaluate(`['选择对象类型','搜索候选签名','目标动作'].map(label=>{
+ const controls=await evaluate(`['选择对象类型','搜索候选特征','目标动作'].map(label=>{
   const {top,bottom}=document.querySelector('ndr-picker [aria-label="'+label+'"]').getBoundingClientRect();
   return {top,bottom};
  })`);
@@ -99,7 +99,7 @@ try {
  await until(`document.querySelector('.selection-bar')?.textContent.includes('已选 1')&&document.querySelector('ndr-rules .table-scroll').getAttribute('aria-busy')==='false'`);
  assert.equal(await evaluate(`document.querySelector('ndr-rules input[aria-label="选择 sid:456"]').checked`),true);
  actionFailure=false;await click('改为 drop');await until(`!document.querySelector('.selection-bar')`);
- await ruleTab('签名来源');await evaluate(`document.querySelector('ndr-rules thead input').click()`);await click('停用',`document.querySelector('.selection-bar')`);
+ await ruleTab('特征来源');await evaluate(`document.querySelector('ndr-rules thead input').click()`);await click('停用',`document.querySelector('.selection-bar')`);
  await until(`!document.querySelector('.selection-bar')`);
  sourceFailure=true;await evaluate(`document.querySelector('ndr-rules thead input').click()`);await click('启用',`document.querySelector('.selection-bar')`);
  await until(`document.querySelector('.selection-bar')?.textContent.includes('已选 1')&&document.querySelector('ndr-rules .table-scroll').getAttribute('aria-busy')==='false'`);
@@ -112,32 +112,32 @@ try {
  assert.equal(writes.length,1);assert.equal(writes[0].path,'/api/rules/batch-delete');
  assert.deepEqual(writes[0].body.paths.sort(),['/api/rules/disable/sid%3A123','/api/rules/disable/sid%3A456']);
  assert.equal(job.state,'idle','deleting configuration must not run a rule job');
- await click('应用更改 →');await until(`document.querySelector('.job-log')?.textContent.includes('正在校验候选签名')`);
+ await click('应用更改 →');await until(`document.querySelector('.job-log')?.textContent.includes('正在校验候选特征')`);
  assert.equal(await evaluate(`document.querySelector('ndr-rules [role="tab"][aria-selected="true"]').textContent.trim()`),'操作日志');
  assert.equal(await evaluate(`[...document.querySelectorAll('ndr-rules button')].find(b=>b.textContent.trim()==='应用更改 →').disabled`),true);
- job={...job,state:'done',rc:1,finished:Date.now()/1000,lines:['校验失败，已恢复原签名']};
+ job={...job,state:'done',rc:1,finished:Date.now()/1000,lines:['校验失败，已恢复原特征']};
  await until(`document.querySelector('.job-log')?.textContent.includes('校验失败')`);
  await until(`document.querySelector('ndr-rules')?.textContent.includes('上次应用失败')`);
  await click('应用更改 →');await until(`document.querySelector('.job-log')?.textContent.includes('正在校验')`);
  scheduledRun={state:'done',rc:0,started:1,lines:['定时更新输出']};
- await ruleTab('签名来源');
+ await ruleTab('特征来源');
  assert.equal(await evaluate(`!!document.querySelector('ndr-rules .job-log')||document.querySelector('ndr-rules').textContent.includes('定时更新输出')`),false);
- assert.equal(await evaluate(`[...document.querySelectorAll('ndr-rules button')].find(b=>b.textContent.trim()==='更新签名集 ↗').disabled`),true);
- job={...job,state:'done',rc:0,finished:Date.now()/1000,lines:['签名已校验并完成热重载']};
+ assert.equal(await evaluate(`[...document.querySelectorAll('ndr-rules button')].find(b=>b.textContent.trim()==='更新特征集 ↗').disabled`),true);
+ job={...job,state:'done',rc:0,finished:Date.now()/1000,lines:['特征已校验并完成热重载']};
  dirty=false;
  await until(`!document.querySelector('.pending-rules')`);
  assert.equal(await evaluate(`!!document.querySelector('ndr-rules .job-log')`),false);
  await click('操作日志',`document.querySelector('ndr-rules .tabs')`);
- await until(`document.querySelector('.job-log[aria-label="签名操作日志输出"]')?.textContent.includes('完成热重载')&&document.querySelector('.job-log[aria-label="最近定时更新输出"]')?.textContent.includes('定时更新输出')`);
+ await until(`document.querySelector('.job-log[aria-label="特征操作日志输出"]')?.textContent.includes('完成热重载')&&document.querySelector('.job-log[aria-label="最近定时更新输出"]')?.textContent.includes('定时更新输出')`);
  assert.equal(writes.length,3);
  pendingSources=true;
- await ruleTab('签名来源');await until(`!!document.querySelector('.schedule-form')`);
- assert.equal(await evaluate(`[...document.querySelectorAll('ndr-rules button')].find(b=>b.textContent.trim()==='更新签名集 ↗').disabled`),false,'pending source selection must remain downloadable');
- await until(`document.querySelector('ndr-rules')?.textContent.includes('“应用更改”仅使用本地签名')`);
+ await ruleTab('特征来源');await until(`!!document.querySelector('.schedule-form')`);
+ assert.equal(await evaluate(`[...document.querySelectorAll('ndr-rules button')].find(b=>b.textContent.trim()==='更新特征集 ↗').disabled`),false,'pending source selection must remain downloadable');
+ await until(`document.querySelector('ndr-rules')?.textContent.includes('“应用更改”仅使用本地特征')`);
  await set('input[name="time"]','06:23');await click('保存计划');
  await until(`!document.querySelector('.schedule-form fieldset').disabled`);
  assert.equal((await api('/api/rules/schedule')).time,'06:23');
- await nav('overview');await nav('rules');await ruleTab('签名来源');
+ await nav('overview');await nav('rules');await ruleTab('特征来源');
  await until(`document.querySelector('input[name="time"]')?.value==='06:23'`);
  await click('操作日志',`document.querySelector('ndr-rules .tabs')`);
  await until(`document.querySelector('.job-log')?.textContent.includes('完成热重载')`);

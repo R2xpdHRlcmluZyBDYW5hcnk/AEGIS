@@ -89,3 +89,33 @@ func TestInvalidOfficialSourceConfigRejectsUpdates(t *testing.T) {
 		t.Fatal("invalid configuration allowed cache writes", err)
 	}
 }
+
+func TestLegacyOfficialSourceLabels(t *testing.T) {
+	paths := liveRulePaths(t.TempDir())
+	copyOfficialSources(t, paths)
+	data := strings.NewReplacer(
+		"Snort Community 文本特征", "Snort Community 文本签名",
+		"免费注册特征集", "免费注册签名集",
+		"Talos LightSPD 文本特征", "Talos LightSPD 文本签名",
+		"\"GPLv2\"", "\"GPLv2（签名归档）\"",
+		"Snort 特征许可", "Snort 签名许可",
+	).Replace(readText(paths.officialSourcePath()))
+	if err := atomicWrite(paths.officialSourcePath(), []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	catalog := testOfficialSources(t, paths)
+	want := map[string][2]string{
+		"snort/community":  {"Snort Community 文本特征", "GPLv2（签名归档）"},
+		"snort/registered": {"免费注册特征集，需 Snort Oinkcode", "Snort 特征许可"},
+		"snort/lightspd":   {"Talos LightSPD 文本特征", "Snort 特征许可"},
+	}
+	for name, labels := range want {
+		source := catalog.sources[name]
+		if source.Summary != labels[0] || source.License != labels[1] {
+			t.Errorf("%s display labels = %q, %q; want %q", name, source.Summary, source.License, labels)
+		}
+	}
+	if readText(paths.officialSourcePath()) != data {
+		t.Fatal("source configuration changed while reading display labels")
+	}
+}

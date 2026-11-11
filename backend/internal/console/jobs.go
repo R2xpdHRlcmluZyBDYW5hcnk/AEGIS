@@ -37,23 +37,23 @@ func suppressionText(line string) string {
 }
 func validateSuggestion(line string) error {
 	if len(line) > 4096 {
-		return errors.New("签名建议超过长度限制")
+		return errors.New("特征建议超过长度限制")
 	}
 	header := regexp.MustCompile(`^(alert|block) (tcp|udp) any any -> any ([0-9]{1,5}) \(msg:"[^"\\;:\x00-\x1f\x7f]{1,80}"; (.*)rev:1;\)$`)
 	m := header.FindStringSubmatch(line)
 	if len(m) != 5 {
-		return errors.New("签名不符合事件建议格式")
+		return errors.New("特征不符合事件建议格式")
 	}
 	port, _ := strconv.Atoi(m[3])
 	if port < 1 || port > 65535 {
-		return errors.New("签名端口无效")
+		return errors.New("特征端口无效")
 	}
 	domain := `[a-z0-9][a-z0-9.-]{0,251}[a-z0-9]`
 	hex := `\|[0-9A-F]{2}(?: [0-9A-F]{2})*\|`
 	body := m[4]
 	for _, content := range regexp.MustCompile(hex).FindAllString(body, -1) {
 		if len(strings.Fields(strings.Trim(content, "|"))) > 512 {
-			return errors.New("签名内容字节超过限制")
+			return errors.New("特征内容字节超过限制")
 		}
 	}
 	patterns := []string{}
@@ -75,7 +75,7 @@ func validateSuggestion(line string) error {
 			return nil
 		}
 	}
-	return errors.New("签名必须包含经过校验的协议和内容特征")
+	return errors.New("特征必须包含经过校验的协议和内容特征")
 }
 
 type ruleBackup struct {
@@ -234,12 +234,12 @@ func NewRuleJobs(m *RuleManager) (*RuleJobs, error) {
 	var value Object
 	if err := readJSON(filepath.Join(root, "index.json"), &value); err == nil {
 		if integer(value["schema"]) != 1 || len(array(value["records"])) > 20 {
-			return nil, errors.New("签名操作日志索引无效")
+			return nil, errors.New("特征操作日志索引无效")
 		}
 		for _, raw := range array(value["records"]) {
 			r := object(raw)
 			if !jobIDPattern.MatchString(text(r["id"])) {
-				return nil, errors.New("签名操作日志标识无效")
+				return nil, errors.New("特征操作日志标识无效")
 			}
 			if r["state"] == "running" {
 				r["state"] = "interrupted"
@@ -248,7 +248,7 @@ func NewRuleJobs(m *RuleManager) (*RuleJobs, error) {
 		}
 		j.current, j.manual, j.scheduled = text(value["current"]), text(value["manual"]), text(value["scheduled"])
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return nil, errors.New("签名操作日志索引读取失败")
+		return nil, errors.New("特征操作日志索引读取失败")
 	}
 	return j, nil
 }
@@ -380,7 +380,7 @@ func (j *RuleJobs) Start(kind, trigger, rule string) (Object, error) {
 	j.mu.Lock()
 	if j.running {
 		j.mu.Unlock()
-		return nil, errors.New("签名任务正在执行")
+		return nil, errors.New("特征任务正在执行")
 	}
 	j.running = true
 	j.mu.Unlock()
@@ -471,7 +471,7 @@ func (j *RuleJobs) worker(record Object, backup *ruleBackup) {
 	var err error
 	defer func() {
 		if panicValue := recover(); panicValue != nil {
-			failure = errors.New("签名任务异常")
+			failure = errors.New("特征任务异常")
 		}
 		if failure != nil {
 			j.append(id, failure.Error())
@@ -484,16 +484,16 @@ func (j *RuleJobs) worker(record Object, backup *ruleBackup) {
 					_, recovery = m.engineCall(m.ctx, "ruleset-reload-rules", 300*time.Second)
 				}
 				if recovery != nil {
-					j.append(id, "恢复尚未完成，回滚材料已保留；签名写入已暂停")
+					j.append(id, "恢复尚未完成，回滚材料已保留；特征写入已暂停")
 					m.pauseRecovery()
 				} else {
 					if err := backup.Close(m.state); err != nil {
 						j.append(id, "恢复完成，回滚目录清理待重试")
 					}
-					j.append(id, "已恢复任务开始前的签名文件；待应用更改仍保留")
+					j.append(id, "已恢复任务开始前的特征文件；待应用更改仍保留")
 				}
 			} else {
-				j.append(id, "签名已提交，待应用状态同步失败；重启后台将恢复")
+				j.append(id, "特征已提交，待应用状态同步失败；重启后台将恢复")
 				m.pauseRecovery()
 			}
 		}
@@ -536,7 +536,7 @@ func (j *RuleJobs) worker(record Object, backup *ruleBackup) {
 		return
 	}
 	if kind == "update" || kind == "apply" {
-		j.append(id, "开始处理签名来源")
+		j.append(id, "开始处理特征来源")
 		failure = UpdateRules(m.ctx, m.live, kind == "apply", "", false, m.pool, func(message string) { j.append(id, message) })
 		if failure != nil {
 			return
@@ -601,16 +601,16 @@ func (j *RuleJobs) worker(record Object, backup *ruleBackup) {
 		return
 	}
 	if err := m.recordPolicyFingerprint(); err != nil {
-		j.append(id, "签名已生效，但自动同步状态记录失败")
+		j.append(id, "特征已生效，但自动同步状态记录失败")
 	}
 	if err := m.refreshRuleFileStats(m.ctx); err != nil {
-		j.append(id, "签名已生效，但启用签名数更新失败")
+		j.append(id, "特征已生效，但启用特征数更新失败")
 	}
 	backup.Close(m.state)
 	if appIDChanged {
 		j.append(id, "OpenAppID 检测器已热重载")
 	}
-	j.append(id, "签名已校验并完成热重载")
+	j.append(id, "特征已校验并完成热重载")
 }
 func (m *RuleManager) pauseRecovery() {
 	m.mu.Lock()
@@ -631,13 +631,13 @@ func (j *RuleJobs) runCommand(ctx context.Context, id string, arguments []string
 	configureCommand(command)
 	err := command.Run()
 	if writer.exceeded {
-		return errors.New("签名任务输出超过上限")
+		return errors.New("特征任务输出超过上限")
 	}
 	if ctx.Err() != nil {
-		return errors.New("签名命令超时或取消")
+		return errors.New("特征命令超时或取消")
 	}
 	if err != nil {
-		return errors.New("签名命令执行失败，活动签名已保留")
+		return errors.New("特征命令执行失败，活动特征已保留")
 	}
 	return nil
 }
@@ -669,11 +669,11 @@ func (j *RuleJobs) Recover() error {
 	for _, path := range paths {
 		var backup ruleBackup
 		if err = readJSON(filepath.Join(path, "manifest.json"), &backup); err != nil {
-			return errors.New("签名回滚清单损坏，材料已保留")
+			return errors.New("特征回滚清单损坏，材料已保留")
 		}
 		backup.Directory = path
 		if !backup.GoBackend {
-			return errors.New("存在未完成的旧版签名事务，需由原管理器恢复后升级")
+			return errors.New("存在未完成的旧版特征事务，需由原管理器恢复后升级")
 		}
 		var committed Object
 		if readJSON(filepath.Join(path, "committed.json"), &committed) == nil {

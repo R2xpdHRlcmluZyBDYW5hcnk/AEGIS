@@ -1,6 +1,6 @@
 # Snort 引擎集成
 
-面板消费 Snort 3 extractor 与 alert_json 日志，通过 Unix 控制套接字查询运行状态及执行签名重载。原生日志由 `ips-event-bridge` 转为持久事件流，Web 查询与签名操作分离。
+面板消费 Snort 3 extractor 与 alert_json 日志，通过 Unix 控制套接字查询运行状态及执行特征重载。原生日志由 `ips-event-bridge` 转为持久事件流，Web 查询与特征操作分离。
 
 ## 来源和构建边界
 
@@ -16,9 +16,9 @@ ARM 构建目录默认按清单版本隔离，当前为 `/opt/ips-snort3/3.13.2.
 
 引擎构建 Vectorscan 的 ARMv8 NEON 共享库并启用 Snort 的 `hyperscan` 搜索插件，不使用编译主机的 native 指令或要求 SVE / SVE2。发布包包含 `libhs.so` 链及对应许可，运行时不需要在目标设备安装开发工具。`verify_snort3.py` 同时检查固定库版本和实际搜索插件，缺失时构建失败。
 
-主配置选择 `search_engine.search_method = 'hyperscan'`。引擎升级在校验候选配置前追加同一设置，保留其余搜索参数、签名文件、策略、抑制及元数据检查器；校验或启动失败恢复整棵旧引擎及原配置。没有自动把 PCRE 改写为 regex，也不切换签名策略。已有无 Vectorscan 的 SDK 不能直接复用，升级构建时应指定独立的 `SNORT_ENGINE_PREFIX`。
+主配置选择 `search_engine.search_method = 'hyperscan'`。引擎升级在校验候选配置前追加同一设置，保留其余搜索参数、特征文件、策略、抑制及元数据检查器；校验或启动失败恢复整棵旧引擎及原配置。没有自动把 PCRE 改写为 regex，也不切换特征策略。已有无 Vectorscan 的 SDK 不能直接复用，升级构建时应指定独立的 `SNORT_ENGINE_PREFIX`。
 
-开发电脑的原生回放覆盖大小写不敏感 content、Hyperscan regex、未命中签名及 HTTP / DNS / TLS 输出，独立 ARM64 内核验证多队列内联阻断和告警抑制后的阻断保留。正确性回放不能作为生产吞吐提升比例的依据。
+开发电脑的原生回放覆盖大小写不敏感 content、Hyperscan regex、未命中特征及 HTTP / DNS / TLS 输出，独立 ARM64 内核验证多队列内联阻断和告警抑制后的阻断保留。正确性回放不能作为生产吞吐提升比例的依据。
 
 ### x86-64 Hyperscan
 
@@ -37,7 +37,7 @@ sudo env SNORT_ENGINE_PREFIX="$SNORT_ENGINE_PREFIX" unshare -n \
 
 导出使用 `python3 -B package-session-engine.py --prefix "$SNORT_ENGINE_PREFIX" --output <源码树外目录>`。会话扩展使用 `build_session_logger.py --engine <SDK>/bin/snort --output <源码树外目录>`，按引擎 ELF 选择对应编译器和头文件，并核对 SDK 的架构、来源、补丁及引擎摘要。IPv6 主动响应的内联回归另需同架构响应适配器，通过 `NDR_RESPONSE_LIBRARY` 指定，并添加 `--ipv6`。测试使用隔离网络命名空间和合成报文；x86 原生运行，ARM 跨架构回放使用 QEMU。
 
-签名更新由 AEGIS 内置 Go 实现直接下载、校验并处理文本签名归档。现有 PulledPork3 安装和仓库保持独立，不再作为运行期依赖；`IPS_PULLEDPORK` 不影响新的更新入口。参见 [Go 运行服务](go-runtime.md)。
+特征更新由 AEGIS 内置 Go 实现直接下载、校验并处理文本特征归档。现有 PulledPork3 安装和仓库保持独立，不再作为运行期依赖；`IPS_PULLEDPORK` 不影响新的更新入口。参见 [Go 运行服务](go-runtime.md)。
 
 ## 会话标识
 
@@ -45,11 +45,11 @@ sudo env SNORT_ENGINE_PREFIX="$SNORT_ENGINE_PREFIX" unshare -n \
 
 面板保留原生 uid，但只按完整 session_id 关联。没有 ID 的事件独立保留，不用五元组、时间窗或 UID 猜测归属。使用其他 Snort 版本或缺少扩展时，先核对日志字段和原生校验结果。
 
-`ndr-session-2` 在告警抑制命中并触发会话阻断时，等待原始包的 DAQ `BLOCK` 或 `BLACKLIST` 判定，再通过 notice extractor 写入带 `alert_suppressed` 的记录。原生 `alert_json` 仍遵守告警抑制。每个被处置的原始包最多保留一条这类签名记录；检测模式的模拟阻断和没有会话的解码事件沿用原有路径。
+`ndr-session-2` 在告警抑制命中并触发会话阻断时，等待原始包的 DAQ `BLOCK` 或 `BLACKLIST` 判定，再通过 notice extractor 写入带 `alert_suppressed` 的记录。原生 `alert_json` 仍遵守告警抑制。每个被处置的原始包最多保留一条这类特征记录；检测模式的模拟阻断和没有会话的解码事件沿用原有路径。
 
 已有实例通过 `deploy.ps1 -UpdateBackend -UpdateEngine -EnginePackage <归档>` 同时更新引擎和控制台。已启用可选会话扩展时，使用与新引擎摘要匹配的扩展目录并传入 `-SessionLoggerDirectory`。`build_tools/check_arm64_inline.py --suppressed-blocks` 验证被抑制的 block、drop、reject，以及普通告警和检测模式下的模拟阻断。
 
-跨版本升级校验发布清单与已安装目标 ABI，先用候选 LibDAQ、默认 Lua 和匹配插件验证现有签名配置，再短暂停止检测进程，整体替换引擎运行目录。备份保留旧二进制、LibDAQ、Lua、数据文件和扩展；启动失败自动恢复整棵运行目录及控制台配置，成功后仍保留 `rollback.sh`。升级不清空数据库、认证、签名及设备设置。
+跨版本升级校验发布清单与已安装目标 ABI，先用候选 LibDAQ、默认 Lua 和匹配插件验证现有特征配置，再短暂停止检测进程，整体替换引擎运行目录。备份保留旧二进制、LibDAQ、Lua、数据文件和扩展；启动失败自动恢复整棵运行目录及控制台配置，成功后仍保留 `rollback.sh`。升级不清空数据库、认证、特征及设备设置。
 
 `ndr-session-3` 的文件连接器启动和重开均使用追加模式，不截断尚未采集的原始日志。数据桥跨引擎实例保留经 inode、长度与尾部摘要验证的读取位置；文件被替换或截断时仍重新定位，避免追加模式在更新后重复导入已采集记录。原生会话身份继续来自记录自身，不随桥接进程重启改写。
 
@@ -57,19 +57,19 @@ sudo env SNORT_ENGINE_PREFIX="$SNORT_ENGINE_PREFIX" unshare -n \
 
 2026-11-07 15:53 UTC，复查已有维护记录后，通过 GitHub CLI 读取 [官方发行说明](https://github.com/snort3/snort3/releases/tag/3.13.2.0)，并核对清单归档的源码与构建结果。该稳定版发布于 2026-11-05，要求 LibDAQ 3.0.29。上游列出的 LibML 2.0.0 为可选 ML 功能依赖；本构建沿用关闭状态，依据为 [QUIET 查找](https://github.com/snort3/snort3/blob/3.13.2.0/cmake/include_libraries.cmake)和 [最低版本检查](https://github.com/snort3/snort3/blob/3.13.2.0/cmake/FindML.cmake)。
 
-3.13 的公开 C++ API 有变化，会话补丁按新 Flow restart 和 extractor 静态接口移植，会话扩展须针对新引擎重新编译。LightSPD 的 SO 签名要求 2026-09-14-001 或更新归档；面板当前只导入文本签名，不加载归档中的 SO 库。签名更新配置默认传入实际引擎版本 3.13.2.0；registered 自动快照使用官方下载目录存在的 3.13.0.0，显式旧快照配置仍保留。
+3.13 的公开 C++ API 有变化，会话补丁按新 Flow restart 和 extractor 静态接口移植，会话扩展须针对新引擎重新编译。LightSPD 的 SO 特征要求 2026-09-14-001 或更新归档；面板当前只导入文本特征，不加载归档中的 SO 库。特征更新配置默认传入实际引擎版本 3.13.2.0；registered 自动快照使用官方下载目录存在的 3.13.0.0，显式旧快照配置仍保留。
 
-WEIRD extractor 新增按连接、绑定与 gid/sid 采样，沿用 [上游默认值](https://github.com/snort3/snort3/blob/3.13.2.0/src/network_inspectors/extractor/dev_notes.txt)：先记录 25 次，随后每 1000 次记录一次，600 秒固定窗口后重置。此采样仅影响异常元数据日志，不改变签名检测、NOTICE 告警或包处置。现有正文检测继续启用，payload、PCAP 与文件内容捕获保持关闭。
+WEIRD extractor 新增按连接、绑定与 gid/sid 采样，沿用 [上游默认值](https://github.com/snort3/snort3/blob/3.13.2.0/src/network_inspectors/extractor/dev_notes.txt)：先记录 25 次，随后每 1000 次记录一次，600 秒固定窗口后重置。此采样仅影响异常元数据日志，不改变特征检测、NOTICE 告警或包处置。现有正文检测继续启用，payload、PCAP 与文件内容捕获保持关闭。
 
 ## 验证
 
-`tests/check_snort_native.py` 提供本地合成流量回放；`build_tools/check_arm64_inline.py` 提供完整 ARM64 内核下的 NFQUEUE 测试。用户态 QEMU 的结果不能替代内核内联测试。引擎、测试虚拟机和签名归档均单独准备，不随源码分发。
+`tests/check_snort_native.py` 提供本地合成流量回放；`build_tools/check_arm64_inline.py` 提供完整 ARM64 内核下的 NFQUEUE 测试。用户态 QEMU 的结果不能替代内核内联测试。引擎、测试虚拟机和特征归档均单独准备，不随源码分发。
 
-官方接口来源：[extractor 字段](https://github.com/snort3/snort3/blob/3.13.2.0/doc/user/extractor.txt)、[LibDAQ NFQ 实现](https://github.com/snort3/libdaq/blob/v3.0.29/modules/nfq/daq_nfq.c)、[Snort 签名动作](https://docs.snort.org/rules/headers/actions)。日志字段以实际引擎输出为准，缺失内容不作推断。
+官方接口来源：[extractor 字段](https://github.com/snort3/snort3/blob/3.13.2.0/doc/user/extractor.txt)、[LibDAQ NFQ 实现](https://github.com/snort3/libdaq/blob/v3.0.29/modules/nfq/daq_nfq.c)、[Snort 特征动作](https://docs.snort.org/rules/headers/actions)。日志字段以实际引擎输出为准，缺失内容不作推断。
 
 ## QUIC 与 HTTP/3 能力边界
 
-核查时间：2026-11-04 12:31 UTC。查询前检查本文与已有签名来源记录，既有记录没有覆盖 QUIC 解析来源。MCP Search Service 查询条件为固定标签 `3.12.4.0` 的 QUIC extractor、QUIC 事件发布接口、AppID 实现及检查器目录；同时只读核对已部署二进制的版本、模块与插件列表、已加载协议库以及配置，不读取真实会话日志、不回放流量。
+核查时间：2026-11-04 12:31 UTC。查询前检查本文与已有特征来源记录，既有记录没有覆盖 QUIC 解析来源。MCP Search Service 查询条件为固定标签 `3.12.4.0` 的 QUIC extractor、QUIC 事件发布接口、AppID 实现及检查器目录；同时只读核对已部署二进制的版本、模块与插件列表、已加载协议库以及配置，不读取真实会话日志、不回放流量。
 
 核查结果：核查时二进制为 3.12.4.0，包含 `stream_udp`、AppID、extractor、HTTP 和 HTTP/2 检查器，模块和插件清单未列出 QUIC 或 HTTP/3 检查器。核查时配置包含 QUIC handshake 日志绑定及版本、连接 ID、SNI、客户端应用协议字段，但配置接收日志事件不等价于具有生成事件的协议解析器。没有发现当前进程加载额外 QUIC / HTTP/3 协议解析库。
 
@@ -83,7 +83,7 @@ MCP 未能打开检查器目录且未定位到事件产生器，因此补充通�
 
 ## 流事件关联与入库
 
-2026-11-04 追加核查，MCP Search Service 查询条件为签名 `flow` 的含义、固定标签 `3.12.4.0` 的连接 extractor 与会话身份实现。查询前复用上面的引擎和会话记录；补充读取 [flow 签名选项](https://docs.snort.org/rules/options/non_payload/flow)、[连接 extractor](https://github.com/snort3/snort3/blob/3.12.4.0/src/network_inspectors/extractor/extractor_conn.cc)及 [通用 extractor 字段](https://github.com/snort3/snort3/blob/3.12.4.0/src/network_inspectors/extractor/extractors.h)。前者控制方向、建立状态、重组等签名匹配条件，不是面板日志合并 API。连接 extractor 订阅 FLOW_END；原生 UID 优先使用 connection_id，否则取 FlowKey 哈希。
+2026-11-04 追加核查，MCP Search Service 查询条件为特征 `flow` 的含义、固定标签 `3.12.4.0` 的连接 extractor 与会话身份实现。查询前复用上面的引擎和会话记录；补充读取 [flow 特征选项](https://docs.snort.org/rules/options/non_payload/flow)、[连接 extractor](https://github.com/snort3/snort3/blob/3.12.4.0/src/network_inspectors/extractor/extractor_conn.cc)及 [通用 extractor 字段](https://github.com/snort3/snort3/blob/3.12.4.0/src/network_inspectors/extractor/extractors.h)。前者控制方向、建立状态、重组等特征匹配条件，不是面板日志合并 API。连接 extractor 订阅 FLOW_END；原生 UID 优先使用 connection_id，否则取 FlowKey 哈希。
 
 使用与部署二进制 SHA-256 一致的本地副本，在开发环境回放完全合成的 HTTP / DNS 报文及同五元组复用场景。告警、HTTP 事务与连接结束日志共享引擎 session_id；新连接得到新 session_id，样例的原生 UID 被复用。Go 事件规范化与会话查询回归使用合成兼容样例验证同一告警可关联已保留的同会话日志。用户态回放不等同于生产流量完整性证明。
 
@@ -91,7 +91,7 @@ MCP 未能打开检查器目录且未定位到事件产生器，因此补充通�
 
 时间范围比较保留毫秒列中的小数部分，避免对微秒级上界取整后排除边界记录。会话详情扩大为整个已保留会话范围；网络记录仍分页，告警证据有明确截断标志。活跃连接尚未产生 EOF、协议未产出事务记录、缺少会话 ID、存储保留期限及采集丢包应分别排查，不能统称为合并失败，也不能把事件日志当作完整报文留存。
 
-`history-reset` 支持 scope=database：串行维护任务仅暂停控制台，将事件库与 WAL、SHM、派生统计库完整移到受保护备份目录，创建带新 clear_epoch 和统一事件流读取位置的空库，再恢复控制台。检测引擎、桥接采集与原生日志不停止；认证、签名、配置、资产和备份保留。旧统一事件不重新导入。默认 scope=all 执行完整清理；`ndr-session-3` 提供按工作线程确认的 `reopen_logs()`，让完整清理也能保留检测进程、会话和 NFQUEUE。详细顺序和失败边界见 [历史管理](history-management.md)。
+`history-reset` 支持 scope=database：串行维护任务仅暂停控制台，将事件库与 WAL、SHM、派生统计库完整移到受保护备份目录，创建带新 clear_epoch 和统一事件流读取位置的空库，再恢复控制台。检测引擎、桥接采集与原生日志不停止；认证、特征、配置、资产和备份保留。旧统一事件不重新导入。默认 scope=all 执行完整清理；`ndr-session-3` 提供按工作线程确认的 `reopen_logs()`，让完整清理也能保留检测进程、会话和 NFQUEUE。详细顺序和失败边界见 [历史管理](history-management.md)。
 
 ## QUIC 追踪组件评估
 
@@ -123,7 +123,7 @@ MCP 未能打开检查器目录且未定位到事件产生器，因此补充通�
 - [Snort issue #170](https://github.com/snort3/snort3/issues/170)：2021 年 NFQ 队列配置讨论中，提问者报告多线程有流量但没有预期的 JSON 输出，维护者指出各包线程分别写日志。检查全部线程文件是必要步骤；这个案例不能证明所有日志缺失都是线程文件问题。
 - [Snort issue #379](https://github.com/snort3/snort3/issues/379)：2024 年用户报告 Snort 3.3.4.0 的 NFQ / ICMP 丢失现象。维护者要求核对 iptables 和规则，并未复现；它只证明存在相似反馈，不能作为当前版本缺陷或当前现场根因的证据。社区评论中未经证实的根因说法不采用。
 - [FlowData 官方接口](https://github.com/snort3/snort3/blob/3.12.4.0/src/flow/flow_data.h)明确用于给 Flow 附加检查器状态。实际案例为 [HttpFlowData](https://github.com/snort3/snort3/blob/3.12.4.0/src/service_inspectors/http_inspect/http_flow_data.h)及 [HttpInspect 状态访问](https://github.com/snort3/snort3/blob/3.12.4.0/src/service_inspectors/http_inspect/http_inspect.cc)：通过 p->flow 访问连接，使用 get_flow_data / set_flow_data 维护状态。create_flow_data_id 生成检查器状态类型的槽位 ID，不能当成每条连接的唯一 ID。
-- 连接日志应参照固定版本 extractor 的 FLOW_END 订阅和日志字段，不从签名 flow 选项反推日志条数。若要跨多种日志保留稳定身份，需要在引擎逻辑会话生命周期中统一分配并输出 ID，处理结束、重启、超时和进程重启；仅用五元组哈希无法区分后续复用的连接。当前项目的补丁与合成回放验证遵循这一边界。
+- 连接日志应参照固定版本 extractor 的 FLOW_END 订阅和日志字段，不从特征 flow 选项反推日志条数。若要跨多种日志保留稳定身份，需要在引擎逻辑会话生命周期中统一分配并输出 ID，处理结束、重启、超时和进程重启；仅用五元组哈希无法区分后续复用的连接。当前项目的补丁与合成回放验证遵循这一边界。
 - [Additional Resources](https://www.snort.org/documents#AdditionalResources)中的 [多线程处理](https://www.snort.org/documents/snort-3-multiple-packet-threads-processing)可用于理解分线程输出。[重组丢包文章](https://www.snort.org/documents/possible-packet-loss-during-reassembly-for-snort-ids-ips-sensors)针对 Snort 2.9.7，提示排查网卡聚合、校验和和采集范围；其中旧配置和截断长度示例不能直接套用到 Snort 3。README.stream5、早期 Perfmon 资料也应按历史资料使用。本文未依据这些文档修改生产网卡选项。
 
 ## NAT 采集范围验证
@@ -145,7 +145,7 @@ MCP 未能打开检查器目录且未定位到事件产生器，因此补充通�
 
 实机只读命令清单确认 appid.reload_detectors() 与 snort.reload_config(filename) 均可用。检测库更新优先使用前者，新增配置或插件应先在开发环境验证完整配置热重载和 ABI 兼容性；控制命令存在不等于任意主程序代码都能热替换。
 
-OpenAppID 自动更新来源核查：[官方下载目录](https://www.snort.org/downloads#openappid)链接到检测器归档及 [MD5 列表](https://www.snort.org/downloads/openappid/md5s)。官方提供的 MD5 仅作为归档一致性检查，下载依赖 HTTPS；不能描述为上游数字签名。当前 PulledPork3 README 只列出签名与阻断列表更新，未作为 OpenAppID 更新能力的证明。检测库需要单独的校验、原子切换、热重载和回滚事务，并保留 custom 检测器。
+OpenAppID 自动更新来源核查：[官方下载目录](https://www.snort.org/downloads#openappid)链接到检测器归档及 [MD5 列表](https://www.snort.org/downloads/openappid/md5s)。官方提供的 MD5 仅作为归档一致性检查，下载依赖 HTTPS；不能描述为上游数字签名。当前 PulledPork3 README 只列出特征与阻断列表更新，未作为 OpenAppID 更新能力的证明。检测库需要单独的校验、原子切换、热重载和回滚事务，并保留 custom 检测器。
 
 ## 原生会话扩展
 
@@ -167,9 +167,9 @@ OpenAppID 自动更新来源核查：[官方下载目录](https://www.snort.org/
 
 ## OpenAppID 自动更新
 
-手动网络更新与既有定时更新共用签名管理器，均检查官方 OpenAppID 归档。候选暂存在检测器所在的持久盘，限制下载大小、解压大小、条目数和单文件大小，拒绝路径穿越、链接、设备文件及重复路径。下载来自固定 HTTPS 官方入口并限制重定向来源，按官方 MD5 校验一致性，同时记录 SHA-256。下载错误不回显可能含签名参数的重定向 URL。
+手动网络更新与既有定时更新共用特征管理器，均检查官方 OpenAppID 归档。候选暂存在检测器所在的持久盘，限制下载大小、解压大小、条目数和单文件大小，拒绝路径穿越、链接、设备文件及重复路径。下载来自固定 HTTPS 官方入口并限制重定向来源，按官方 MD5 校验一致性，同时记录 SHA-256。下载错误不回显可能含特征参数的重定向 URL。
 
-校验后将 odp 原子切换到独立版本目录，保留 custom 检测器。签名回滚日志同时保存原 odp 指向和更新收据，崩溃恢复也覆盖检测器切换。候选配置通过校验后调用 `appid.reload_detectors()`，失败恢复原目录并重新加载原检测器；不重启检测进程。手动选择签名来源产生的待应用更改仍保持原有显式应用流程，检测库更新不替用户应用待选签名。
+校验后将 odp 原子切换到独立版本目录，保留 custom 检测器。特征回滚日志同时保存原 odp 指向和更新收据，崩溃恢复也覆盖检测器切换。候选配置通过校验后调用 `appid.reload_detectors()`，失败恢复原目录并重新加载原检测器；不重启检测进程。手动选择特征来源产生的待应用更改仍保持原有显式应用流程，检测库更新不替用户应用待选特征。
 
 2026-11-04 UTC 补充通过官方入口下载当前归档，核对压缩包根目录 odp、官方 MD5 与构建清单 SHA-256 一致；这次核查不代表后续归档版本固定不变。网络更新在每次任务中重新查询官方摘要。
 

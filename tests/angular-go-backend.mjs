@@ -183,7 +183,7 @@ try {
   await set('[aria-label="搜索查询"]','');await clickText('查询 →');await until(`!document.querySelector('ndr-events>.error')`);
   await nav('drops');await until(`document.querySelectorAll('ndr-events>section:last-of-type ndr-table tbody tr').length===2`);
   assert.ok(await evaluate(`document.querySelector('ndr-events>section:last-of-type').textContent.includes('Fixture suppressed block')`),'suppressed drop remains in the raw block list');
-  await nav('rules');await ruleTab('检测签名');await until(`document.querySelectorAll('ndr-rules ndr-table tbody tr').length===50`);
+  await nav('rules');await ruleTab('检测特征');await until(`document.querySelectorAll('ndr-rules ndr-table tbody tr').length===50`);
   for(const [width,height] of [[1280,800],[1440,1100],[1920,1080]]){
     await cdp('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false});
     assert.deepEqual(await evaluate(`(()=>{
@@ -196,7 +196,7 @@ try {
   await evaluate(`document.querySelector('ndr-rules [role=tab][aria-selected=true]').focus()`);
   await cdp('Input.dispatchKeyEvent',{type:'keyDown',key:'ArrowRight',code:'ArrowRight'});await cdp('Input.dispatchKeyEvent',{type:'keyUp',key:'ArrowRight',code:'ArrowRight'});
   await until(`document.activeElement?.id==='rule-tab-groups'&&document.activeElement?.getAttribute('aria-selected')==='true'`);
-  await ruleTab('检测签名');
+  await ruleTab('检测特征');
   await clickText('↻ 刷新',`document.querySelector('.rule-actions')`);
   await clickText('下一页 →',`document.querySelector('ndr-rules ndr-table')`);await until(`document.querySelector('ndr-rules .pager')?.textContent.includes('2 / 3')`);
   await ruleTab('禁用策略');await clickText('＋ 新建');await until(`document.querySelectorAll('ndr-picker tbody input').length===50`);
@@ -205,7 +205,7 @@ try {
   assert.ok(disabledPolicy[0].name.startsWith('Fixture signature '),'disabled policies resolve a signature description');
   await until(`document.querySelector('ndr-rules tbody')?.textContent.includes(${JSON.stringify(disabledPolicy[0].name)})`);
   const groups=(await api('/api/rules/groups')).groups;assert.ok(groups.some(g=>g.total===125));
-  await ruleTab('签名分组');await until(`document.querySelector('ndr-rules tbody')?.textContent.includes('snort/community')`);
+  await ruleTab('特征分组');await until(`document.querySelector('ndr-rules tbody')?.textContent.includes('snort/community')`);
   const group=groups.find(g=>g.total===125);assert.equal((await api('/api/rules/suppress-groups','POST',{groups:[group.selector]})).ok,true);
   assert.equal((await api('/api/rules/governance')).suppress_groups[0].total,125);
   assert.equal((await api('/api/hunt/rules','POST',{rule:'alert tcp any any -> any 443 (msg:"Browser fixture"; sid:9900101; rev:1;)'})).ok,true);
@@ -213,10 +213,10 @@ try {
   assert.equal((await api('/api/bans','POST',{target:'192.0.2.99'})).ok,true);
   const schedule=await api('/api/rules/schedule','POST',{enabled:true,frequency:'weekly',time:'05:17',weekday:0});assert.equal(schedule.time,'05:17');assert.ok(schedule.next_run>0);
   await api('/api/rules/pending/discard','POST');assert.equal((await api('/api/actions/status')).pending,false);
-  await ruleTab('签名来源');
+  await ruleTab('特征来源');
   async function configureOfficial(name){
     await evaluate(`(()=>{const row=[...document.querySelectorAll('ndr-rules tbody tr')].find(r=>r.textContent.includes(${JSON.stringify(name)}));if(!row)throw Error('Official source missing');const box=row.querySelector('input[type="checkbox"]');if(!box.checked)box.click();})()`);
-    await clickText('配置签名来源');await until(`!!document.querySelector('ndr-source-editor select[name="ips_policy"]')`);
+    await clickText('配置特征来源');await until(`!!document.querySelector('ndr-source-editor select[name="ips_policy"]')`);
   }
   await configureOfficial('snort/lightspd');
   assert.deepEqual(await evaluate(`[...document.querySelector('select[name="ips_policy"]').options].map(o=>o.value)`),['connectivity','balanced','security','max-detect']);
@@ -240,14 +240,14 @@ try {
   await api('/api/bans','POST',{target:'192.0.2.99'});
   await clickText('↻ 刷新');await until(`!!document.querySelector('.pending-rules')`);
   const enabledSignatures=`Number(document.querySelector('.rule-status-card strong')?.textContent.replaceAll(',',''))`;
-  assert.equal(await evaluate(`document.querySelector('.rule-status-card span')?.textContent.trim()`),'启用签名数');
+  assert.equal(await evaluate(`document.querySelector('.rule-status-card span')?.textContent.trim()`),'启用特征数');
   const beforeUpdate=await evaluate(enabledSignatures);
   assert.equal(beforeUpdate,125,'pending edits do not change the count of enabled signatures');
   assert.equal(await evaluate(`document.querySelector('ndr-rules').textContent.includes('再点击“应用更改”启用')`),false,'source hint matches automatic update application');
   await evaluate(`window.__jobLogWarnings=[];window.__jobLogObserver=new MutationObserver(()=>{if(document.querySelector('ndr-rules')?.textContent.includes('操作日志更新失败'))window.__jobLogWarnings.push(true);});window.__jobLogObserver.observe(document.querySelector('ndr-rules'),{subtree:true,childList:true,characterData:true});`);
-  await clickText('更新签名集 ↗');
+  await clickText('更新特征集 ↗');
   await until(`document.querySelector('ndr-rules .tabs button.active')?.textContent.trim()==='操作日志'`);
-  await until(`document.querySelector('ndr-rules .job-log')?.textContent.includes('签名已校验并完成热重载')&&!document.querySelector('.pending-rules')`);
+  await until(`document.querySelector('ndr-rules .job-log')?.textContent.includes('特征已校验并完成热重载')&&!document.querySelector('.pending-rules')`);
   const updated=await api('/api/actions/status');assert.equal(updated.rc,0);assert.equal(updated.pending,false);assert.ok(updated.log_bytes>0);
   await until(`${enabledSignatures}>${beforeUpdate}`);
   const afterUpdate=await evaluate(enabledSignatures);
@@ -258,7 +258,7 @@ try {
   await api('/api/hunt/rules','POST',{rule:'alert tcp any any -> any 443 (msg:"Additional applied signature"; sid:9900104; rev:1;)'});
   await clickText('应用更改 →');
   await until(`(async()=>{const r=await fetch('/api/actions/status').then(r=>r.json());return r.id!==${JSON.stringify(updated.id)}&&r.state==='done'&&r.rc===0&&!r.pending;})()`);
-  await until(`!document.querySelector('.pending-rules')&&document.querySelector('ndr-rules .job-log')?.textContent.includes('签名已校验并完成热重载')`);
+  await until(`!document.querySelector('.pending-rules')&&document.querySelector('ndr-rules .job-log')?.textContent.includes('特征已校验并完成热重载')`);
   await until(`${enabledSignatures}===${afterUpdate+1}`);
   await evaluate(`window.__jobLogObserver.disconnect()`);assert.deepEqual(await evaluate(`window.__jobLogWarnings`),[],'starting update and apply jobs does not flash a log-read error');
   await shot('go-rules-desktop.png');

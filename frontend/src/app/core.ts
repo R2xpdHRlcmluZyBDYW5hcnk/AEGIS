@@ -8,7 +8,7 @@ export const pages: {id:Page; title:string}[] = [
   {id:'alerts',title:'安全事件'},
   {id:'hunt',title:'威胁狩猎'},
   {id:'drops',title:'阻断日志'},
-  {id:'rules',title:'签名管理'},
+  {id:'rules',title:'特征管理'},
   {id:'system',title:'系统状态'}
 ];
 @Injectable({providedIn:'root'})

@@ -17,7 +17,7 @@ import { eventType } from '../event-fields';
   <button class="stat-card blocked" (click)="filterKind('drops','阻断事件')" [attr.aria-pressed]="hasKind('drops')"><span>阻断事件</span><strong data-testid="drops-total">{{d.security?.drops | number}}</strong></button>
   <div class="stat-card"><span>源 / 目的地址</span><strong>{{d.network?.source_count | number}} <em>/ {{d.network?.destination_count | number}}</em></strong></div></div>
   <div class="overview-grid"><section class="card trend"><header><h2>告警与阻断趋势</h2><div class="toolbar"><div class="legend"><span class="blue-dot"></span>告警 <span class="coral-dot"></span>阻断</div><button class="quiet" (click)="showTrendTable=!showTrendTable" aria-label="切换趋势图表格">{{showTrendTable?'图表':'表格'}}</button><button class="quiet" (click)="expandedChart=true" aria-label="放大告警与阻断趋势">放大</button></div></header><ndr-chart *ngIf="!showTrendTable" [points]="d.series || []" [viewport]="chartViewport" (pointOpen)="filterTrend($event)"/><ndr-table *ngIf="showTrendTable" id="trend-values" [columns]="trendColumns" [rows]="d.series || []" [fit]="true"/></section>
-  <section class="card engine-card"><header><h2>检测引擎</h2><span class="badge" [class.good]="d.service?.state==='active'">{{d.service?.state==='active'?'运行中':d.service?.state}}</span></header><div class="throughput">{{d.rates?.mbps | number:'1.2-2'}} <small>Mbps</small></div><p class="muted">{{d.rates?.pps | number:'1.0-0'}} packets / sec</p><dl class="key-values"><dt>已载入文本签名</dt><dd>{{d.rules?.loaded | number}}</dd><dt>内存占用</dt><dd>{{memory(d.service?.memory)}}</dd><dt>运行时长</dt><dd>{{d.service?.uptime | number}} 秒</dd><dt>NFQUEUE 积压</dt><dd data-testid="queue-backlog">{{(d.queue?.queue_total | number) ?? "未读取"}}</dd><dt>累计队列溢出丢包</dt><dd>{{(d.queue?.kernel_drops | number) ?? "未读取"}}</dd><dt>累计用户态投递丢包</dt><dd>{{(d.queue?.user_drops | number) ?? "未读取"}}</dd></dl></section></div>
+  <section class="card engine-card"><header><h2>检测引擎</h2><span class="badge" [class.good]="d.service?.state==='active'">{{d.service?.state==='active'?'运行中':d.service?.state}}</span></header><div class="throughput">{{d.rates?.mbps | number:'1.2-2'}} <small>Mbps</small></div><p class="muted">{{d.rates?.pps | number:'1.0-0'}} packets / sec</p><dl class="key-values"><dt>已载入文本特征</dt><dd>{{d.rules?.loaded | number}}</dd><dt>内存占用</dt><dd>{{memory(d.service?.memory)}}</dd><dt>运行时长</dt><dd>{{d.service?.uptime | number}} 秒</dd><dt>NFQUEUE 积压</dt><dd data-testid="queue-backlog">{{(d.queue?.queue_total | number) ?? "未读取"}}</dd><dt>累计队列溢出丢包</dt><dd>{{(d.queue?.kernel_drops | number) ?? "未读取"}}</dd><dt>累计用户态投递丢包</dt><dd>{{(d.queue?.user_drops | number) ?? "未读取"}}</dd></dl></section></div>
   <ng-container *ngIf="d.network as n">
    <div class="section-heading visibility-heading"><h2>网络可见性</h2></div>
    <p [class.error]="!n.available" [class.muted]="n.available" [attr.role]="n.available?'status':'alert'" *ngIf="n.error && !networkRetrying(n)">{{n.error}}</p>
@@ -36,7 +36,7 @@ import { eventType } from '../event-fields';
    </ng-container>
    </ng-container>
   <section class="card"><header><h2>最新日志</h2></header><ndr-table id="recent" [columns]="recentColumns" [rows]="filterPending ? [] : (d.recent || []).slice(0,10)" [busy]="filterPending" [pagination]="false" [interactive]="true" (rowOpen)="details.event($event)"/></section>
-  <details class="card telemetry engine-counters"><summary>累计引擎计数</summary><dl class="counter-grid"><div><dt>放行包</dt><dd>{{d.ips?.accepted | number}}</dd></div><div><dt>阻断包</dt><dd>{{d.ips?.blocked | number}}</dd></div><div><dt>签名触发丢包</dt><dd>{{d.ips?.rule_drops | number}}</dd></div><div><dt>引擎丢包</dt><dd>{{d.ips?.engine_drops | number}}</dd></div></dl></details>
+  <details class="card telemetry engine-counters"><summary>累计引擎计数</summary><dl class="counter-grid"><div><dt>放行包</dt><dd>{{d.ips?.accepted | number}}</dd></div><div><dt>阻断包</dt><dd>{{d.ips?.blocked | number}}</dd></div><div><dt>特征触发丢包</dt><dd>{{d.ips?.rule_drops | number}}</dd></div><div><dt>引擎丢包</dt><dd>{{d.ips?.engine_drops | number}}</dd></div></dl></details>
  <ndr-modal *ngIf="expandedChart" title="告警与阻断趋势" [wide]="true" (closed)="expandedChart=false"><div class="chart-expanded"><ndr-chart [points]="d.series || []" [viewport]="chartViewport" (pointOpen)="filterTrend($event)"/></div></ndr-modal>
  </ng-container>
 `,styles:[`
@@ -51,7 +51,7 @@ export class OverviewComponent implements OnInit,OnDestroy {
  filters:{key:string;label:string;params:Record<string,string>}[]=[];private period?:{from:number;to:number};
  data:any;expandedChart=false;showTrendTable=false;error='';filterPending=false;showingPrevious=false;refreshing=false;private displayedSelection='';private live:LiveQuery;memory=bytes;time=date;chartViewport=new ChartViewport();
  recentColumns:Column[]=[{key:'ts',label:'时间',kind:'time',width:180},{key:'type',label:'类型',kind:'eventType',width:110},{key:'sig',label:'网络事件摘要',kind:'eventSummary',width:340},{key:'src',label:'源地址',kind:'mono',width:160},{key:'dst',label:'目的地址',kind:'mono',width:160},{key:'proto',label:'协议',width:90},{key:'action',label:'动作',kind:'action',width:100}];
- tops=[{key:'signatures',title:'高频检测签名',field:'sid',table:false,columns:[{key:'sig',label:'签名',width:250},{key:'count',label:'次数',width:80}]},{key:'sources',title:'高频源地址',field:'src',table:false,columns:[{key:'ip',label:'地址',width:190},{key:'count',label:'次数',width:80}]},{key:'destinations',title:'高频目的地址',field:'dst',table:false,columns:[{key:'ip',label:'地址',width:190},{key:'count',label:'次数',width:80}]}];
+ tops=[{key:'signatures',title:'高频检测特征',field:'sid',table:false,columns:[{key:'sig',label:'特征',width:250},{key:'count',label:'次数',width:80}]},{key:'sources',title:'高频源地址',field:'src',table:false,columns:[{key:'ip',label:'地址',width:190},{key:'count',label:'次数',width:80}]},{key:'destinations',title:'高频目的地址',field:'dst',table:false,columns:[{key:'ip',label:'地址',width:190},{key:'count',label:'次数',width:80}]}];
  constructor(api:Api,public state:ConsoleState,public details:Details){
   const failed=(error:string)=>{this.error=error;this.filterPending=false;this.refreshing=false;this.state.viewReady('overview');};
   this.live=new LiveQuery(api,d=>{
@@ -101,7 +101,7 @@ export class OverviewComponent implements OnInit,OnDestroy {
  clearFilters():void{this.filters=[];this.period=undefined;this.refresh();}
  filterTop(top:any,row:any):void{
   if(top.key==='signatures'){
-   if(row.sid)this.applyFilter('signature','签名 '+row.sid,{sid:String(row.sid)});
+   if(row.sid)this.applyFilter('signature','特征 '+row.sid,{sid:String(row.sid)});
    else if(row.sig)this.applyFilter('signature',row.sig,{sig:row.sig});
   }else if(row.ip)this.applyFilter(top.field,(top.field==='src'?'源地址 ':'目的地址 ')+row.ip,{[top.field]:row.ip});
  }

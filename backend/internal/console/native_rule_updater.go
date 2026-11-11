@@ -26,13 +26,13 @@ func (s officialSource) downloadURL(snapshot, oinkcode string) (string, error) {
 	address := s.ArchiveURL
 	if s.Format == registeredArchive {
 		if !sourceVersion.MatchString(snapshot) || snapshot == "auto" {
-			return "", errors.New("Registered 签名快照无效")
+			return "", errors.New("Registered 特征快照无效")
 		}
 		address = strings.Replace(address, "{snapshot}", strings.ReplaceAll(snapshot, ".", ""), 1)
 	}
 	if s.RequiresOinkcode {
 		if !oinkPattern.MatchString(oinkcode) {
-			return "", errors.New("此签名来源需要有效 Oinkcode")
+			return "", errors.New("此特征来源需要有效 Oinkcode")
 		}
 		u, _ := url.Parse(address)
 		q := u.Query()
@@ -68,11 +68,11 @@ func downloadOfficialRules(ctx context.Context, source officialSource, snapshot,
 			}
 		}
 		if e1 != nil || e2 != nil {
-			return nil, errors.New("官方签名下载失败，请检查网络和授权")
+			return nil, errors.New("官方特征下载失败，请检查网络和授权")
 		}
 		expected := regexp.MustCompile(`\b[0-9a-fA-F]{32}\b`).Find(digest)
 		if len(expected) != 32 {
-			return nil, errors.New("官方签名摘要响应无效")
+			return nil, errors.New("官方特征摘要响应无效")
 		}
 		hash := md5.Sum(archive)
 		if strings.EqualFold(hex.EncodeToString(hash[:]), string(expected)) {
@@ -82,7 +82,7 @@ func downloadOfficialRules(ctx context.Context, source officialSource, snapshot,
 			return nil, ctx.Err()
 		}
 	}
-	return nil, errors.New("官方签名摘要与归档不一致，活动签名已保留")
+	return nil, errors.New("官方特征摘要与归档不一致，活动特征已保留")
 }
 
 func readRuleBundle(filename string) (map[string][]byte, error) {
@@ -113,21 +113,21 @@ func readRuleBundle(filename string) (map[string][]byte, error) {
 		total += entry.Size
 		name := path.Clean(entry.Name)
 		if entry.Size < 0 || entry.Size > 256<<20 || total > 512<<20 || count > 100000 || strings.HasPrefix(name, "/") || name == ".." || strings.HasPrefix(name, "../") || strings.Contains(entry.Name, "\\") || (entry.Typeflag != tar.TypeDir && entry.Typeflag != tar.TypeReg) {
-			return nil, errors.New("签名归档包含不安全成员或超过限制")
+			return nil, errors.New("特征归档包含不安全成员或超过限制")
 		}
 		if seen[name] {
-			return nil, errors.New("签名归档包含重复成员")
+			return nil, errors.New("特征归档包含重复成员")
 		}
 		seen[name] = true
 		if entry.Typeflag != tar.TypeReg || !(strings.HasSuffix(name, ".rules") || strings.HasSuffix(name, ".states") || path.Base(name) == "manifest.json") {
 			continue
 		}
 		if retained+entry.Size > 256<<20 {
-			return nil, errors.New("签名文本超过内存预算")
+			return nil, errors.New("特征文本超过内存预算")
 		}
 		data, err := io.ReadAll(io.LimitReader(reader, entry.Size+1))
 		if err != nil || int64(len(data)) != entry.Size {
-			return nil, errors.New("签名归档不完整")
+			return nil, errors.New("特征归档不完整")
 		}
 		files[name] = data
 		retained += entry.Size
@@ -248,13 +248,13 @@ func ruleBundleSelection(files map[string][]byte, format ruleArchiveFormat, engi
 			root := "lightspd/" + kind
 			for _, v := range compatibleBundleVersions(files, root, engine) {
 				if _, ok := files[root+"/"+v+"/rulestates-"+policy+"-ips.states"]; !ok {
-					return nil, nil, fmt.Errorf("签名归档缺少所选 IPS 策略 (%s/%s)", root, v)
+					return nil, nil, fmt.Errorf("特征归档缺少所选 IPS 策略 (%s/%s)", root, v)
 				}
 				roots = append(roots, root+"/"+v+"/")
 			}
 		}
 		if len(roots) == 0 {
-			return nil, nil, errors.New("LightSPD 没有兼容当前引擎的文本签名")
+			return nil, nil, errors.New("LightSPD 没有兼容当前引擎的文本特征")
 		}
 		if data, ok := files["lightspd/manifest.json"]; ok {
 			var manifest Object
@@ -307,7 +307,7 @@ func ruleBundleSelection(files map[string][]byte, format ruleArchiveFormat, engi
 		}
 	}
 	if len(states) == 0 {
-		return nil, nil, errors.New("签名归档缺少所选 IPS 策略")
+		return nil, nil, errors.New("特征归档缺少所选 IPS 策略")
 	}
 	return rules, states, nil
 }
@@ -356,7 +356,7 @@ func compileRuleBundle(ctx context.Context, files map[string][]byte, format rule
 			}
 			id, state, ok := parseRulePolicyState(s)
 			if !ok {
-				return nil, nil, fmt.Errorf("签名策略行无法解析 (%s:%d)", name, lineNumber+1)
+				return nil, nil, fmt.Errorf("特征策略行无法解析 (%s:%d)", name, lineNumber+1)
 			}
 			policyIDs[id] = state
 		}
@@ -475,7 +475,7 @@ func compileRuleBundle(ctx context.Context, files map[string][]byte, format rule
 		output.WriteByte('\n')
 	}
 	if len(rows) == 0 {
-		return nil, nil, errors.New("候选集中没有可用的文本签名")
+		return nil, nil, errors.New("候选集中没有可用的文本特征")
 	}
 	return []byte(output.String()), groupTokens(selected), nil
 }

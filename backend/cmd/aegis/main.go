@@ -53,7 +53,7 @@ func run(ctx context.Context, args []string) error {
 		bind := flags.String("bind", "", "监听地址覆盖")
 		port := flags.Int("port", 0, "监听端口覆盖")
 		prepare := flags.Bool("prepare-thresholds", false, "准备抑制配置")
-		testRules := flags.Bool("test-rules", false, "准备抑制配置并验证签名")
+		testRules := flags.Bool("test-rules", false, "准备抑制配置并验证特征")
 		if err := flags.Parse(args); err != nil {
 			return err
 		}
@@ -85,7 +85,7 @@ func run(ctx context.Context, args []string) error {
 		}
 		return console.ServeHTTP(ctx, cfg)
 	case "manager":
-		state := flags.String("state-dir", os.Getenv("STATE_DIRECTORY"), "签名管理状态目录")
+		state := flags.String("state-dir", os.Getenv("STATE_DIRECTORY"), "特征管理状态目录")
 		socket := flags.String("socket", "/run/ips-rule-manager/control.sock", "控制接口")
 		if err := flags.Parse(args); err != nil {
 			return err
@@ -94,7 +94,7 @@ func run(ctx context.Context, args []string) error {
 			*state = "/var/lib/ips-rule-manager"
 		}
 		if os.Geteuid() != 0 {
-			return errors.New("签名管理器需要 root 权限")
+			return errors.New("特征管理器需要 root 权限")
 		}
 		return console.ServeManager(ctx, *state, *socket, "")
 	case "bridge":

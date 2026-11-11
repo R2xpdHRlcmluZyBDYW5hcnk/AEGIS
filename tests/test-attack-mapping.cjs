@@ -24,7 +24,7 @@ assert.equal(result.tactics[0].id,'TA0002');
 assert.deepEqual(Array.from(result.techniques,x=>x.id),['T1059.001','T1568']);
 assert.equal(mappingFromRule('alert http any any -> any any (msg:"MITRE T1059";sid:2003492;metadata:confidence Medium;)').techniques.length,0);
 const {huntSuggestions}=load('hunt-fields');
-const fields=[{name:'type',desc:'事件类型',example:'type:tls',values:[{value:'alert',label:'检测告警'},{value:'drop',label:'阻断事件'},{value:'tls',label:'TLS 会话'}]},{name:'sig',desc:'检测签名',example:'sig:"ET MALWARE"'}];
+const fields=[{name:'type',desc:'事件类型',example:'type:tls',values:[{value:'alert',label:'检测告警'},{value:'drop',label:'阻断事件'},{value:'tls',label:'TLS 会话'}]},{name:'sig',desc:'检测特征',example:'sig:"ET MALWARE"'}];
 assert.deepEqual(Array.from(huntSuggestions('',fields),x=>x.example),['type:','sig:']);
 assert.equal(huntSuggestions('sig',fields)[0].example,'sig:');
 assert.equal(huntSuggestions('-sig',fields)[0].example,'-sig:');

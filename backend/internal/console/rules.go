@@ -175,7 +175,7 @@ func newDrafts(live rulePaths, state string) (*Drafts, error) {
 	if err := readJSON(filepath.Join(d.root, "state.json"), &saved); err == nil {
 		dirty, ok := saved["dirty"].(bool)
 		if !ok {
-			return nil, errors.New("待应用签名状态损坏")
+			return nil, errors.New("待应用特征状态损坏")
 		}
 		d.Dirty = dirty
 		d.pending.Store(dirty)
@@ -334,21 +334,21 @@ func parseGroup(value string) (string, string, error) {
 	if kind == "group-source" {
 		source, name, ok := strings.Cut(code, ":")
 		if !ok {
-			return "", "", errors.New("签名分组缺少来源")
+			return "", "", errors.New("特征分组缺少来源")
 		}
 		source, e := url.PathUnescape(source)
 		name, f := url.PathUnescape(name)
 		if e != nil || f != nil || source == "" || name == "" {
-			return "", "", errors.New("无效签名分组")
+			return "", "", errors.New("无效特征分组")
 		}
 		return source, strings.TrimSuffix(name, ".rules"), nil
 	}
-	return "", "", errors.New("无效签名分组")
+	return "", "", errors.New("无效特征分组")
 }
 func canonicalSelector(value string) (string, error) {
 	value = strings.TrimSpace(value)
 	if len(value) == 0 || len(value) > 2000 || strings.ContainsAny(value, "\r\n\x00") {
-		return "", errors.New("无效签名范围")
+		return "", errors.New("无效特征范围")
 	}
 	if regexp.MustCompile(`^[0-9]+(?::[0-9]+)?$`).MatchString(value) || strings.HasPrefix(value, "sid:") {
 		id, err := identity(value)
@@ -363,7 +363,7 @@ func canonicalSelector(value string) (string, error) {
 		return groupSelector(value, ""), nil
 	}
 	if code == "" {
-		return "", errors.New("签名范围为空")
+		return "", errors.New("特征范围为空")
 	}
 	switch kind {
 	case "group", "group-source":
@@ -380,7 +380,7 @@ func canonicalSelector(value string) (string, error) {
 		}
 		return value, nil
 	}
-	return "", errors.New("签名范围类型无效")
+	return "", errors.New("特征范围类型无效")
 }
 func selectorMatches(selector string, r *Rule) bool {
 	kind, code, _ := strings.Cut(selector, ":")
@@ -565,7 +565,7 @@ func (c *RuleCatalog) Load(ctx context.Context) ([]*Rule, []Object, error) {
 				return nil
 			}
 			if len(paths) > 10000 {
-				return errors.New("签名目录文件过多")
+				return errors.New("特征目录文件过多")
 			}
 			if strings.HasSuffix(path, ".rules") || strings.HasSuffix(path, "-rules.tar.gz") || strings.HasSuffix(path, "sources.json") || strings.HasSuffix(path, ".yaml") || strings.HasSuffix(path, ".json") {
 				paths = append(paths, path)
@@ -627,7 +627,7 @@ func (c *RuleCatalog) Load(ctx context.Context) ([]*Rule, []Object, error) {
 		if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
 			continue
 		} else if info.Size() > limit {
-			return nil, nil, errors.New("签名目录输入超过容量限制")
+			return nil, nil, errors.New("特征目录输入超过容量限制")
 		}
 		source, enabled := "本地目录", true
 		managed := false
@@ -706,7 +706,7 @@ func (c *RuleCatalog) Load(ctx context.Context) ([]*Rule, []Object, error) {
 				if b.members != nil {
 					groups := b.members[r.ID]
 					if len(groups) == 0 {
-						return parsedBatch{}, errors.New("签名分组缓存缺少签名，请重新应用签名")
+						return parsedBatch{}, errors.New("特征分组缓存缺少特征，请重新应用特征")
 					}
 					r.Group, r.Origins = groups[0], nil
 					for _, group := range groups {
@@ -1022,11 +1022,11 @@ func loadBans(p rulePaths) []Object {
 }
 func validateManualRule(line string) error {
 	if len(line) == 0 || len(line) > 4096 || strings.ContainsAny(line, "\r\n\x00") {
-		return errors.New("签名必须为单行且不超过 4096 字节")
+		return errors.New("特征必须为单行且不超过 4096 字节")
 	}
 	trimmed := strings.TrimSpace(line)
 	if !ruleAction.MatchString(trimmed) || !strings.HasSuffix(trimmed, ")") || !strings.Contains(trimmed, "(") {
-		return errors.New("签名结构无效")
+		return errors.New("特征结构无效")
 	}
 	quoted, escaped := false, false
 	depth := 0
@@ -1049,13 +1049,13 @@ func validateManualRule(line string) error {
 			if c == ')' {
 				depth--
 				if depth < 0 {
-					return errors.New("签名括号无效")
+					return errors.New("特征括号无效")
 				}
 			}
 		}
 	}
 	if quoted || depth != 0 {
-		return errors.New("签名引号或括号未闭合")
+		return errors.New("特征引号或括号未闭合")
 	}
 	return nil
 }

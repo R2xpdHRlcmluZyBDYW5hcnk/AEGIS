@@ -6,7 +6,7 @@ const groups: {title:string; fields:[string,string][]}[] = [
  {title:'连接流量',fields:[['flow_start','连接开始'],['flow_end','连接结束'],['flow_age','持续时间（秒）'],['bytes_toserver','客户端 → 服务端负载字节数'],['bytes_toclient','服务端 → 客户端负载字节数'],['pkts_toserver','客户端 → 服务端包数'],['pkts_toclient','服务端 → 客户端包数']]},
  {title:'事件概况',fields:[['ts','事件时间'],['type','事件类型'],['action','处置结果'],['sev','严重级别'],['level','风险等级'],['app','应用'],['proto','传输协议']]},
  {title:'通信信息',fields:[['src','源地址'],['sport','源端口'],['dst','目的地址'],['dport','目的端口'],['dir','通信方向'],['iif','采集接口'],['ip_version','IP 版本'],['vlan','VLAN 标识'],['pkt_src','数据包来源']]},
- {title:'检测信息',fields:[['sig','检测签名'],['sig_id','签名编号（SID）'],['cat','威胁分类'],['reason','阻断原因'],['ips_action','签名动作'],['ids_reason','IDS 模式原因'],['gid','生成器编号（GID）'],['rev','签名版本'],['anom','协议异常'],['anomaly_gid','异常生成器编号（GID）'],['anomaly_sid','异常签名编号（SID）']]},
+ {title:'检测信息',fields:[['sig','检测特征'],['sig_id','特征编号（SID）'],['cat','威胁分类'],['reason','阻断原因'],['ips_action','特征动作'],['ids_reason','IDS 模式原因'],['gid','生成器编号（GID）'],['rev','特征版本'],['anom','协议异常'],['anomaly_gid','异常生成器编号（GID）'],['anomaly_sid','异常特征编号（SID）']]},
  {title:'HTTP',fields:[['host','主机名'],['url','请求路径'],['method','请求方法'],['status','响应状态码'],['httpver','HTTP 版本'],['ua','用户代理'],['ct','内容类型'],['http_request_bytes','请求体字节数'],['clen','响应体字节数'],['referrer','来源页面']]},
  {title:'DNS',fields:[['dns','查询域名'],['rrtype','记录类型'],['rcode','响应代码'],['answers','解析结果'],['dns_ttl','最小应答 TTL（秒）']]},
  {title:'TLS',fields:[['sni','服务器名称（SNI）'],['tlsver','TLS 版本'],['alpn','应用层协议协商（ALPN）'],['subject','证书主体'],['issuer','证书签发者'],['cipher','密码套件'],['curve','椭圆曲线'],['validation_status','证书验证状态']]},

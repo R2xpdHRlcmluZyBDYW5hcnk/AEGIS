@@ -46,13 +46,13 @@ func (p rulePaths) officialSourcePath() string {
 func (p rulePaths) officialSources() (officialCatalog, error) {
 	data, err := regularRead(p.officialSourcePath(), 64<<10)
 	if err != nil {
-		return officialCatalog{}, errors.New("无法读取官方签名来源配置 " + officialSourceFile)
+		return officialCatalog{}, errors.New("无法读取官方特征来源配置 " + officialSourceFile)
 	}
 	var config struct {
 		Sources []officialSource  `json:"sources"`
 		Aliases map[string]string `json:"snapshot_aliases"`
 	}
-	invalid := errors.New("官方签名来源配置无效 " + officialSourceFile)
+	invalid := errors.New("官方特征来源配置无效 " + officialSourceFile)
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&config) != nil || decoder.Decode(new(any)) != io.EOF || len(config.Sources) == 0 || len(config.Sources) > 128 {
@@ -73,6 +73,18 @@ func (p rulePaths) officialSources() (officialCatalog, error) {
 			source.Priority < 1 || priorities[source.Priority] || strings.TrimSpace(source.Vendor) == "" ||
 			strings.TrimSpace(source.Summary) == "" || strings.TrimSpace(source.License) == "" || !source.validArchive() {
 			return officialCatalog{}, invalid
+		}
+		// Update only the old default display strings, leaving the source file intact.
+		switch source.Summary {
+		case "Snort Community 文本签名":
+			source.Summary = "Snort Community 文本特征"
+		case "免费注册签名集，需 Snort Oinkcode":
+			source.Summary = "免费注册特征集，需 Snort Oinkcode"
+		case "Talos LightSPD 文本签名":
+			source.Summary = "Talos LightSPD 文本特征"
+		}
+		if source.License == "Snort 签名许可" {
+			source.License = "Snort 特征许可"
 		}
 		catalog.sources[source.Name] = source
 		priorities[source.Priority] = true

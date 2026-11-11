@@ -233,14 +233,14 @@ func (m *RuleManager) Read(ctx context.Context, name string, args []any, params 
 			gov, err = m.governance(ctx)
 			data = gov
 		default:
-			return nil, errors.New("无效签名标签页")
+			return nil, errors.New("无效特征标签页")
 		}
 		if err != nil {
 			return nil, err
 		}
 		return Object{"summary": summary, "governance": gov, "data": data, "schedule": schedule}, nil
 	}
-	return nil, errors.New("不支持的签名管理查询")
+	return nil, errors.New("不支持的特征管理查询")
 }
 func (m *RuleManager) governance(ctx context.Context) (Object, error) {
 	result := governance(m.drafts.paths)
@@ -315,7 +315,7 @@ func (m *RuleManager) Dispatch(ctx context.Context, request Object, rootPeer boo
 	op := text(request["operation"])
 	allowed := map[string]string{"ping": "operation", "read": "operation name args kwargs", "schedule": "operation", "history-status": "operation", "maintenance": "operation enabled", "refresh-policies": "operation", "history-reset": "operation scope", "history-reset-begin": "operation job", "history-reset-finish": "operation job", "mutate": "operation method path body"}[op]
 	if allowed == "" {
-		return nil, errors.New("不支持的签名管理操作")
+		return nil, errors.New("不支持的特征管理操作")
 	}
 	keys := map[string]bool{}
 	for _, key := range strings.Fields(allowed) {
@@ -346,7 +346,7 @@ func (m *RuleManager) Dispatch(ctx context.Context, request Object, rootPeer boo
 		names := map[string]string{"governance_state": "details", "rule_group_catalog": "", "suppression_group_catalog": "removable", "rule_groups_search": "query q scope exclude", "rule_group_detail": "name group source query q offset limit", "hunt_rules_list": "", "app.rules_payload": "", "app.sources_catalog": "", "app.rules_page": "tab query q offset limit source exclude include", "app.rule_selection": "selector q query source exclude include offset limit scope", "app.rules_search": "q query source exclude include offset limit scope browse include_groups", "sys.update_status": "", "sys.reload_state": "", "sys.service": "", "sys.rule_log": "id identity offset", "system_payload": ""}
 		allowed, known := names[text(request["name"])]
 		if !known {
-			return nil, errors.New("不支持的签名管理查询")
+			return nil, errors.New("不支持的特征管理查询")
 		}
 		for key := range params {
 			found := false
@@ -375,7 +375,7 @@ func (m *RuleManager) Dispatch(ctx context.Context, request Object, rootPeer boo
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		if m.paused || m.jobs.Busy() {
-			return nil, errors.New("签名或维护任务正在执行")
+			return nil, errors.New("特征或维护任务正在执行")
 		}
 		m.policyAfter = time.Now().Add(5 * time.Minute)
 		return m.jobs.Start("policy-refresh", "maintenance", "")
@@ -390,7 +390,7 @@ func (m *RuleManager) Dispatch(ctx context.Context, request Object, rootPeer boo
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		if m.jobs.Busy() {
-			return Object{"ok": false, "error": "签名任务正在执行"}, nil
+			return Object{"ok": false, "error": "特征任务正在执行"}, nil
 		}
 		path := filepath.Join(m.state, "maintenance")
 		if strings.TrimSpace(readText(path)) == "history-reset" {
@@ -459,12 +459,12 @@ func (m *RuleManager) Dispatch(ctx context.Context, request Object, rootPeer boo
 		}
 		method, path := text(request["method"]), text(request["path"])
 		if !validMutation(method, path) {
-			return nil, errors.New("不支持的签名操作")
+			return nil, errors.New("不支持的特征操作")
 		}
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		if m.paused || m.jobs.Busy() {
-			return Object{"ok": false, "error": "签名或维护任务正在执行，请稍后重试"}, nil
+			return Object{"ok": false, "error": "特征或维护任务正在执行，请稍后重试"}, nil
 		}
 		body := object(request["body"])
 		if path == "/api/actions/update" {
@@ -510,7 +510,7 @@ func (m *RuleManager) Dispatch(ctx context.Context, request Object, rootPeer boo
 				return nil, err
 			}
 			if sidExpression.MatchString(line) || validateSuggestion(line) != nil {
-				return nil, errors.New("签名建议不符合受限格式")
+				return nil, errors.New("特征建议不符合受限格式")
 			}
 			used := map[int64]bool{}
 			for _, path := range []string{filepath.Join(m.live.Data, "rules/snort.rules"), m.live.controls["LOCAL_RULES"], m.live.controls["HUNT_RULES"], m.live.controls["BAN_RULES"], m.drafts.paths.controls["HUNT_RULES"]} {
@@ -558,7 +558,7 @@ func (m *RuleManager) Dispatch(ctx context.Context, request Object, rootPeer boo
 		}
 		return result, nil
 	}
-	return nil, errors.New("不支持的签名管理操作")
+	return nil, errors.New("不支持的特征管理操作")
 }
 func valuesFrom(body Object, plural, single string) ([]string, error) {
 	var values []any
@@ -568,7 +568,7 @@ func valuesFrom(body Object, plural, single string) ([]string, error) {
 		values = []any{body[single]}
 	}
 	if len(values) == 0 || len(values) > 1000 {
-		return nil, errors.New("签名操作数量无效")
+		return nil, errors.New("特征操作数量无效")
 	}
 	out := []string{}
 	for _, v := range values {
@@ -577,11 +577,11 @@ func valuesFrom(body Object, plural, single string) ([]string, error) {
 			if n, ok := v.(json.Number); ok {
 				value = string(n)
 			} else {
-				return nil, errors.New("签名范围格式无效")
+				return nil, errors.New("特征范围格式无效")
 			}
 		}
 		if value == "" {
-			return nil, errors.New("签名范围不能为空")
+			return nil, errors.New("特征范围不能为空")
 		}
 		out = append(out, value)
 	}
@@ -633,11 +633,11 @@ func (m *RuleManager) edit(ctx context.Context, method, path string, body Object
 		}
 		rule := parseRule(line, "", "", true)
 		if rule == nil {
-			return nil, errors.New("签名缺少有效的 GID:SID")
+			return nil, errors.New("特征缺少有效的 GID:SID")
 		}
 		for _, existing := range manualRules(p) {
 			if integer(existing["gid"]) == rule.ID.GID && integer(existing["sid"]) == rule.ID.SID {
-				return nil, errors.New("签名已存在")
+				return nil, errors.New("特征已存在")
 			}
 		}
 		if err := appendPrivateLine(p.controls["HUNT_RULES"], line); err != nil {
@@ -662,7 +662,7 @@ func (m *RuleManager) edit(ctx context.Context, method, path string, body Object
 			kept = append(kept, line)
 		}
 		if !found {
-			return nil, errors.New("手动签名不存在")
+			return nil, errors.New("手动特征不存在")
 		}
 		return ok(), atomicWrite(p.controls["HUNT_RULES"], []byte(strings.Join(kept, "\n")+"\n"), 0600)
 	}
@@ -812,7 +812,7 @@ func (m *RuleManager) edit(ctx context.Context, method, path string, body Object
 		}
 	}
 	if kind == "" {
-		return nil, errors.New("不支持的签名编辑")
+		return nil, errors.New("不支持的特征编辑")
 	}
 	values := []string{}
 	var err error
@@ -989,7 +989,7 @@ func ServeManager(ctx context.Context, state, socket, root string) error {
 		probe, e := net.DialTimeout("unix", socket, time.Second)
 		if e == nil {
 			probe.Close()
-			return errors.New("签名管理器已运行")
+			return errors.New("特征管理器已运行")
 		}
 		if err = os.Remove(socket); err != nil {
 			return err
@@ -1059,7 +1059,7 @@ func ServeManager(ctx context.Context, state, socket, root string) error {
 		default:
 			conn.SetDeadline(time.Now().Add(250 * time.Millisecond))
 			bufio.NewReader(io.LimitReader(conn, rpcRequestLimit+1)).ReadBytes('\n')
-			conn.Write([]byte("{\"ok\":false,\"error\":\"签名管理服务繁忙，请稍后重试\"}\n"))
+			conn.Write([]byte("{\"ok\":false,\"error\":\"特征管理服务繁忙，请稍后重试\"}\n"))
 			conn.Close()
 		}
 	}

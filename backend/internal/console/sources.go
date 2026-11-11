@@ -91,7 +91,7 @@ func sourceCredentials(directory string, fallback Object) (Object, error) {
 		err = nil
 	}
 	if err != nil {
-		return nil, errors.New("签名来源凭据配置无效")
+		return nil, errors.New("特征来源凭据配置无效")
 	}
 	return value, nil
 }
@@ -138,7 +138,7 @@ func publicSources(p rulePaths, fallback Object) (Object, error) {
 		if err != nil {
 			return nil, errors.New("自定义源地址无效")
 		}
-		rows = append(rows, Object{"name": name, "vendor": item["label"], "summary": "自定义 Snort 3 文本签名", "license": "由签名提供方授权", "custom": true, "enabled": item["enabled"], "format": item["format"], "download_host": parsed.Host, "credential_configured": text(item["token"]) != "", "requires_code": false})
+		rows = append(rows, Object{"name": name, "vendor": item["label"], "summary": "自定义 Snort 3 文本特征", "license": "由特征提供方授权", "custom": true, "enabled": item["enabled"], "format": item["format"], "download_host": parsed.Host, "credential_configured": text(item["token"]) != "", "requires_code": false})
 	}
 	return Object{"sources": rows, "error": ""}, nil
 }
@@ -151,7 +151,7 @@ func configureSource(p rulePaths, value, fallback Object) error {
 	name := strings.ToLower(strings.TrimSpace(text(value["name"])))
 	if spec, ok := catalog.sources[name]; ok {
 		if !spec.RequiresOinkcode {
-			return errors.New("此签名来源不需要 Oinkcode")
+			return errors.New("此特征来源不需要 Oinkcode")
 		}
 		current, err := sourceCredentials(directory, fallback)
 		if err != nil {
@@ -175,7 +175,7 @@ func configureSource(p rulePaths, value, fallback Object) error {
 		}
 		version := text(get(value, "registered_version", get(current, "registered_version", "auto")))
 		if !sourceVersion.MatchString(version) {
-			return errors.New("Registered 签名快照版本无效")
+			return errors.New("Registered 特征快照版本无效")
 		}
 		current["registered_version"] = version
 		policy := text(get(value, "ips_policy", get(current, "ips_policy", get(fallback, "ips_policy", "balanced"))))
@@ -201,7 +201,7 @@ func configureSource(p rulePaths, value, fallback Object) error {
 	}
 	label := strings.TrimSpace(text(get(value, "label", get(current, "label", name))))
 	if len([]rune(label)) < 1 || len([]rune(label)) > 100 {
-		return errors.New("签名来源名称需要 1 至 100 字")
+		return errors.New("特征来源名称需要 1 至 100 字")
 	}
 	address := text(present(value["url"], current["url"]))
 	parsed, err := url.Parse(address)
