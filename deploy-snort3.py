@@ -138,8 +138,6 @@ def render_unit(name,text):
     text=text.replace('/var/lib/ips-rule-manager','/var/lib/ips-snort-rule-manager')
     if '[Service]\n' in text:
         text=text.replace('[Service]\n','[Service]\nEnvironment=IPS_PROGRAM_DIRECTORY='+PROGRAM_DIR.as_posix()+'\n',1)
-    if name=='ips.service':
-        text=text.replace('Conflicts=snort.service','Conflicts=snort.service ips-legacy.service')
     return text
 
 

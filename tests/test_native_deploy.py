@@ -53,7 +53,8 @@ class ArchiveTests(unittest.TestCase):
         self.assertIn('ExecStart=/opt/ips-console/bin/ips-supervisor',detector)
         self.assertNotIn('AllowedCPUs=',detector)
         self.assertNotIn('CPUAffinity=',detector)
-        self.assertIn('ips-legacy.service',detector)
+        conflicts=[line for line in detector.splitlines() if line.startswith('Conflicts=')]
+        self.assertEqual(conflicts,['Conflicts=snort.service'])
         self.assertIn('StateDirectory=ips-snort-web',web)
         self.assertIn('ips-web.conf:/etc/ips-snort-web.conf',web)
         self.assertIn('StateDirectory=ips-snort-rule-manager',manager)
