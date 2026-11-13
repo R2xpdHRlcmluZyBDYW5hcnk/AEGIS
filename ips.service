@@ -3,8 +3,6 @@ Description=Snort IPS detector and NFQUEUE supervisor
 Documentation=man:snort(8)
 After=network-online.target nftables.service
 Wants=network-online.target
-# Prevent a second detector from claiming the same NFQUEUE listeners.
-Conflicts=snort.service
 
 [Service]
 Type=simple
