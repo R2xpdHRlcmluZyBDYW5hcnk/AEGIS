@@ -11,8 +11,13 @@ import { eventType } from '../event-fields';
  <div class="overview-filters" *ngIf="filters.length" aria-label="概览筛选"><span>当前筛选</span><button class="quiet" *ngFor="let filter of filters" (click)="removeFilter(filter.key)" [attr.aria-label]="'移除筛选 '+filter.label">{{filter.label}} ×</button><button class="quiet" (click)="clearFilters()">清除筛选</button></div>
  <p *ngIf="error" class="error" role="alert">{{error}}</p>
  <div *ngIf="!data && !error" class="overview-loading" role="status" aria-label="正在加载概览" aria-busy="true" data-testid="overview-loading"><svg class="overview-spinner" viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="13"/></svg></div>
- <ng-container *ngIf="data as d"><div class="stats-grid resource-summary overview-summary">
-  <header><h2>检测概况</h2><span *ngIf="d.range?.length===2" class="muted">统计时段 {{time(d.range[0])}} 至 {{time(d.range[1])}}</span></header>
+ <ng-container *ngIf="data as d">@let matches = resultsMatchFilters;
+ <div class="stats-grid resource-summary overview-summary">
+  <header><h2>检测概况</h2><div class="overview-timing muted">
+   <span *ngIf="matches && d.range?.length===2 && d.range[0]>0" data-testid="overview-event-range">{{period?'固定时段':'事件覆盖'}} {{time(d.range[0])}} 至 {{time(d.range[1])}}</span>
+   <span *ngIf="d.overview_state?.as_of || d.ts">统计更新 {{time(d.overview_state?.as_of || d.ts)}}</span>
+   <span *ngIf="!matches">{{filterPending?'筛选更新中':'上次统计'}}</span>
+  </div></header>
   <button class="stat-card alert" (click)="filterKind('alerts','检测告警')" title="筛选检测告警" [attr.aria-pressed]="hasKind('alerts')"><span>检测告警</span><strong data-testid="alerts-total">{{d.security?.alerts | number}}</strong></button>
   <button class="stat-card critical" (click)="filterKind('high','高危告警')" title="筛选高危告警" [attr.aria-pressed]="hasKind('high')"><span>高危告警</span><strong data-testid="high-total">{{d.security?.high | number}}</strong></button>
   <button class="stat-card blocked" (click)="filterKind('drops','阻断事件')" title="筛选阻断事件" [attr.aria-pressed]="hasKind('drops')"><span>阻断事件</span><strong data-testid="drops-total">{{d.security?.drops | number}}</strong></button>
@@ -21,7 +26,7 @@ import { eventType } from '../event-fields';
   <section class="card engine-card"><header><h2>检测引擎</h2><span class="badge" [class.good]="d.service?.state==='active'">{{d.service?.state==='active'?'运行中':d.service?.state}}</span></header><div class="throughput">{{d.rates?.mbps | number:'1.2-2'}} <small>Mbps</small></div><p class="muted">{{d.rates?.pps | number:'1.0-0'}} packets / sec</p><dl class="key-values"><dt>已载入文本特征</dt><dd>{{d.rules?.loaded | number}}</dd><dt>内存占用</dt><dd>{{memory(d.service?.memory)}}</dd><dt>运行时长</dt><dd>{{d.service?.uptime | number}} 秒</dd><dt>NFQUEUE 积压</dt><dd data-testid="queue-backlog">{{(d.queue?.queue_total | number) ?? "未读取"}}</dd><dt>累计队列溢出丢包</dt><dd>{{(d.queue?.kernel_drops | number) ?? "未读取"}}</dd><dt>累计用户态投递丢包</dt><dd>{{(d.queue?.user_drops | number) ?? "未读取"}}</dd></dl></section></div>
   <section class="card">
    <header><h2>最新日志</h2></header>
-   <ndr-table id="recent" [columns]="recentColumns" [rows]="resultsMatchFilters ? (d.recent || []).slice(0,10) : []" [busy]="filterPending" [empty]="resultsMatchFilters?'暂无日志':'无法读取当前筛选的日志'" [pagination]="false" [interactive]="true" (rowOpen)="details.event($event)"/>
+   <ndr-table id="recent" [columns]="recentColumns" [rows]="matches ? (d.recent || []).slice(0,10) : []" [busy]="filterPending" [empty]="matches?'暂无日志':'无法读取当前筛选的日志'" [pagination]="false" [interactive]="true" (rowOpen)="details.event($event)"/>
   </section>
   <ng-container *ngIf="d.network as n">
    <div class="section-heading visibility-heading"><h2>网络可见性</h2></div>
@@ -52,7 +57,7 @@ import { eventType } from '../event-fields';
  @media(prefers-reduced-motion:reduce){.overview-spinner,.overview-spinner circle{animation:none}.overview-spinner circle{stroke-dasharray:20 82}}
 `]})
 export class OverviewComponent implements OnInit,OnDestroy {
- filters:{key:string;label:string;params:Record<string,string>}[]=[];private period?:{from:number;to:number};
+ filters:{key:string;label:string;params:Record<string,string>}[]=[];period?:{from:number;to:number};
  data:any;expandedChart=false;showTrendTable=false;error='';filterPending=false;showingPrevious=false;refreshing=false;private displayedSelection='';private live:LiveQuery;memory=bytes;time=date;chartViewport=new ChartViewport();
  recentColumns:Column[]=[
   {key:'ts',label:'时间',kind:'time',width:154},

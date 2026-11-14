@@ -99,9 +99,6 @@ try {
   assert.deepEqual(await evaluate(`[...document.querySelectorAll('.network-summary .stat-card strong')].map(e=>e.textContent.trim())`),['1','2','1','1'],'network counters render');
   assert.equal(await evaluate(`document.querySelector('[data-testid="high-total"]').textContent.trim()`),'1');
   assert.equal(await evaluate(`document.querySelector('[data-testid="drops-total"]').textContent.trim()`),'2','suppressed blocking actions remain visible');
-  // This key can still hold the initial prewarm snapshot while the UI uses a
-  // different time-window key. Ingestion intentionally preserves both snapshots
-  // until their background refresh completes.
   let overview;
   for(let i=0;i<100;i++){overview=await api('/api/overview?scope=cache&view=panel');if(overview.security.alerts===3)break;await pause(100);}
   assert.equal(overview.security.alerts,3);assert.equal(overview.security.high,1);assert.equal(overview.security.drops,2);
@@ -120,6 +117,22 @@ try {
   await clickText('清除筛选',`document.querySelector('ndr-overview')`);
   await until(`document.querySelector('[data-testid="alerts-total"]')?.textContent.trim()==='3'&&document.querySelectorAll('ndr-overview ndr-table#recent tbody tr[tabindex]').length===10`);
   await until(`!!document.querySelector('ndr-chart .echarts-surface svg')`);
+  const rangeLabel=`document.querySelector('[data-testid="overview-event-range"]')?.textContent.trim()`;
+  const residentLabel=await evaluate(rangeLabel);
+  assert.match(residentLabel,/^事件覆盖 /);
+  assert.match(await evaluate(`document.querySelector('.overview-timing').textContent`),/统计更新 /);
+  const barSelector='.trend svg path[fill="#724e26"], .trend svg rect[fill="#724e26"]';
+  await until(`[...document.querySelectorAll(${JSON.stringify(barSelector)})].some(bar=>bar.getBoundingClientRect().height>10)`);
+  const point=await evaluate(`(()=>{const bar=[...document.querySelectorAll(${JSON.stringify(barSelector)})].find(bar=>bar.getBoundingClientRect().height>10);const r=bar.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};})()`);
+  await cdp('Input.dispatchMouseEvent',{type:'mousePressed',...point,button:'left',clickCount:1});
+  await cdp('Input.dispatchMouseEvent',{type:'mouseReleased',...point,button:'left',clickCount:1});
+  await until(`(${rangeLabel})?.startsWith('固定时段 ')`);
+  await holdOverviewRequests();
+  await evaluate(`[...document.querySelectorAll('.overview-filters button')].find(button=>button.textContent.trim()==='清除筛选').click()`);
+  await until(`!document.querySelector('[data-testid="overview-event-range"]') && document.querySelector('.overview-timing').textContent.includes('筛选更新中')`);
+  await releaseOverviewRequests();
+  await until(`${rangeLabel}===${JSON.stringify(residentLabel)}`);
+  assert.equal(await evaluate(`!!document.querySelector('.overview-filters')`),false,'clearing the chart filter resumes resident event coverage');
   await shot('go-overview-desktop.png');
   await cdp('Fetch.enable',{patterns:[{urlPattern:'*/api/db/stats',requestStage:'Request'}]});
   await nav('system');

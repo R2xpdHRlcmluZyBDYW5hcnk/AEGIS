@@ -510,6 +510,10 @@ func (h *HTTPHandler) stream(w http.ResponseWriter, r *http.Request, params url.
 }
 func (h *HTTPHandler) streamPayload(ctx context.Context, topic string, params url.Values) (Object, error) {
 	switch topic {
+	case "overview":
+		query := copyValues(params)
+		query.Del("topic")
+		return h.App.Read(ctx, topic, query)
 	case "system":
 		return h.App.System(ctx)
 	case "rules", "manage":

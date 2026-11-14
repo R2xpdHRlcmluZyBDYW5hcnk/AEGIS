@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -120,6 +121,64 @@ func TestOverviewSnapshotSurvivesIngestionAndBlockedRefresh(t *testing.T) {
 	})
 	if calls.Load() != 2 {
 		t.Fatal("ordinary reads duplicated refresh jobs", calls.Load())
+	}
+}
+
+func TestOverviewStreamSharesResidentSnapshotAfterClearingTimeFilter(t *testing.T) {
+	app := overviewTestApp(t)
+	n := NewOverviewSnapshots(app)
+	app.Overview = n
+	n.compute = func(_ context.Context, params url.Values) (Object, error) {
+		if from := params.Get("from"); from != "" {
+			return Object{"range": []float64{number(from), number(params.Get("to"))}}, nil
+		}
+		return Object{"range": []float64{100, 200 + float64(app.Recent.Version.Load())}}, nil
+	}
+	startOverview(t, app)
+	handler := NewHTTPHandler(app)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	rest := defaultOverviewParams()
+	stream := copyValues(rest)
+	stream.Set("topic", "overview")
+	read := func(params url.Values) []any {
+		t.Helper()
+		value, err := handler.streamPayload(ctx, "overview", params)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return value["range"].([]any)
+	}
+	initial := read(stream)
+	filter := copyValues(stream)
+	filter.Set("from", "150")
+	filter.Set("to", "160")
+	if got := read(filter); number(got[0]) != 150 || number(got[1]) != 160 {
+		t.Fatal("time filter was lost", got)
+	}
+	filter.Del("topic")
+	if value, err := app.Read(ctx, "overview", filter); err != nil || number(value["range"].([]any)[0]) != 150 {
+		t.Fatal("REST time filter did not match stream", value, err)
+	}
+	if entries := integer(n.Status()["entries"]); entries != 2 {
+		t.Fatalf("REST and SSE should share the default and filtered entries, got %d", entries)
+	}
+	app.Recent.Version.Add(1)
+	n.signal()
+	var latest []any
+	waitOverview(t, func() bool {
+		value, err := app.Read(ctx, "overview", rest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		latest = value["range"].([]any)
+		return number(latest[1]) > number(initial[1])
+	})
+	if got := read(stream); !slices.Equal(got, latest) {
+		t.Fatal("clearing the filter did not resume the latest resident range", got, latest)
+	}
+	if stream.Get("topic") != "overview" {
+		t.Fatal("stream dispatch mutated the caller's parameters")
 	}
 }
 
