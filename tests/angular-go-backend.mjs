@@ -172,10 +172,41 @@ try {
   assert.equal(await evaluate(`!!document.querySelector('ndr-overview>[role="status"]:not(.overview-loading)')`),false,'refreshing a retained snapshot adds no status text');
   await releaseOverviewRequests();
   await nav('alerts');await until(`document.querySelector('ndr-events ndr-table tbody tr')?.textContent.includes('Fixture')`);
+  for(const [width,height] of [[1280,800],[1440,1100],[1920,1080]]){
+    await cdp('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false});
+    assert.equal(await evaluate(`(()=>{const table=document.querySelector('.event-results .table-scroll');return table.scrollWidth<=table.clientWidth;})()`),true,'incident triage columns fit at '+width);
+  }
+  await cdp('Emulation.setDeviceMetricsOverride',{width:1440,height:1100,deviceScaleFactor:1,mobile:false});
+  assert.equal(await evaluate(`document.querySelector('.event-results tbody td[title="198.51.100.4:443"]')?.textContent.trim()`),'198.51.100.4:443','destination shows address and port together');
   await evaluate(`document.querySelector('ndr-events ndr-table tbody tr').click()`);
   await until(`!!document.querySelector('.incident-heading')`);
   assert.equal(await evaluate(`document.querySelector('dialog').textContent.includes('会话 ID')`),true);
   await shot('go-incident-desktop.png');await closeModal();
+  await evaluate(`document.querySelector('ndr-events .filter-line input[type=checkbox]').click()`);
+  await set('[aria-label="搜索查询"]','Fixture');
+  await clickText('查询 →');
+  await until(`document.querySelector('.event-results tbody tr')?.textContent.includes('Fixture')`);
+  await set('[aria-label="搜索查询"]','unsubmitted draft');
+  await until(`document.querySelector('.result-meta')?.textContent.includes('筛选已修改')`);
+  await cdp('Fetch.enable',{patterns:[{urlPattern:'*/api/events*format=csv*',requestStage:'Request'}]});
+  const exportRequest = new Promise(resolve=>{
+    ws.addEventListener('message',function onExport({data}){
+      const message=JSON.parse(data);
+      if(message.method!=='Fetch.requestPaused')return;
+      ws.removeEventListener('message',onExport);
+      resolve(new URL(message.params.request.url).searchParams);
+    });
+  });
+  await clickText('导出原始告警 CSV');
+  let exportTimer;
+  try{
+    const params=await Promise.race([exportRequest,new Promise((_,reject)=>{exportTimer=setTimeout(()=>reject(new Error('CSV request timed out')),10000);})]);
+    assert.equal(params.get('q'),'Fixture','export uses the submitted query');
+    assert.ok(Number(params.get('from'))>0&&Number(params.get('to'))>Number(params.get('from')),'export fixes the displayed time range');
+  }finally{
+    clearTimeout(exportTimer);
+    await cdp('Fetch.disable');
+  }
   await nav('hunt');await until(`document.querySelectorAll('ndr-events ndr-table tbody tr').length===10`);
   await set('[aria-label="搜索查询"]','proto:tcp AND type:(http OR tls)');await clickText('查询 →');
   await until(`document.querySelectorAll('ndr-events ndr-table tbody tr').length===2`);

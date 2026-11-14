@@ -4,7 +4,7 @@ import { CommonModule } from '@angular/common';
 import { Api, ConsoleState, action, date, severity, localDate } from './core';
 import { TableComponent, Column, lastPageOffset } from './table.component';
 import { ModalComponent } from './modal.component';
-import { evidenceGroups, eventType } from './event-fields';
+import { endpoint, evidenceGroups, eventType } from './event-fields';
 import { ConnectionSummaryComponent } from './connection-summary.component';
 import { AttackMappingComponent } from './attack-mapping.component';
 import { mappingFromEvent, mappingFromMetadata, mappingFromRule } from './attack-mapping';
@@ -223,7 +223,7 @@ export class DetailsComponent {
  networkColumns:Column[]=[{key:'ts',label:'时间',kind:'time',width:180},{key:'type',label:'类型',kind:'eventType',width:110},{key:'app',label:'应用',width:100},{key:'summary',label:'网络事件摘要',kind:'eventSummary',width:300},{key:'src',label:'源地址',width:150},{key:'dst',label:'目的地址',width:150},{key:'sni',label:'TLS 服务器名称',width:180},{key:'dns',label:'查询域名',width:180}];
  constructor(public details:Details,public state:ConsoleState,private api:Api){}
  tabKey(event:KeyboardEvent,view:any,tab:string):void{const tabs=['network','alerts','signatures'];let index=tabs.indexOf(tab);if(event.key==='ArrowRight')index=(index+1)%3;else if(event.key==='ArrowLeft')index=(index+2)%3;else if(event.key==='Home')index=0;else if(event.key==='End')index=2;else return;event.preventDefault();view.tab=tabs[index];(event.currentTarget as HTMLElement).parentElement?.querySelectorAll<HTMLButtonElement>('button')[index].focus();}
- endpoint(ip:any,port:any):string{const host=String(ip||'—');return (host.includes(':')?'['+host+']':host)+(port!=null&&port!==''?':'+port:'');}
+ endpoint=endpoint;
  canInvestigate(row:any):boolean{return !!(row?.session_id||(row?.id?.startsWith('session:')));}
  async investigate(row:any):Promise<void>{
   if(this.investigating||!this.canInvestigate(row))return;

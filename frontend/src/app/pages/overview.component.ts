@@ -11,13 +11,18 @@ import { eventType } from '../event-fields';
  <div class="overview-filters" *ngIf="filters.length" aria-label="概览筛选"><span>当前筛选</span><button class="quiet" *ngFor="let filter of filters" (click)="removeFilter(filter.key)" [attr.aria-label]="'移除筛选 '+filter.label">{{filter.label}} ×</button><button class="quiet" (click)="clearFilters()">清除筛选</button></div>
  <p *ngIf="error" class="error" role="alert">{{error}}</p>
  <div *ngIf="!data && !error" class="overview-loading" role="status" aria-label="正在加载概览" aria-busy="true" data-testid="overview-loading"><svg class="overview-spinner" viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="13"/></svg></div>
- <ng-container *ngIf="data as d"><div class="stats-grid resource-summary"><h2>检测概况</h2>
-  <button class="stat-card alert" (click)="filterKind('alerts','检测告警')" [attr.aria-pressed]="hasKind('alerts')"><span>检测告警</span><strong data-testid="alerts-total">{{d.security?.alerts | number}}</strong></button>
-  <button class="stat-card critical" (click)="filterKind('high','高危告警')" [attr.aria-pressed]="hasKind('high')"><span>高危告警</span><strong data-testid="high-total">{{d.security?.high | number}}</strong></button>
-  <button class="stat-card blocked" (click)="filterKind('drops','阻断事件')" [attr.aria-pressed]="hasKind('drops')"><span>阻断事件</span><strong data-testid="drops-total">{{d.security?.drops | number}}</strong></button>
+ <ng-container *ngIf="data as d"><div class="stats-grid resource-summary overview-summary">
+  <header><h2>检测概况</h2><span *ngIf="d.range?.length===2" class="muted">统计时段 {{time(d.range[0])}} 至 {{time(d.range[1])}}</span></header>
+  <button class="stat-card alert" (click)="filterKind('alerts','检测告警')" title="筛选检测告警" [attr.aria-pressed]="hasKind('alerts')"><span>检测告警</span><strong data-testid="alerts-total">{{d.security?.alerts | number}}</strong></button>
+  <button class="stat-card critical" (click)="filterKind('high','高危告警')" title="筛选高危告警" [attr.aria-pressed]="hasKind('high')"><span>高危告警</span><strong data-testid="high-total">{{d.security?.high | number}}</strong></button>
+  <button class="stat-card blocked" (click)="filterKind('drops','阻断事件')" title="筛选阻断事件" [attr.aria-pressed]="hasKind('drops')"><span>阻断事件</span><strong data-testid="drops-total">{{d.security?.drops | number}}</strong></button>
   <div class="stat-card"><span>源 / 目的地址</span><strong>{{d.network?.source_count | number}} <em>/ {{d.network?.destination_count | number}}</em></strong></div></div>
   <div class="overview-grid"><section class="card trend"><header><h2>告警与阻断趋势</h2><div class="toolbar"><div class="legend"><span class="blue-dot"></span>告警 <span class="coral-dot"></span>阻断</div><button class="quiet" (click)="showTrendTable=!showTrendTable" aria-label="切换趋势图表格">{{showTrendTable?'图表':'表格'}}</button><button class="quiet" (click)="expandedChart=true" aria-label="放大告警与阻断趋势">放大</button></div></header><ndr-chart *ngIf="!showTrendTable" [points]="d.series || []" [viewport]="chartViewport" (pointOpen)="filterTrend($event)"/><ndr-table *ngIf="showTrendTable" id="trend-values" [columns]="trendColumns" [rows]="d.series || []" [fit]="true"/></section>
   <section class="card engine-card"><header><h2>检测引擎</h2><span class="badge" [class.good]="d.service?.state==='active'">{{d.service?.state==='active'?'运行中':d.service?.state}}</span></header><div class="throughput">{{d.rates?.mbps | number:'1.2-2'}} <small>Mbps</small></div><p class="muted">{{d.rates?.pps | number:'1.0-0'}} packets / sec</p><dl class="key-values"><dt>已载入文本特征</dt><dd>{{d.rules?.loaded | number}}</dd><dt>内存占用</dt><dd>{{memory(d.service?.memory)}}</dd><dt>运行时长</dt><dd>{{d.service?.uptime | number}} 秒</dd><dt>NFQUEUE 积压</dt><dd data-testid="queue-backlog">{{(d.queue?.queue_total | number) ?? "未读取"}}</dd><dt>累计队列溢出丢包</dt><dd>{{(d.queue?.kernel_drops | number) ?? "未读取"}}</dd><dt>累计用户态投递丢包</dt><dd>{{(d.queue?.user_drops | number) ?? "未读取"}}</dd></dl></section></div>
+  <section class="card">
+   <header><h2>最新日志</h2></header>
+   <ndr-table id="recent" [columns]="recentColumns" [rows]="resultsMatchFilters ? (d.recent || []).slice(0,10) : []" [busy]="filterPending" [empty]="resultsMatchFilters?'暂无日志':'无法读取当前筛选的日志'" [pagination]="false" [interactive]="true" (rowOpen)="details.event($event)"/>
+  </section>
   <ng-container *ngIf="d.network as n">
    <div class="section-heading visibility-heading"><h2>网络可见性</h2></div>
    <p [class.error]="!n.available" [class.muted]="n.available" [attr.role]="n.available?'status':'alert'" *ngIf="n.error && !networkRetrying(n)">{{n.error}}</p>
@@ -35,7 +40,6 @@ import { eventType } from '../event-fields';
    <div class="visibility-grid"><section class="card" *ngIf="!n.partial"><header><h2>高频连接源</h2></header><ndr-table id="network-sources" [columns]="sourceColumns" [rows]="n.sources || []" [pagination]="false" [fit]="true" [interactive]="true" (rowOpen)="filterConnectionSource($event)"/></section><section class="card"><header><h2>采集记录分布</h2><span class="muted">{{n.records | number}} 条记录</span></header><ndr-table id="network-types" [columns]="typeColumns" [rows]="n.event_types || []" [pagination]="false" [fit]="true" [interactive]="true" (rowOpen)="filterRecordType($event)"/><div class="capture-directions" *ngIf="!n.partial"><span>双向连接记录 <strong>{{n.bidirectional | number}}</strong></span><span>单向连接记录 <strong>{{n.one_way | number}}</strong></span></div></section></div>
    </ng-container>
    </ng-container>
-  <section class="card"><header><h2>最新日志</h2></header><ndr-table id="recent" [columns]="recentColumns" [rows]="filterPending ? [] : (d.recent || []).slice(0,10)" [busy]="filterPending" [pagination]="false" [interactive]="true" (rowOpen)="details.event($event)"/></section>
   <details class="card telemetry engine-counters"><summary>累计引擎计数</summary><dl class="counter-grid"><div><dt>放行包</dt><dd>{{d.ips?.accepted | number}}</dd></div><div><dt>阻断包</dt><dd>{{d.ips?.blocked | number}}</dd></div><div><dt>特征触发丢包</dt><dd>{{d.ips?.rule_drops | number}}</dd></div><div><dt>引擎丢包</dt><dd>{{d.ips?.engine_drops | number}}</dd></div></dl></details>
  <ndr-modal *ngIf="expandedChart" title="告警与阻断趋势" [wide]="true" (closed)="expandedChart=false"><div class="chart-expanded"><ndr-chart [points]="d.series || []" [viewport]="chartViewport" (pointOpen)="filterTrend($event)"/></div></ndr-modal>
  </ng-container>
@@ -50,7 +54,15 @@ import { eventType } from '../event-fields';
 export class OverviewComponent implements OnInit,OnDestroy {
  filters:{key:string;label:string;params:Record<string,string>}[]=[];private period?:{from:number;to:number};
  data:any;expandedChart=false;showTrendTable=false;error='';filterPending=false;showingPrevious=false;refreshing=false;private displayedSelection='';private live:LiveQuery;memory=bytes;time=date;chartViewport=new ChartViewport();
- recentColumns:Column[]=[{key:'ts',label:'时间',kind:'time',width:180},{key:'type',label:'类型',kind:'eventType',width:110},{key:'sig',label:'网络事件摘要',kind:'eventSummary',width:340},{key:'src',label:'源地址',kind:'mono',width:160},{key:'dst',label:'目的地址',kind:'mono',width:160},{key:'proto',label:'协议',width:90},{key:'action',label:'动作',kind:'action',width:100}];
+ recentColumns:Column[]=[
+  {key:'ts',label:'时间',kind:'time',width:154},
+  {key:'type',label:'类型',kind:'eventType',width:92},
+  {key:'sig',label:'网络事件摘要',kind:'eventSummary',width:225},
+  {key:'src',label:'源地址',kind:'mono',width:128},
+  {key:'dst',label:'目的地址',kind:'mono',width:128},
+  {key:'proto',label:'协议',width:58},
+  {key:'action',label:'动作',kind:'action',width:78}
+ ];
  tops=[{key:'signatures',title:'高频检测特征',field:'sid',table:false,columns:[{key:'sig',label:'特征',width:250},{key:'count',label:'次数',width:80}]},{key:'sources',title:'高频源地址',field:'src',table:false,columns:[{key:'ip',label:'地址',width:190},{key:'count',label:'次数',width:80}]},{key:'destinations',title:'高频目的地址',field:'dst',table:false,columns:[{key:'ip',label:'地址',width:190},{key:'count',label:'次数',width:80}]}];
  constructor(api:Api,public state:ConsoleState,public details:Details){
   const failed=(error:string)=>{this.error=error;this.filterPending=false;this.refreshing=false;this.state.viewReady('overview');};
@@ -90,6 +102,7 @@ export class OverviewComponent implements OnInit,OnDestroy {
   this.refresh();
  }
  private selectionKey():string{return JSON.stringify({filters:this.filters,period:this.period});}
+ get resultsMatchFilters():boolean{return this.displayedSelection===this.selectionKey();}
  filterKind(value:string,label:string):void{
   this.applyFilter('kind',label,['alerts','high','drops'].includes(value)?{detection:value}:value==='connection'?{connection:'1'}:{type:value});
  }
@@ -128,7 +141,7 @@ export class OverviewComponent implements OnInit,OnDestroy {
    selected['to']=String(this.period.to);
   }
   for(const filter of this.filters)Object.assign(selected,filter.params);
-  this.chartViewport.reset();this.showingPrevious=!!this.data;this.filterPending=this.data?this.displayedSelection!==this.selectionKey():this.filters.length>0;this.refreshing=true;
+  this.chartViewport.reset();this.showingPrevious=!!this.data;this.filterPending=this.data?!this.resultsMatchFilters:this.filters.length>0;this.refreshing=true;
   this.error='';this.live.start('/api/overview',{...selected,view:'panel'},'overview');
  }
  ngOnDestroy():void{

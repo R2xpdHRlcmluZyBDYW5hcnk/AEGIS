@@ -26,6 +26,12 @@ export function engineAction(value:any):string {
  return Object.hasOwn(engineActions,raw.toLowerCase())?engineActions[raw.toLowerCase()]+'（'+raw+'）':raw;
 }
 export function eventType(value:any):string{return eventTypes[String(value)] || String(value||'网络事件').toUpperCase();}
+export function endpoint(address:unknown,port:unknown):string {
+ const host=String(address??'');
+ if(!host)return '—';
+ if(port==null||port==='')return host;
+ return (host.includes(':')?'['+host+']':host)+':'+port;
+}
 export function connectionSummary(record:Record<string,any>):{text:string;state:string;details:string} {
  const failed=String(record.app||'').toLowerCase()==='failed';
  const label=('连接 '+((failed?record.proto:record.app)||record.proto||'')).trim();

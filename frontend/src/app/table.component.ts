@@ -2,10 +2,10 @@ import { CommonModule } from '@angular/common';
 import { Component, ElementRef, EventEmitter, HostListener, Input, OnChanges, OnDestroy, Output, SimpleChanges, ChangeDetectionStrategy, afterEveryRender } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { action, bytes, date, severity } from './core';
-import { engineAction, eventType } from './event-fields';
+import { endpoint, engineAction, eventType } from './event-fields';
 import { ConnectionSummaryComponent } from './connection-summary.component';
 import { RuleTargetComponent } from './rule-target.component';
-export interface Column {key:string;label:string;kind?:string;width?:number;}
+export interface Column {key:string;label:string;kind?:string;width?:number;portKey?:string;}
 export function lastPageOffset(total:number,size=50):number{return Math.floor(Math.max(0,total-1)/size)*size;}
 @Component({changeDetection:ChangeDetectionStrategy.Eager,selector:'ndr-table',standalone:true,imports:[CommonModule,FormsModule,ConnectionSummaryComponent,RuleTargetComponent],template:`
   <form class="table-tools" *ngIf="filterable" (ngSubmit)="submitFilter()"><label class="search"><span>⌕</span><input type="search" name="filter" autocomplete="off" data-1p-ignore="true" [attr.aria-label]="serverFilter&&label==='表格'?'搜索特征':label+'搜索'" [placeholder]="filterPlaceholder || '搜索完整列表…'" [ngModel]="query" (ngModelChange)="updateFilter($event)"></label><button type="submit" [disabled]="busy">搜索</button></form>
@@ -16,12 +16,16 @@ export function lastPageOffset(total:number,size=50):number{return Math.floor(Ma
       <th *ngFor="let c of columns;let i=index;trackBy:trackColumn">{{c.label}}<span class="resize" role="separator" tabindex="0" aria-orientation="vertical" [attr.aria-label]="'调整'+c.label+'列宽'" [attr.aria-valuenow]="widths[i] || c.width || 150" (pointerdown)="begin($event,i)" (keydown)="resizeKey($event,i)" (dblclick)="resetWidths()"></span></th><th *ngIf="interactive && showDetails" class="row-command">详情</th></tr></thead>
     <tbody><tr *ngFor="let row of visible;trackBy:track" [class.selected]="selected.has(key(row))" [class.clickable]="interactive" (click)="activate($event,row)" (keydown)="rowKey($event,row)" [attr.tabindex]="interactive?0:null">
       <td *ngIf="selectable" class="check" (click)="$event.stopPropagation()"><input type="checkbox" [attr.aria-label]="'选择 '+key(row)" [disabled]="row._disabled" [checked]="selected.has(key(row))" (change)="toggle(row,$event)"></td>
-      <td *ngFor="let c of columns;trackBy:trackColumn" [class.mono]="c.kind==='mono'" [attr.title]="c.kind==='eventSummary'&&['flow','session'].includes(row.type)?null:format(row[c.key],c.kind)"><ndr-connection-summary *ngIf="c.kind==='eventSummary'&&['flow','session'].includes(row.type);else plainCell" [record]="row"/><ng-template #plainCell><ng-container [ngSwitch]="c.kind"><strong *ngSwitchCase="'source'" class="rule-source">{{format(row[c.key])}}</strong><ndr-rule-target *ngSwitchCase="'scope'" [name]="row.targetName || row[c.key]" [source]="row.targetSource || ''"/><ng-container *ngSwitchCase="'origins'"><ndr-rule-target *ngFor="let origin of row.origins" [name]="origin.group" [source]="origin.source"/> </ng-container><span *ngSwitchDefault [class.badge]="c.kind==='severity'||c.kind==='action'||c.kind==='status'" [class.danger]="c.kind==='severity'&&row[c.key]===1 || c.kind==='action'&&format(row[c.key],c.kind)==='已阻断'">{{format(row[c.key],c.kind)}}</span></ng-container></ng-template></td><td *ngIf="interactive && showDetails" class="row-command"><button class="text-button" aria-label="查看详情" (click)="$event.stopPropagation();activate($event,row)">查看 ↗</button></td></tr>
+      <ng-container *ngFor="let c of columns;trackBy:trackColumn">
+        @let value = c.portKey ? endpoint(row[c.key],row[c.portKey]) : format(row[c.key],c.kind);
+        <td [class.mono]="c.kind==='mono'" [attr.title]="c.kind==='eventSummary'&&['flow','session'].includes(row.type)?null:value"><ndr-connection-summary *ngIf="c.kind==='eventSummary'&&['flow','session'].includes(row.type);else plainCell" [record]="row"/><ng-template #plainCell><ng-container [ngSwitch]="c.kind"><strong *ngSwitchCase="'source'" class="rule-source">{{value}}</strong><ndr-rule-target *ngSwitchCase="'scope'" [name]="row.targetName || row[c.key]" [source]="row.targetSource || ''"/><ng-container *ngSwitchCase="'origins'"><ndr-rule-target *ngFor="let origin of row.origins" [name]="origin.group" [source]="origin.source"/> </ng-container><span *ngSwitchDefault [class.badge]="c.kind==='severity'||c.kind==='action'||c.kind==='status'" [class.danger]="c.kind==='severity'&&row[c.key]===1 || c.kind==='action'&&value==='已阻断'">{{value}}</span></ng-container></ng-template></td>
+      </ng-container><td *ngIf="interactive && showDetails" class="row-command"><button class="text-button" aria-label="查看详情" (click)="$event.stopPropagation();activate($event,row)">查看 ↗</button></td></tr>
       <tr *ngIf="!visible.length"><td [attr.colspan]="columns.length+(selectable?1:0)+(interactive&&showDetails?1:0)" class="empty">{{busy?'正在加载…':empty}}</td></tr></tbody>
   </table></div></div>
   <div class="pager" *ngIf="pagination"><span>{{busy&&!count?'正在加载…':(count | number)+' 条 每页 '+size+' 条'}}</span><div><button class="quiet" [disabled]="current===0 || busy" (click)="move(-1)">← 上一页</button><span>{{busy&&!count?'—':(current+1)+' / '+pageCount}}</span><button class="quiet" [disabled]="current+1>=pageCount || busy" (click)="move(1)">下一页 →</button></div></div>
 `})
 export class TableComponent implements OnChanges,OnDestroy {
+  endpoint=endpoint;
   @Input() serverFilter=false;@Input() searchValue:string|null=null;@Output() searchValueChange=new EventEmitter<string>();@Output() searchRequested=new EventEmitter<string>();@Input() fit=false;@Input() id='table';@Input() label='表格';@Input() columns:Column[]=[];@Input() rows:any[]=[];
   @Input() filterPlaceholder='';@Input() filterMatch?: (query:string)=>((row:any)=>boolean)|undefined;
   @Input() selectable=false;@Input() interactive=false;@Input() showDetails=true;@Input() filterable=false;@Input() pagination=true;@Input() busy=false;
